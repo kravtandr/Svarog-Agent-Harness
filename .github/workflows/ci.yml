@@ -31,3 +31,6 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+
+      - name: Evals (MVP criteria §26)
+        run: uv run pytest evals

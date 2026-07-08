@@ -1,8 +1,8 @@
 """Точка входа CLI `svarog` (§10.1).
 
-Команды init/chat/skills добавляются по мере milestones (см.
-docs/first-issues.md); после M2 доступны run, resume, traces list/show,
-approvals list/approve/deny, version.
+Доступные команды: init, run, resume, chat, push, version;
+traces list/show, approvals list/approve/deny, skills list/check,
+memory show/flush, secrets list/set.
 """
 
 import asyncio
