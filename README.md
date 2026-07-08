@@ -74,7 +74,16 @@ uv run svarog version
 Проще всего развернуть agent-home одной командой:
 
 ```bash
-uv run svarog init ~/agent-home   # skills, memory (Flow A), policies, .gitignore для секретов
+uv run svarog init                # интерактивно: путь, модель, base_url, ключ
+```
+
+`init` без флагов спрашивает каталог agent-home (по умолчанию `./agent-home` внутри проекта), имя модели, `base_url` endpoint и API-ключ. Он создаёт skills, memory (Flow A), policies, `.gitignore` для секретов; если agent-home лежит внутри проекта — добавляет его в `.gitignore` проекта (данные агента и секреты не попадут во внешний репозиторий). Введённый ключ **не** записывается в `svarog.yaml` — он сохраняется в SecretStore, а в конфиг попадает только имя (`api_key_ref`).
+
+Без интерактива всё задаётся флагами:
+
+```bash
+uv run svarog init ./agent-home --no-input \
+  --model qwen3-coder --base-url http://localhost:8000/v1 --api-key sk-…
 ```
 
 Либо создайте `svarog.yaml` в рабочей директории вручную (полная схема — §13 [TASK.md](TASK.md)):
@@ -89,6 +98,34 @@ models:
       model: qwen3-coder
       # api_key_ref: PROVIDER_API_KEY      # имя env-переменной с ключом, если нужен
 ```
+
+### Настройка API-ключа
+
+Ключ модели **никогда не хранится в `svarog.yaml`** (схема провайдера строгая — `extra="forbid"`, поля под значение ключа нет). В конфиге указывается лишь имя секрета через `api_key_ref`, а значение резолвится на execution-слое через SecretStore (ADR-0006). Для локальных серверов (vLLM, llama.cpp) ключ не нужен — оставьте `api_key_ref` закомментированным, подставится заглушка.
+
+```yaml
+models:
+  providers:
+    local:
+      base_url: https://openrouter.ai/api/v1
+      model: qwen3-coder
+      api_key_ref: PROVIDER_API_KEY   # имя секрета, не сам ключ
+```
+
+Само значение задаётся одним из двух способов (первым срабатывает файл, затем env):
+
+```bash
+# 1) файл секретов (FileSecretStore, ~/.svarog/secrets.json, права 0600)
+uv run svarog secrets set PROVIDER_API_KEY      # спросит значение, не покажет в истории
+uv run svarog secrets list                      # только имена, без значений
+
+# 2) переменная окружения (EnvSecretStore) — имя должно совпадать с api_key_ref
+export PROVIDER_API_KEY="sk-…"
+```
+
+> `.env` **не подхватывается автоматически** (нет `load_dotenv`). Если держите ключ в `.env`, подгрузите его в окружение вручную: `set -a; source .env; set +a`. Файлы `.env`, `*.key`, `.svarog/secrets*` и т.п. уже в `.gitignore` (denylist ADR-0006) и отвергаются git-flow до коммита.
+
+Имя переменной произвольно — важно лишь, чтобы `api_key_ref` совпадал с реальным именем в файле/окружении. Если `api_key_ref` задан, а секрет не найден, run падает с `ApiKeyError` и подсказкой.
 
 Затем:
 

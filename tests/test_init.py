@@ -73,3 +73,52 @@ def test_init_command_creates_home_and_memory_repo(
     assert (home / "svarog.yaml").exists()
     # memory-репозиторий инициализирован (Flow A).
     assert (home / "memory" / ".git").is_dir()
+
+
+def test_scaffold_writes_model_endpoint(tmp_path: Path) -> None:
+    scaffold_agent_home(
+        tmp_path, model="qwen2.5", base_url="https://openrouter.ai/api/v1", api_key_ref="MY_KEY"
+    )
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "model: qwen2.5" in yaml
+    assert "base_url: https://openrouter.ai/api/v1" in yaml
+    # активный api_key_ref (не закомментирован).
+    assert "\n      api_key_ref: MY_KEY" in yaml
+
+
+def test_scaffold_config_omits_key_ref_by_default(tmp_path: Path) -> None:
+    scaffold_agent_home(tmp_path)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    # без ключа строка остаётся закомментированной.
+    assert "# api_key_ref:" in yaml
+
+
+def test_init_stores_api_key_outside_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        ["init", str(home), "--no-input", "--api-key", "sk-secret-xyz", "--model", "m"],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    # ключ не попал в конфиг, только ссылка.
+    assert "sk-secret-xyz" not in yaml
+    assert "api_key_ref: PROVIDER_API_KEY" in yaml
+    # значение сохранено в secret store (~/.svarog/secrets.json).
+    secrets = (tmp_path / "fakehome" / ".svarog" / "secrets.json").read_text(encoding="utf-8")
+    assert "sk-secret-xyz" in secrets
+
+
+def test_init_adds_home_to_project_gitignore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli_main.app, ["init", "agent-home", "--no-input"])
+    assert result.exit_code == 0, result.output
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "agent-home/" in gitignore.splitlines()

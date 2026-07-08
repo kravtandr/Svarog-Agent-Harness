@@ -30,16 +30,27 @@ _README_MD = """\
 Скиллы (`skills/`) — Flow B: изменения через proposals (ADR-0003).
 """
 
-_CONFIG_YAML = """\
+DEFAULT_MODEL = "qwen3-coder"
+DEFAULT_BASE_URL = "http://localhost:8000/v1"
+DEFAULT_API_KEY_REF = "PROVIDER_API_KEY"
+
+
+def _render_config_yaml(model: str, base_url: str, api_key_ref: str | None) -> str:
+    """Собрать svarog.yaml под endpoint (значение ключа в конфиг не пишется, ADR-0006)."""
+    if api_key_ref:
+        key_line = f"      api_key_ref: {api_key_ref}   # имя секрета в SecretStore (не сам ключ)"
+    else:
+        key_line = f"      # api_key_ref: {DEFAULT_API_KEY_REF}   # имя env-переменной с ключом"
+    return f"""\
 # Конфигурация Svarog (§13). Отредактируйте секцию models под свой endpoint.
 models:
   default: local
   providers:
     local:
       type: openai-compatible
-      base_url: http://localhost:8000/v1   # vLLM, llama.cpp, LiteLLM, OpenRouter…
-      model: qwen3-coder
-      # api_key_ref: PROVIDER_API_KEY       # имя env-переменной с ключом, если нужен
+      base_url: {base_url}   # vLLM, llama.cpp, LiteLLM, OpenRouter…
+      model: {model}
+{key_line}
 
 runtime:
   autonomy: yolo
@@ -110,12 +121,24 @@ def _write(path: Path, content: str, result: ScaffoldResult, *, force: bool) -> 
     result.created.append(path)
 
 
-def scaffold_agent_home(target: Path, *, force: bool = False) -> ScaffoldResult:
-    """Создать структуру agent-home; существующие файлы не трогаются без force."""
+def scaffold_agent_home(
+    target: Path,
+    *,
+    force: bool = False,
+    model: str = DEFAULT_MODEL,
+    base_url: str = DEFAULT_BASE_URL,
+    api_key_ref: str | None = None,
+) -> ScaffoldResult:
+    """Создать структуру agent-home; существующие файлы не трогаются без force.
+
+    model/base_url/api_key_ref подставляются в секцию models сгенерированного
+    svarog.yaml. Значение ключа в конфиг не пишется — только имя (api_key_ref).
+    """
     result = ScaffoldResult(created=[], skipped=[])
+    config_yaml = _render_config_yaml(model, base_url, api_key_ref)
     _write(target / "AGENTS.md", _AGENTS_MD, result, force=force)
     _write(target / "README.md", _README_MD, result, force=force)
-    _write(target / "svarog.yaml", _CONFIG_YAML, result, force=force)
+    _write(target / "svarog.yaml", config_yaml, result, force=force)
     _write(target / ".gitignore", gitignore_block(), result, force=force)
     _write(target / "policies" / "security.yaml", _SECURITY_POLICY, result, force=force)
     _write(target / "skills" / "example-note" / "SKILL.md", _EXAMPLE_SKILL, result, force=force)

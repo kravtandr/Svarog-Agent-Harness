@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
-from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.config.schema import AutonomyMode, SecretsConfig, SvarogConfig
 from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
@@ -31,7 +31,12 @@ from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.sandbox import SandboxError
-from svarog_harness.scaffold import scaffold_agent_home
+from svarog_harness.scaffold import (
+    DEFAULT_API_KEY_REF,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    scaffold_agent_home,
+)
 from svarog_harness.secrets import FileSecretStore, default_secret_store
 from svarog_harness.skills import scan_skills
 from svarog_harness.skills.curator import (
@@ -89,20 +94,96 @@ def version() -> None:
     console.print(f"svarog-harness {__version__}")
 
 
+def _ensure_gitignored(target: Path) -> Path | None:
+    """Добавить agent-home в .gitignore внешнего проекта, если он лежит внутри cwd.
+
+    Данные агента (workspaces, artifacts, секреты) не должны попадать во внешний
+    репозиторий проекта. Возвращает путь обновлённого .gitignore или None.
+    """
+    cwd = Path.cwd().resolve()
+    try:
+        rel = target.relative_to(cwd)
+    except ValueError:
+        return None  # agent-home вне проекта (например, ~/agent-home) — нечего игнорировать
+    if rel == Path():
+        return None  # agent-home совпадает с корнем проекта
+    entry = rel.as_posix().rstrip("/") + "/"
+    gitignore = cwd / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if entry in existing.splitlines():
+        return gitignore
+    block = existing
+    if block and not block.endswith("\n"):
+        block += "\n"
+    block += f"\n# Svarog agent-home (данные агента, секреты) — не коммитить\n{entry}\n"
+    gitignore.write_text(block, encoding="utf-8")
+    return gitignore
+
+
 @app.command()
 def init(
     path: Annotated[
-        Path | None, typer.Argument(help="Каталог agent-home (по умолчанию текущий)")
+        Path | None, typer.Argument(help="Каталог agent-home (по умолчанию ./agent-home)")
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Перезаписать существующие файлы")] = False,
+    no_input: Annotated[
+        bool,
+        typer.Option("--no-input", "-y", help="Не задавать вопросов, взять значения по умолчанию"),
+    ] = False,
+    model: Annotated[str | None, typer.Option(help="Имя модели")] = None,
+    base_url: Annotated[
+        str | None, typer.Option("--base-url", help="Base URL OpenAI-совместимого endpoint")
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="API-ключ (сохраняется в secret store, не в svarog.yaml)"),
+    ] = None,
 ) -> None:
-    """Создать agent-home: skills, memory (Flow A), policies, .gitignore (§8)."""
-    target = (path or Path.cwd()).resolve()
-    result = scaffold_agent_home(target, force=force)
+    """Создать agent-home: skills, memory (Flow A), policies, .gitignore (§8).
+
+    Без --no-input задаёт интерактивные вопросы (путь, модель, base_url, ключ).
+    """
+    interactive = not no_input and sys.stdin.isatty()
+
+    if path is None and interactive:
+        path = Path(typer.prompt("Каталог agent-home", default="./agent-home"))
+    target = (path or Path.cwd() / "agent-home").expanduser().resolve()
+
+    if interactive:
+        model = model or typer.prompt("Модель", default=DEFAULT_MODEL)
+        base_url = base_url or typer.prompt("Base URL endpoint", default=DEFAULT_BASE_URL)
+        if api_key is None:
+            api_key = (
+                typer.prompt(
+                    "API-ключ (Enter — пропустить; для локальной модели не нужен)",
+                    default="",
+                    hide_input=True,
+                    show_default=False,
+                )
+                or None
+            )
+    model = model or DEFAULT_MODEL
+    base_url = base_url or DEFAULT_BASE_URL
+    api_key_ref = DEFAULT_API_KEY_REF if api_key else None
+
+    result = scaffold_agent_home(
+        target, force=force, model=model, base_url=base_url, api_key_ref=api_key_ref
+    )
     for created in result.created:
         console.print(f"[green]+[/green] {created.relative_to(target)}")
     for skipped in result.skipped:
         console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
+
+    if api_key and api_key_ref:
+        secrets_path = SecretsConfig().path
+        assert secrets_path is not None  # дефолт схемы всегда задан
+        store = FileSecretStore(secrets_path.expanduser())
+        store.set(api_key_ref, api_key)
+        console.print(f"[green]ключ сохранён[/green] в {secrets_path} (ref: {api_key_ref})")
+
+    ignored = _ensure_gitignored(target)
+    if ignored is not None:
+        console.print(f"[dim]agent-home добавлен в {ignored}[/dim]")
 
     async def init_git_subrepo(path: Path, message: str) -> None:
         repo = GitRepo(path)
@@ -119,9 +200,14 @@ def init(
         await init_git_subrepo(target / "skills", "svarog init: skills repo")
 
     asyncio.run(init_subrepos())
+    next_step = (
+        'запустите `svarog run "…"`'
+        if api_key or api_key_ref is None
+        else f"добавьте ключ: `svarog secrets set {api_key_ref}`"
+    )
     console.print(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
-        f'[dim]отредактируйте svarog.yaml (endpoint модели) и запустите `svarog run "…"`[/dim]'
+        f"[dim]модель {model} @ {base_url}; {next_step}[/dim]"
     )
 
 
