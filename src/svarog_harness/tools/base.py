@@ -68,8 +68,9 @@ class Tool[ArgsT: BaseModel](ABC):
     name: ClassVar[str]
     description: ClassVar[str]
     risk_level: ClassVar[RiskLevel]
-    timeout_sec: ClassVar[float] = 60.0
     sandbox_requirement: ClassVar[SandboxRequirement] = SandboxRequirement.NONE
+    # Не ClassVar: tool может переопределить timeout на инстансе (bash берет его из конфига).
+    timeout_sec: float = 60.0
 
     # Параметризованный тип нельзя объявить ClassVar — задается в подклассах на уровне класса.
     args_model: type[ArgsT]
