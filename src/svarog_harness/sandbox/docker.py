@@ -55,11 +55,19 @@ class DockerEnvironment(ExecutionEnvironment):
     """
 
     def __init__(
-        self, workspace: Path, cfg: SandboxConfig, *, skills_dir: Path | None = None
+        self,
+        workspace: Path,
+        cfg: SandboxConfig,
+        *,
+        skills_dir: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self.workspace = workspace
         self._cfg = cfg
         self._skills_dir = skills_dir
+        # Явно выданные секреты в окружение контейнера (ADR-0006); слой 1 не даёт
+        # им утечь по сети (--network none) — контейнер изолирован.
+        self._env = env or {}
         self._name = f"svarog-{uuid.uuid4().hex[:12]}"
         self._docker: str | None = None
         self._container_id: str | None = None
@@ -96,6 +104,8 @@ class DockerEnvironment(ExecutionEnvironment):
             "-w",
             "/workspace",
         ]
+        for key in sorted(self._env):
+            args += ["-e", f"{key}={self._env[key]}"]
         user = _host_user_spec()
         if user is not None:
             args += ["--user", user]

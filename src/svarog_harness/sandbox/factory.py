@@ -9,8 +9,12 @@ from svarog_harness.sandbox.local import LocalEnvironment
 
 
 def create_environment(
-    cfg: SandboxConfig, workspace: Path, *, skills_dir: Path | None = None
+    cfg: SandboxConfig,
+    workspace: Path,
+    *,
+    skills_dir: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> ExecutionEnvironment:
     if cfg.type == "local-trusted":
-        return LocalEnvironment(workspace)
-    return DockerEnvironment(workspace, cfg, skills_dir=skills_dir)
+        return LocalEnvironment(workspace, env=env)
+    return DockerEnvironment(workspace, cfg, skills_dir=skills_dir, env=env)

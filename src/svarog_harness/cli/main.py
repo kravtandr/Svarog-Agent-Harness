@@ -35,6 +35,12 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
 from svarog_harness.scaffold import scaffold_agent_home
+from svarog_harness.secrets import (
+    FileSecretStore,
+    SecretStore,
+    default_secret_store,
+    injected_env,
+)
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, RunState
@@ -208,12 +214,17 @@ async def _recover_and_warn(recorder: TraceRecorder) -> None:
         )
 
 
+def _secret_store(cfg: SvarogConfig) -> SecretStore:
+    return default_secret_store(cfg.secrets.path)
+
+
 def _build_loop(
     cfg: SvarogConfig,
     workspace: Path,
     recorder: TraceRecorder,
     environment: ExecutionEnvironment,
     autonomy: AutonomyMode,
+    store: SecretStore,
 ) -> AgentLoop:
     # Режим автономии и policy-правила фиксируются здесь, при старте run,
     # и не перечитываются во время исполнения (ADR-0010).
@@ -238,7 +249,7 @@ def _build_loop(
     skill_load_sink: list[tuple[str, str | None]] = []
     memory_sink: list[dict[str, object]] = []
     return AgentLoop(
-        default_provider(cfg.models),
+        default_provider(cfg.models, store),
         _build_registry(
             workspace,
             environment,
@@ -258,6 +269,7 @@ def _build_loop(
         skill_load_sink=skill_load_sink,
         memory_sink=memory_sink,
         workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
+        secret_values=store.values(),
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -282,8 +294,12 @@ async def _run_task(
     if prep.note:
         console.print(f"[yellow]{prep.note}[/yellow]")
 
+    store = _secret_store(cfg)
     environment = create_environment(
-        cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(cfg, workspace)
+        cfg.sandbox,
+        workspace,
+        skills_dir=_first_existing_skills_dir(cfg, workspace),
+        env=injected_env(store, cfg.secrets.inject),  # только явно выданные секреты (§12)
     )
     await environment.start()
     try:
@@ -291,7 +307,7 @@ async def _run_task(
         async def action(db: AsyncSession) -> RunOutcome:
             recorder = TraceRecorder(db)
             await _recover_and_warn(recorder)
-            loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
+            loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
             outcome = await loop.run(task, autonomy)
             await _drain_memory(cfg, db)
             await _autocommit_workspace(cfg, flow, prep, task, outcome)
@@ -350,13 +366,17 @@ async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
         # runtime/sandbox-настройки берутся из конфига проекта workspace,
         # режим автономии — заморожен в run (ADR-0010).
         run_cfg = load_config(project_dir=workspace)
+        store = _secret_store(run_cfg)
         environment = create_environment(
-            run_cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(run_cfg, workspace)
+            run_cfg.sandbox,
+            workspace,
+            skills_dir=_first_existing_skills_dir(run_cfg, workspace),
+            env=injected_env(store, run_cfg.secrets.inject),
         )
         await environment.start()
         try:
             loop = _build_loop(
-                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy)
+                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy), store
             )
             return await loop.resume(run, state)
         finally:
@@ -707,3 +727,36 @@ def push(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]push выполнен[/green]\n{result}")
+
+
+secrets_app = typer.Typer(
+    help="SecretStore: имена секретов (значения не показываются).", no_args_is_help=True
+)
+app.add_typer(secrets_app, name="secrets")
+
+
+@secrets_app.command("list")
+def secrets_list() -> None:
+    """Показать имена секретов из файла store (значения не раскрываются)."""
+    cfg = _load_config_or_exit()
+    names = default_secret_store(cfg.secrets.path).names()
+    if not names:
+        console.print("секретов в файле store нет (env-секреты по именам не перечисляются)")
+        return
+    for name in names:
+        console.print(name)
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: Annotated[str, typer.Argument(help="Имя секрета (например PROVIDER_API_KEY)")],
+    value: Annotated[str, typer.Option("--value", prompt=True, hide_input=True, help="Значение")],
+) -> None:
+    """Записать секрет в файл store (права 0600). Значение вводится скрыто."""
+    cfg = _load_config_or_exit()
+    if cfg.secrets.path is None:
+        console.print("[red]secrets.path не задан в конфигурации[/red]")
+        raise typer.Exit(code=1)
+    store = FileSecretStore(cfg.secrets.path.expanduser())
+    store.set(name, value)
+    console.print(f"[green]секрет '{name}' сохранён[/green] в {cfg.secrets.path}")
