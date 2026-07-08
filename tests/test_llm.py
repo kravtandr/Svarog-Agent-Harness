@@ -1,0 +1,168 @@
+"""Тесты ModelProvider: сборка streaming-ответа, tool calls, токены, стоимость."""
+
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+from openai import AsyncOpenAI
+
+from svarog_harness.config.schema import ProviderConfig
+from svarog_harness.llm.openai_compatible import (
+    ApiKeyError,
+    OpenAICompatibleProvider,
+    resolve_api_key,
+)
+from svarog_harness.llm.provider import ChatMessage, ToolCallRequest, ToolDefinition
+
+
+def _chunk(
+    *,
+    content: str | None = None,
+    tool_calls: list[Any] | None = None,
+    finish_reason: str | None = None,
+    usage: Any | None = None,
+    choices: bool = True,
+) -> Any:
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice] if choices else [], usage=usage)
+
+
+def _tc_delta(index: int, *, call_id: str = "", name: str = "", arguments: str = "") -> Any:
+    function = SimpleNamespace(name=name, arguments=arguments)
+    return SimpleNamespace(index=index, id=call_id, function=function)
+
+
+class _FakeStream:
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = chunks
+
+    def __aiter__(self) -> "_FakeStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+class _FakeClient:
+    """Дублирует client.chat.completions.create и запоминает kwargs вызова."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+        async def create(**kwargs: Any) -> _FakeStream:
+            self.kwargs = kwargs
+            return _FakeStream(chunks)
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+
+def _provider(
+    chunks: list[Any], **cfg_overrides: Any
+) -> tuple[OpenAICompatibleProvider, _FakeClient]:
+    cfg = ProviderConfig(base_url="http://localhost:8000/v1", model="test-model", **cfg_overrides)
+    client = _FakeClient(chunks)
+    return OpenAICompatibleProvider(cfg, client=cast(AsyncOpenAI, client)), client
+
+
+async def test_streams_text_and_reports_usage() -> None:
+    usage = SimpleNamespace(prompt_tokens=100, completion_tokens=20)
+    provider, client = _provider(
+        [
+            _chunk(content="Hel"),
+            _chunk(content="lo", finish_reason="stop"),
+            _chunk(usage=usage, choices=False),
+        ]
+    )
+    deltas: list[str] = []
+    result = await provider.complete(
+        [ChatMessage(role="user", content="hi")], [], on_text_delta=deltas.append
+    )
+    assert result.content == "Hello"
+    assert deltas == ["Hel", "lo"]
+    assert result.usage.prompt_tokens == 100
+    assert result.usage.total_tokens == 120
+    assert result.finish_reason == "stop"
+    assert client.kwargs["stream"] is True
+    assert client.kwargs["model"] == "test-model"
+
+
+async def test_assembles_tool_calls_from_deltas() -> None:
+    provider, client = _provider(
+        [
+            _chunk(tool_calls=[_tc_delta(0, call_id="call_1", name="read_file", arguments='{"pa')]),
+            _chunk(tool_calls=[_tc_delta(0, arguments='th": "a.txt"}')]),
+            _chunk(finish_reason="tool_calls"),
+        ]
+    )
+    tool = ToolDefinition(name="read_file", description="d", input_schema={"type": "object"})
+    result = await provider.complete([ChatMessage(role="user", content="go")], [tool])
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call.id == "call_1"
+    assert call.name == "read_file"
+    assert call.parse_arguments() == {"path": "a.txt"}
+    assert client.kwargs["tools"][0]["function"]["name"] == "read_file"
+
+
+async def test_estimates_tokens_when_usage_missing() -> None:
+    provider, _ = _provider([_chunk(content="x" * 40, finish_reason="stop")])
+    result = await provider.complete([ChatMessage(role="user", content="y" * 400)], [])
+    assert result.usage.completion_tokens == 10
+    assert result.usage.prompt_tokens == 100
+
+
+async def test_computes_cost_from_configured_prices() -> None:
+    usage = SimpleNamespace(prompt_tokens=1_000_000, completion_tokens=500_000)
+    provider, _ = _provider(
+        [_chunk(content="ok", finish_reason="stop"), _chunk(usage=usage, choices=False)],
+        input_usd_per_mtok=3.0,
+        output_usd_per_mtok=15.0,
+    )
+    result = await provider.complete([ChatMessage(role="user", content="hi")], [])
+    assert result.cost_usd == pytest.approx(3.0 + 7.5)
+
+
+async def test_serializes_assistant_tool_history() -> None:
+    provider, client = _provider([_chunk(content="done", finish_reason="stop")])
+    call = ToolCallRequest(id="call_1", name="bash", arguments_json='{"command": "ls"}')
+    messages = [
+        ChatMessage(role="assistant", content="", tool_calls=(call,)),
+        ChatMessage(role="tool", content="file.txt", tool_call_id="call_1"),
+    ]
+    await provider.complete(messages, [])
+    sent = client.kwargs["messages"]
+    assert sent[0]["tool_calls"][0]["function"]["name"] == "bash"
+    assert sent[1]["tool_call_id"] == "call_1"
+
+
+def test_parse_arguments_rejects_invalid_json() -> None:
+    call = ToolCallRequest(id="1", name="bash", arguments_json="{broken")
+    with pytest.raises(ValueError, match="валидным JSON"):
+        call.parse_arguments()
+
+
+def test_parse_arguments_rejects_non_object() -> None:
+    call = ToolCallRequest(id="1", name="bash", arguments_json='["list"]')
+    with pytest.raises(ValueError, match="JSON-объектом"):
+        call.parse_arguments()
+
+
+def test_resolve_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = ProviderConfig(base_url="u", model="m", api_key_ref="TEST_SVAROG_KEY")
+    monkeypatch.setenv("TEST_SVAROG_KEY", "sk-value")
+    assert resolve_api_key(cfg) == "sk-value"
+
+
+def test_resolve_api_key_missing_ref_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = ProviderConfig(base_url="u", model="m", api_key_ref="TEST_SVAROG_KEY")
+    monkeypatch.delenv("TEST_SVAROG_KEY", raising=False)
+    with pytest.raises(ApiKeyError, match="TEST_SVAROG_KEY"):
+        resolve_api_key(cfg)
+
+
+def test_resolve_api_key_defaults_to_stub() -> None:
+    cfg = ProviderConfig(base_url="u", model="m")
+    assert resolve_api_key(cfg) == "not-needed"

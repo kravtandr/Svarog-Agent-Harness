@@ -23,6 +23,31 @@ uv run svarog version
 
 Требования: Python 3.12+ (uv поставит сам), [uv](https://docs.astral.sh/uv/).
 
+## Быстрый старт
+
+Создайте `svarog.yaml` в рабочей директории (полная схема — §13 [TASK.md](TASK.md)):
+
+```yaml
+models:
+  default: local-qwen
+  providers:
+    local-qwen:
+      type: openai-compatible
+      base_url: http://localhost:8000/v1   # vLLM, llama.cpp, LiteLLM, OpenRouter…
+      model: qwen3-coder
+      # api_key_ref: PROVIDER_API_KEY      # имя env-переменной с ключом, если нужен
+```
+
+Затем:
+
+```bash
+uv run svarog run "создай hello.py, который печатает время" # выполнить задачу
+uv run svarog traces list                                   # последние runs
+uv run svarog traces show <run-id>                          # полный trace run'а
+```
+
+В M1 команды выполняются в режиме local-trusted (без изоляции); Docker sandbox и policy engine — M2 (см. backlog).
+
 ## Документация
 
 | Документ | Содержание |

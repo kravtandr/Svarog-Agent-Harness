@@ -29,7 +29,13 @@ class ProviderConfig(StrictModel):
     base_url: str
     model: str
     # Именованная ссылка на секрет в SecretStore, не сам ключ (ADR-0006).
+    # До появления SecretStore (M4) разрешается как имя env-переменной.
     api_key_ref: str | None = None
+    # Цены за миллион токенов — для учета стоимости run; 0 = локальная модель.
+    input_usd_per_mtok: float = Field(default=0.0, ge=0)
+    output_usd_per_mtok: float = Field(default=0.0, ge=0)
+    timeout_sec: float = Field(default=120.0, gt=0)
+    max_retries: int = Field(default=2, ge=0)
 
 
 class ModelsConfig(StrictModel):
@@ -94,6 +100,11 @@ class SkillsConfig(StrictModel):
     auto_load_full_content: bool = False
 
 
+class StorageConfig(StrictModel):
+    # SQLite по умолчанию (ADR-0007); Postgres — в server-режимах пост-MVP.
+    db_path: Path = Path("~/.svarog/svarog.db")
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -124,6 +135,7 @@ class SvarogConfig(BaseSettings):
     git: GitConfig = Field(default_factory=GitConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
 
     @classmethod
     def settings_customise_sources(
