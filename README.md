@@ -2,7 +2,16 @@
 
 **Svarog** — open-source, self-hosted, Git-native runtime для ИИ-агентов: скиллы, sandboxed execution, Git-память, refuel loops, approval policies и полный audit trace. Это платформа для сборки агентов, а не готовый агент и не workflow-фреймворк.
 
-> Статус: активная разработка, pre-alpha. API нестабилен.
+> Статус: **MVP собран** (ADR-0008) + первое расширение M5 (внешние интерфейсы, self-improvement). Pre-alpha, API ещё может меняться.
+
+## Что готово
+
+Все 29 issue из [backlog](docs/first-issues.md) (M0–M5) закрыты:
+
+* **MVP (M0–M4)** — CLI-срез: agent loop как resumable state machine, Docker sandbox, Policy Engine с режимами автономии, три Git-flow (память/скиллы/код), skills с progressive disclosure, secret store + redaction, детерминированный verifier, refuel, полный trace в SQLite. Критерии §26 покрыты eval-сценариями в CI.
+* **M5 (пост-MVP)** — внешние интерфейсы и автоматизация улучшения: REST/WebSocket API и Telegram-бот (оба с асинхронным approval), автоматизированный skill governance (proposals, Flow B), двухслойный Skill Curator (механический pruning + LLM-консолидация), MCP-интеграция.
+
+Что дальше — см. [Дорожная карта](#дорожная-карта).
 
 ## Ключевые идеи
 
@@ -112,6 +121,31 @@ uv run pytest evals    # eval-сценарии критериев готовно
 ```
 
 `evals/` — исполняемые сценарии критериев готовности MVP (§26, ADR-0008): init agent-home, run задачи с файлами, bash в sandbox, approval-гейт, полнота trace, refuel, resume после «падения процесса». Прогоняются через настоящий стек с scripted-LLM (без сети) и запускаются в CI.
+
+## Дорожная карта
+
+MVP и M5 закрыты. Дальнейшее развитие — не новые милстоны из backlog, а расширение по двум осям.
+
+### Продукт и бизнес-логика
+
+* **Web UI** (§10.3) — trace viewer, approval inbox, skill browser, diff viewer, memory browser поверх уже готового REST/WS gateway. Сейчас единственный «человеческий» UI — CLI и Telegram.
+* **RBAC и multi-user** (§16) — роли owner/admin/developer/operator/viewer/agent: доступ к workspace, право approve, редактирование policies. Нужно для server-развёртывания и корпоративного контура.
+* **Semantic retrieval** (Vector DB, §6.7/§14) — Qdrant-backend для памяти, скиллов и документов; ускоряет и Curator слой 2 (сейчас он сравнивает пары LLM-ом без embeddings).
+* **LLM-as-judge verifier** (§6.11) — качественная оценка результата вторым LLM-вызовом поверх детерминированных проверок (которые остаются приоритетными).
+* **История/compaction контекста** (§6.3) — сжатие диалога внутри одного run (сейчас роль compaction выполняет только refuel между run'ами).
+* **Расширение sandbox** (§6.9) — network allowlist, Kubernetes Job / remote runner, gVisor/Firecracker, air-gapped режим.
+* **Готовые official skills** (§23) — `git-workflow`, `python-project`, `fastapi-service`, `report-writer`, `skill-curator` и др. с примерами и checks.
+* **Retention policy для trace** (§6.12) — авто-очистка сырых tool-выводов через N дней при сохранении метаданных и approvals.
+* **Cost/observability дашборд** — метрики стоимости, длительности, token usage по runs/сессиям.
+
+### Оформление и developer experience
+
+* **Публикация на PyPI** — `svarog-harness` под extras `[server]`/`[mcp]`; сейчас установка только из репозитория.
+* **Документация сайтом** — MkDocs/Sphinx: гайды по установке, скиллам, policy, интерфейсам (вместо чтения `TASK.md`).
+* **CONTRIBUTING.md + шаблоны issue/PR** — для внешних контрибьюторов; badges (CI, лицензия, версия) в README.
+* **Docker Compose / dev-container** — запуск gateway + модели одной командой (§24 переносимость).
+* **Скринкаст/GIF** быстрого старта в README и примеры agent-home.
+* **OpenAPI-схема и клиентский пример** для gateway (FastAPI уже отдаёт `/docs`).
 
 ## Лицензия
 
