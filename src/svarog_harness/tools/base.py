@@ -42,6 +42,13 @@ class ToolError(Exception):
     """Ожидаемая ошибка исполнения tool — превращается в error-результат для модели."""
 
 
+def truncate_text(text: str, limit: int) -> str:
+    """Обрезать вывод tool, чтобы не раздувать контекст (§6.3 backpressure)."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n… [вывод обрезан: {len(text)} символов, лимит {limit}]"
+
+
 class ToolResult(BaseModel):
     ok: bool
     # Текст для модели: содержимое файла, stdout, сообщение об успехе.
