@@ -25,7 +25,13 @@ uv run svarog version
 
 ## Быстрый старт
 
-Создайте `svarog.yaml` в рабочей директории (полная схема — §13 [TASK.md](TASK.md)):
+Проще всего развернуть agent-home одной командой:
+
+```bash
+uv run svarog init ~/agent-home   # skills, memory (Flow A), policies, .gitignore для секретов
+```
+
+Либо создайте `svarog.yaml` в рабочей директории вручную (полная схема — §13 [TASK.md](TASK.md)):
 
 ```yaml
 models:
@@ -47,7 +53,12 @@ uv run svarog traces show <run-id>                          # полный trace
 uv run svarog resume <run-id>                               # продолжить приостановленный run
 uv run svarog approvals list                                # ожидающие подтверждения
 uv run svarog approvals approve <id>                        # или deny <id> --reason "…"
+uv run svarog skills list                                   # доступные скиллы и карточки
+uv run svarog memory show                                   # память, как она попадёт в контекст
+uv run svarog push <branch>                                 # push task-ветки (Flow C, с policy)
 ```
+
+Скиллы (`skills/*/SKILL.md`, формат [agentskills.io](https://agentskills.io)) подгружаются карточками в контекст, полное содержимое — через `read_skill`. Память (`memory/`, Flow A) обновляется агентом только через контролируемую очередь single writer'а (ADR-0004), читается в контекст. Изменения кода идут по Flow C: pull → task-ветка → commit (с обязательным secret scan) → push через policy. При длинных задачах срабатывает refuel: состояние пишется в `task_state.md`, контекст пересобирается.
 
 Bash-команды агента по умолчанию исполняются в **Docker sandbox** (сеть выключена, non-root, лимиты CPU/RAM — ADR-0002); нужен установленный Docker или Podman. Без изоляции — явный режим `sandbox: {type: local-trusted}` в `svarog.yaml`.
 

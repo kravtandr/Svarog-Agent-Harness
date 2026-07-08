@@ -6,6 +6,7 @@ approvals list/approve/deny, version.
 """
 
 import asyncio
+import contextlib
 import json
 import sys
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,7 @@ from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
+from svarog_harness.scaffold import scaffold_agent_home
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, RunState
@@ -78,6 +80,37 @@ def main() -> None:
 def version() -> None:
     """Показать версию svarog-harness."""
     console.print(f"svarog-harness {__version__}")
+
+
+@app.command()
+def init(
+    path: Annotated[
+        Path | None, typer.Argument(help="Каталог agent-home (по умолчанию текущий)")
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Перезаписать существующие файлы")] = False,
+) -> None:
+    """Создать agent-home: skills, memory (Flow A), policies, .gitignore (§8)."""
+    target = (path or Path.cwd()).resolve()
+    result = scaffold_agent_home(target, force=force)
+    for created in result.created:
+        console.print(f"[green]+[/green] {created.relative_to(target)}")
+    for skipped in result.skipped:
+        console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
+
+    async def init_memory_repo() -> None:
+        repo = GitRepo(target / "memory")
+        if not await repo.is_repo():
+            await repo.init()
+            await repo.ensure_identity()
+            await repo.add_all()
+            with contextlib.suppress(GitError):
+                await repo.commit("svarog init: memory repo")
+
+    asyncio.run(init_memory_repo())
+    console.print(
+        f"\n[bold]agent-home готов:[/bold] {target}\n"
+        f'[dim]отредактируйте svarog.yaml (endpoint модели) и запустите `svarog run "…"`[/dim]'
+    )
 
 
 def _load_config_or_exit(project_dir: Path | None = None) -> SvarogConfig:
