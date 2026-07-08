@@ -100,6 +100,11 @@ class SkillsConfig(StrictModel):
     auto_load_full_content: bool = False
 
 
+class StorageConfig(StrictModel):
+    # SQLite по умолчанию (ADR-0007); Postgres — в server-режимах пост-MVP.
+    db_path: Path = Path("~/.svarog/svarog.db")
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -130,6 +135,7 @@ class SvarogConfig(BaseSettings):
     git: GitConfig = Field(default_factory=GitConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
 
     @classmethod
     def settings_customise_sources(

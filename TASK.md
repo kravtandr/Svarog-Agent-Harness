@@ -1101,6 +1101,9 @@ skills:
     - ~/.svarog/skills
   auto_load_full_content: false
 
+storage:
+  db_path: ~/.svarog/svarog.db   # SQLite по умолчанию (ADR-0007)
+
 policies:
   # неотключаемый critical-набор (см. 3.6) требует approval всегда
   # и в конфигурации не перечисляется

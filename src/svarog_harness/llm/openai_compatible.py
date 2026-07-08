@@ -11,7 +11,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from svarog_harness.config.schema import ProviderConfig
+from svarog_harness.config.schema import ModelsConfig, ProviderConfig
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -42,6 +42,11 @@ def resolve_api_key(cfg: ProviderConfig) -> str:
             f"экспортируйте его или уберите api_key_ref для локальной модели"
         )
     return value
+
+
+def default_provider(models_cfg: ModelsConfig) -> "OpenAICompatibleProvider":
+    """Провайдер для default-модели из конфигурации (валидность ссылки проверена схемой)."""
+    return OpenAICompatibleProvider(models_cfg.providers[models_cfg.default])
 
 
 def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
