@@ -1,8 +1,8 @@
 """Точка входа CLI `svarog` (§10.1).
 
-Команды init/chat/skills добавляются по мере milestones (см.
-docs/first-issues.md); после M2 доступны run, resume, traces list/show,
-approvals list/approve/deny, version.
+Доступные команды: init, run, resume, chat, push, version;
+traces list/show, approvals list/approve/deny, skills list/check,
+memory show/flush, secrets list/set.
 """
 
 import asyncio
@@ -28,6 +28,7 @@ from svarog_harness.gitflow import (
     WorkspacePrep,
 )
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
 from svarog_harness.policy.engine import PolicyAction
@@ -35,6 +36,12 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
 from svarog_harness.scaffold import scaffold_agent_home
+from svarog_harness.secrets import (
+    FileSecretStore,
+    SecretStore,
+    default_secret_store,
+    injected_env,
+)
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, RunState
@@ -56,6 +63,7 @@ from svarog_harness.trace.viewer import (
     render_run,
     render_runs_table,
 )
+from svarog_harness.verifier import Verifier, skill_checks
 
 app = typer.Typer(
     name="svarog",
@@ -208,12 +216,17 @@ async def _recover_and_warn(recorder: TraceRecorder) -> None:
         )
 
 
+def _secret_store(cfg: SvarogConfig) -> SecretStore:
+    return default_secret_store(cfg.secrets.path)
+
+
 def _build_loop(
     cfg: SvarogConfig,
     workspace: Path,
     recorder: TraceRecorder,
     environment: ExecutionEnvironment,
     autonomy: AutonomyMode,
+    store: SecretStore,
 ) -> AgentLoop:
     # Режим автономии и policy-правила фиксируются здесь, при старте run,
     # и не перечитываются во время исполнения (ADR-0010).
@@ -238,7 +251,7 @@ def _build_loop(
     skill_load_sink: list[tuple[str, str | None]] = []
     memory_sink: list[dict[str, object]] = []
     return AgentLoop(
-        default_provider(cfg.models),
+        default_provider(cfg.models, store),
         _build_registry(
             workspace,
             environment,
@@ -258,6 +271,7 @@ def _build_loop(
         skill_load_sink=skill_load_sink,
         memory_sink=memory_sink,
         workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
+        secret_values=store.values(),
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -282,8 +296,12 @@ async def _run_task(
     if prep.note:
         console.print(f"[yellow]{prep.note}[/yellow]")
 
+    store = _secret_store(cfg)
     environment = create_environment(
-        cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(cfg, workspace)
+        cfg.sandbox,
+        workspace,
+        skills_dir=_first_existing_skills_dir(cfg, workspace),
+        env=injected_env(store, cfg.secrets.inject),  # только явно выданные секреты (§12)
     )
     await environment.start()
     try:
@@ -291,15 +309,55 @@ async def _run_task(
         async def action(db: AsyncSession) -> RunOutcome:
             recorder = TraceRecorder(db)
             await _recover_and_warn(recorder)
-            loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
+            loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
             outcome = await loop.run(task, autonomy)
             await _drain_memory(cfg, db)
+            await _verify(cfg, workspace, environment, recorder, outcome, store)
             await _autocommit_workspace(cfg, flow, prep, task, outcome)
             return outcome
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _verify(
+    cfg: SvarogConfig,
+    workspace: Path,
+    environment: ExecutionEnvironment,
+    recorder: TraceRecorder,
+    outcome: RunOutcome,
+    store: SecretStore,
+) -> None:
+    """Детерминированный verifier после completed-run (§6.11); пишет CheckResult."""
+    if outcome.state is not RunState.COMPLETED:
+        return
+    run = await recorder.get_run(outcome.run_id)
+    if run is None:
+        return
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    loaded = await recorder.loaded_skill_names(run)
+    checks = [*cfg.verifier.checks, *skill_checks(scan.skills, loaded)]
+    if not checks and not cfg.verifier.secret_scan:
+        return
+
+    verifier = Verifier(environment, workspace)
+    outcomes = await verifier.run(
+        checks, secret_scan=cfg.verifier.secret_scan, known_values=store.values()
+    )
+    failed = [o for o in outcomes if not o.passed]
+    for check in outcomes:
+        await recorder.log_check_result(
+            run, name=check.name, status=check.status, output=check.output
+        )
+        colour = "green" if check.passed else "red"
+        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
+    if failed:
+        # Детерминированные проверки приоритетнее самооценки агента (§6.11).
+        console.print(
+            f"[red]verifier: {len(failed)} проверок не прошли — результат нельзя "
+            f"считать корректным[/red]"
+        )
 
 
 async def _autocommit_workspace(
@@ -350,15 +408,22 @@ async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
         # runtime/sandbox-настройки берутся из конфига проекта workspace,
         # режим автономии — заморожен в run (ADR-0010).
         run_cfg = load_config(project_dir=workspace)
+        store = _secret_store(run_cfg)
         environment = create_environment(
-            run_cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(run_cfg, workspace)
+            run_cfg.sandbox,
+            workspace,
+            skills_dir=_first_existing_skills_dir(run_cfg, workspace),
+            env=injected_env(store, run_cfg.secrets.inject),
         )
         await environment.start()
         try:
             loop = _build_loop(
-                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy)
+                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy), store
             )
-            return await loop.resume(run, state)
+            outcome = await loop.resume(run, state)
+            await _drain_memory(run_cfg, db)
+            await _verify(run_cfg, workspace, environment, recorder, outcome, store)
+            return outcome
         finally:
             await environment.cleanup()
 
@@ -400,7 +465,102 @@ def run(
         console.print(f"[red]ошибка policy-правил:[/red] {exc}")
         raise typer.Exit(code=1) from None
     outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome))
+
+
+_CHAT_HISTORY_LIMIT = 24  # сообщений диалога в контексте, чтобы не раздувать промпт
+
+
+@app.command()
+def chat(
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+    yolo: Annotated[bool, typer.Option("--yolo", help="Режим автономии yolo")] = False,
+    auto: Annotated[bool, typer.Option("--auto", help="Режим автономии auto")] = False,
+    supervised: Annotated[
+        bool, typer.Option("--supervised", help="Режим автономии supervised")
+    ] = False,
+) -> None:
+    """Интерактивная сессия: каждое сообщение — run в общей session (§10.1)."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
+    console.print(
+        f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
+        f"[dim]пустая строка или /quit — выход[/dim]"
+    )
+    try:
+        asyncio.run(_chat_session(cfg, workspace, autonomy))
+    except ApiKeyError as exc:
+        console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except SandboxError as exc:
+        console.print(f"[red]ошибка sandbox:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+
+async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
+    store = _secret_store(cfg)
+    environment = create_environment(
+        cfg.sandbox,
+        workspace,
+        skills_dir=_first_existing_skills_dir(cfg, workspace),
+        env=injected_env(store, cfg.secrets.inject),
+    )
+    await environment.start()
+    try:
+
+        async def action(db: AsyncSession) -> None:
+            recorder = TraceRecorder(db)
+            await _recover_and_warn(recorder)
+            session_id: str | None = None
+            history: list[ChatMessage] = []
+            while True:
+                try:
+                    task = (
+                        await asyncio.to_thread(console.input, "\n[bold cyan]› [/bold cyan]")
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if not task or task in {"/quit", "/exit"}:
+                    break
+                loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
+                outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
+                await _drain_memory(cfg, db)
+                if session_id is None:
+                    run = await recorder.get_run(outcome.run_id)
+                    session_id = run.session_id if run else None
+                history.append(ChatMessage(role="user", content=task))
+                history.append(
+                    ChatMessage(role="assistant", content=outcome.final_answer or "(без ответа)")
+                )
+                history[:] = history[-_CHAT_HISTORY_LIMIT:]
+                _print_chat_turn(outcome)
+
+        await _with_db(cfg, action)
+    finally:
+        await environment.cleanup()
+
+
+def _print_chat_turn(outcome: RunOutcome) -> None:
+    stats = f"{outcome.iterations} итер. | ${outcome.cost_usd:.4f}"
+    if outcome.state is RunState.COMPLETED:
+        console.print(f"[dim]— {stats}[/dim]")
+    elif outcome.state is RunState.WAITING_APPROVAL:
+        console.print(
+            f"[magenta]ожидает approval[/magenta] | {stats} "
+            f"[dim](svarog approvals list, затем resume {outcome.run_id[:8]})[/dim]"
+        )
+    else:
+        label = outcome.state.value
+        console.print(f"[yellow]{label}[/yellow] | {stats}")
+        if outcome.error:
+            console.print(f"[yellow]{outcome.error}[/yellow]")
 
 
 @app.command()
@@ -421,7 +581,18 @@ def resume(
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
     outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome))
+
+
+def _failed_checks(cfg: SvarogConfig, outcome: RunOutcome) -> int:
+    """Сколько verifier-проверок не прошло у completed-run (для exit-кода)."""
+    if outcome.state is not RunState.COMPLETED:
+        return 0
+
+    async def action(db: AsyncSession) -> int:
+        return await TraceRecorder(db).failed_check_count(outcome.run_id)
+
+    return asyncio.run(_with_db(cfg, action))
 
 
 def _show_approval(approval: Approval) -> None:
@@ -479,13 +650,17 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
     return outcome
 
 
-def _report_outcome(outcome: RunOutcome) -> None:
+def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
     console.print()
     stats = (
         f"run {outcome.run_id[:8]} | {outcome.iterations} итераций | "
         f"{outcome.tokens_used} токенов | ${outcome.cost_usd:.4f}"
     )
     if outcome.state is RunState.COMPLETED:
+        if failed_checks:
+            # Детерминированные checks приоритетнее самооценки агента (§6.11).
+            console.print(f"[red]completed, но {failed_checks} проверок не прошли[/red] | {stats}")
+            raise typer.Exit(code=4)
         console.print(f"[green]completed[/green] | {stats}")
     elif outcome.state is RunState.SUSPENDED:
         console.print(f"[yellow]suspended[/yellow] | {stats}")
@@ -535,11 +710,11 @@ def traces_show(
 
     async def action(db: AsyncSession) -> None:
         try:
-            run, messages, tool_calls = await fetch_run(db, run_id)
+            run, messages, tool_calls, checks = await fetch_run(db, run_id)
         except RunNotFoundError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
-        console.print(render_run(run, messages, tool_calls))
+        console.print(render_run(run, messages, tool_calls, checks))
 
     asyncio.run(_with_db(cfg, action))
 
@@ -707,3 +882,36 @@ def push(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]push выполнен[/green]\n{result}")
+
+
+secrets_app = typer.Typer(
+    help="SecretStore: имена секретов (значения не показываются).", no_args_is_help=True
+)
+app.add_typer(secrets_app, name="secrets")
+
+
+@secrets_app.command("list")
+def secrets_list() -> None:
+    """Показать имена секретов из файла store (значения не раскрываются)."""
+    cfg = _load_config_or_exit()
+    names = default_secret_store(cfg.secrets.path).names()
+    if not names:
+        console.print("секретов в файле store нет (env-секреты по именам не перечисляются)")
+        return
+    for name in names:
+        console.print(name)
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: Annotated[str, typer.Argument(help="Имя секрета (например PROVIDER_API_KEY)")],
+    value: Annotated[str, typer.Option("--value", prompt=True, hide_input=True, help="Значение")],
+) -> None:
+    """Записать секрет в файл store (права 0600). Значение вводится скрыто."""
+    cfg = _load_config_or_exit()
+    if cfg.secrets.path is None:
+        console.print("[red]secrets.path не задан в конфигурации[/red]")
+        raise typer.Exit(code=1)
+    store = FileSecretStore(cfg.secrets.path.expanduser())
+    store.set(name, value)
+    console.print(f"[green]секрет '{name}' сохранён[/green] в {cfg.secrets.path}")

@@ -13,6 +13,8 @@ from svarog_harness.storage.models import (
     Approval,
     ApprovalStatus,
     Checkpoint,
+    CheckResult,
+    CheckStatus,
     MemoryChange,
     Message,
     Run,
@@ -38,17 +40,30 @@ class TraceRecorder:
         self._db = db
         self._message_index: dict[str, int] = {}
 
-    async def start_run(self, *, task: str, autonomy: str, model: str) -> Run:
-        session = Session(title=task[:200])
-        run = Run(
-            session=session,
-            state=RunState.RUNNING,
-            task=task,
-            autonomy=autonomy,
-            started_at=utcnow(),
-            meta={"model": model},
-        )
-        self._db.add(session)
+    async def start_run(
+        self, *, task: str, autonomy: str, model: str, session_id: str | None = None
+    ) -> Run:
+        # chat переиспользует одну Session на серию runs (§10.1, ADR-0008).
+        if session_id is None:
+            session = Session(title=task[:200])
+            self._db.add(session)
+            run = Run(
+                session=session,
+                state=RunState.RUNNING,
+                task=task,
+                autonomy=autonomy,
+                started_at=utcnow(),
+                meta={"model": model},
+            )
+        else:
+            run = Run(
+                session_id=session_id,
+                state=RunState.RUNNING,
+                task=task,
+                autonomy=autonomy,
+                started_at=utcnow(),
+                meta={"model": model},
+            )
         self._db.add(run)
         await self._db.flush()
         self._message_index[run.id] = 0
@@ -173,6 +188,35 @@ class TraceRecorder:
             )
         )
         await self._db.commit()
+
+    async def loaded_skill_names(self, run: Run) -> set[str]:
+        """Имена скиллов, загруженных в run (для skill-specific checks)."""
+        result = await self._db.execute(
+            select(SkillLoad.skill_name).where(SkillLoad.run_id == run.id)
+        )
+        return set(result.scalars())
+
+    async def log_check_result(
+        self, run: Run, *, name: str, status: CheckStatus, output: str
+    ) -> None:
+        """Результат детерминированной проверки verifier'а (§6.11)."""
+        self._db.add(CheckResult(run_id=run.id, check_name=name, status=status, output=output))
+        await self._db.commit()
+
+    async def get_run(self, run_id: str) -> Run | None:
+        return await self._db.get(Run, run_id)
+
+    async def failed_check_count(self, run_id: str) -> int:
+        """Число непрошедших проверок run'а (FAILED/ERROR) — для exit-кода."""
+        result = await self._db.execute(
+            select(func.count())
+            .select_from(CheckResult)
+            .where(
+                CheckResult.run_id == run_id,
+                CheckResult.status.in_([CheckStatus.FAILED, CheckStatus.ERROR]),
+            )
+        )
+        return int(result.scalar_one())
 
     async def update_progress(
         self, run: Run, *, iterations: int, tokens_used: int, cost_usd: float

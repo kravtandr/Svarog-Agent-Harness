@@ -1109,6 +1109,18 @@ memory:
   path: ./memory                 # memory-репозиторий Flow A (ADR-0004); не задан — память выключена
   context_limit_bytes: 16000     # лимит memory-entrypoint в контексте (§6.7)
 
+secrets:
+  path: ~/.svarog/secrets.json   # файл секретов {имя: значение}, права 0600, вне репозитория (ADR-0006)
+  inject: []                     # имена секретов, явно выдаваемых в окружение sandbox (§12)
+
+verifier:
+  secret_scan: true              # secret scan рабочего дерева после run (нельзя отключать для публичных remote)
+  checks:                        # детерминированные проверки; приоритет над самооценкой агента (§6.11)
+    - name: tests
+      command: pytest -q
+    - name: lint
+      command: ruff check .
+
 policies:
   # неотключаемый critical-набор (см. 3.6) требует approval всегда
   # и в конфигурации не перечисляется

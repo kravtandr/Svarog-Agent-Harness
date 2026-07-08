@@ -56,7 +56,11 @@ uv run svarog approvals approve <id>                        # или deny <id> -
 uv run svarog skills list                                   # доступные скиллы и карточки
 uv run svarog memory show                                   # память, как она попадёт в контекст
 uv run svarog push <branch>                                 # push task-ветки (Flow C, с policy)
+uv run svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
+uv run svarog secrets set PROVIDER_API_KEY                  # записать секрет в файл store (0600)
 ```
+
+После завершённого run детерминированный verifier прогоняет проверки (тесты, линтеры из `verifier.checks`, secret scan рабочего дерева и skill-specific checks) — упавшая проверка приоритетнее самооценки агента (§6.11) и даёт exit code 4. Секреты хранятся в SecretStore (файл `~/.svarog/secrets.json` с правами 0600 или env), агент видит только имена (`api_key_ref`); значения инжектируются в окружение sandbox только для явно перечисленных в `secrets.inject` и вырезаются (redaction) из trace и tool-выводов.
 
 Скиллы (`skills/*/SKILL.md`, формат [agentskills.io](https://agentskills.io)) подгружаются карточками в контекст, полное содержимое — через `read_skill`. Память (`memory/`, Flow A) обновляется агентом только через контролируемую очередь single writer'а (ADR-0004), читается в контекст. Изменения кода идут по Flow C: pull → task-ветка → commit (с обязательным secret scan) → push через policy. При длинных задачах срабатывает refuel: состояние пишется в `task_state.md`, контекст пересобирается.
 
@@ -89,8 +93,11 @@ rules:
 ```bash
 uv run ruff check && uv run ruff format --check
 uv run mypy
-uv run pytest
+uv run pytest          # юнит-тесты
+uv run pytest evals    # eval-сценарии критериев готовности MVP (§26)
 ```
+
+`evals/` — исполняемые сценарии критериев готовности MVP (§26, ADR-0008): init agent-home, run задачи с файлами, bash в sandbox, approval-гейт, полнота trace, refuel, resume после «падения процесса». Прогоняются через настоящий стек с scripted-LLM (без сети) и запускаются в CI.
 
 ## Лицензия
 

@@ -21,6 +21,7 @@ from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEng
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
+from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState
 from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
@@ -66,6 +67,7 @@ class AgentLoop:
         skill_load_sink: list[tuple[str, str | None]] | None = None,
         memory_sink: list[dict[str, object]] | None = None,
         workspace_flow: WorkspaceFlow | None = None,
+        secret_values: frozenset[str] = frozenset(),
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
@@ -80,6 +82,8 @@ class AgentLoop:
         self._skill_cards = skill_cards
         self._memory = memory
         self._workspace_flow = workspace_flow
+        # Значения секретов для redaction в tool outputs и trace (ADR-0006, §12).
+        self._secret_values = secret_values
         # read_skill tool пишет сюда (name, version); loop сливает в SkillLoad.
         self._skill_load_sink = skill_load_sink if skill_load_sink is not None else []
         # remember tool пишет сюда заявки; loop сливает в очередь MemoryChange.
@@ -88,13 +92,28 @@ class AgentLoop:
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
 
-    async def run(self, task: str, autonomy: AutonomyMode) -> RunOutcome:
-        """Выполнить задачу; режим автономии фиксируется в run (ADR-0010)."""
+    async def run(
+        self,
+        task: str,
+        autonomy: AutonomyMode,
+        *,
+        session_id: str | None = None,
+        history: list[ChatMessage] | None = None,
+    ) -> RunOutcome:
+        """Выполнить задачу; режим автономии фиксируется в run (ADR-0010).
+
+        session_id/history — для chat: run включается в общую сессию и видит
+        предыдущий диалог (§10.1).
+        """
         run = await self._recorder.start_run(
-            task=task, autonomy=autonomy.value, model=self._model_name
+            task=task, autonomy=autonomy.value, model=self._model_name, session_id=session_id
         )
         messages = build_initial_messages(
-            task, self._workspace, skill_cards=self._skill_cards, memory=self._memory
+            task,
+            self._workspace,
+            skill_cards=self._skill_cards,
+            memory=self._memory,
+            history=history,
         )
         for message in messages:
             await self._recorder.add_message(run, message.role, {"content": message.content})
@@ -380,13 +399,15 @@ class AgentLoop:
         )
         return result
 
-    @staticmethod
-    def _render_tool_result(result: ToolResult) -> str:
+    def _render_tool_result(self, result: ToolResult) -> str:
+        # Redaction секретов до попадания в контекст LLM и trace (ADR-0006, §12).
         if result.ok:
-            return result.output or "(успех, пустой вывод)"
-        if result.output:
-            return f"ошибка: {result.error}\n{result.output}"
-        return f"ошибка: {result.error}"
+            text = result.output or "(успех, пустой вывод)"
+        elif result.output:
+            text = f"ошибка: {result.error}\n{result.output}"
+        else:
+            text = f"ошибка: {result.error}"
+        return redact(text, self._secret_values)
 
     def _outcome(
         self,

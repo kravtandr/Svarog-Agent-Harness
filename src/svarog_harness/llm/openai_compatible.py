@@ -5,7 +5,6 @@ vLLM, llama.cpp, LiteLLM, OpenRouter, сам OpenAI. Всегда использ
 streaming; retries и timeouts делегированы openai SDK.
 """
 
-import os
 from collections.abc import Callable
 from typing import Any
 
@@ -20,33 +19,38 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
+from svarog_harness.secrets import EnvSecretStore, SecretStore
 
 
 class ApiKeyError(Exception):
     """api_key_ref задан, но секрет не найден."""
 
 
-def resolve_api_key(cfg: ProviderConfig) -> str:
-    """Разрешить api_key_ref в значение ключа.
+def resolve_api_key(cfg: ProviderConfig, store: SecretStore | None = None) -> str:
+    """Разрешить api_key_ref в значение ключа через SecretStore (ADR-0006).
 
-    До появления SecretStore (M4, ADR-0006) ссылка трактуется как имя
-    env-переменной. Без ссылки возвращается заглушка: локальные серверы
-    (vLLM, llama.cpp) ключ не проверяют, а SDK требует непустое значение.
+    Агент видит только имя (api_key_ref); значение берётся из store (файл или
+    env) на execution-слое. Без ссылки возвращается заглушка: локальные
+    серверы (vLLM, llama.cpp) ключ не проверяют, а SDK требует непустое значение.
     """
     if cfg.api_key_ref is None:
         return "not-needed"
-    value = os.environ.get(cfg.api_key_ref)
+    resolver = store if store is not None else EnvSecretStore()
+    value = resolver.get(cfg.api_key_ref)
     if not value:
         raise ApiKeyError(
-            f"секрет '{cfg.api_key_ref}' не найден в переменных окружения; "
-            f"экспортируйте его или уберите api_key_ref для локальной модели"
+            f"секрет '{cfg.api_key_ref}' не найден в SecretStore/окружении; "
+            f"добавьте его в secrets-файл, экспортируйте env-переменную "
+            f"или уберите api_key_ref для локальной модели"
         )
     return value
 
 
-def default_provider(models_cfg: ModelsConfig) -> "OpenAICompatibleProvider":
+def default_provider(
+    models_cfg: ModelsConfig, store: SecretStore | None = None
+) -> "OpenAICompatibleProvider":
     """Провайдер для default-модели из конфигурации (валидность ссылки проверена схемой)."""
-    return OpenAICompatibleProvider(models_cfg.providers[models_cfg.default])
+    return OpenAICompatibleProvider(models_cfg.providers[models_cfg.default], store=store)
 
 
 def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -100,12 +104,18 @@ class _ToolCallAccumulator:
 
 
 class OpenAICompatibleProvider(ModelProvider):
-    def __init__(self, cfg: ProviderConfig, *, client: AsyncOpenAI | None = None) -> None:
+    def __init__(
+        self,
+        cfg: ProviderConfig,
+        *,
+        client: AsyncOpenAI | None = None,
+        store: SecretStore | None = None,
+    ) -> None:
         self._cfg = cfg
         # Инжекция клиента — для тестов; в бою собираем сами.
         self._client = client or AsyncOpenAI(
             base_url=cfg.base_url,
-            api_key=resolve_api_key(cfg),
+            api_key=resolve_api_key(cfg, store),
             timeout=cfg.timeout_sec,
             max_retries=cfg.max_retries,
         )

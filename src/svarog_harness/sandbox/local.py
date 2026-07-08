@@ -15,8 +15,10 @@ from svarog_harness.sandbox.base import ExecResult, ExecutionEnvironment
 
 
 class LocalEnvironment(ExecutionEnvironment):
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, *, env: dict[str, str] | None = None) -> None:
         self.workspace = workspace
+        # Явно выданные секреты (ADR-0006); доступны команде поверх окружения хоста.
+        self._env = env or {}
 
     async def execute(self, command: str, *, timeout_sec: float) -> ExecResult:
         proc = await asyncio.create_subprocess_shell(
@@ -25,6 +27,7 @@ class LocalEnvironment(ExecutionEnvironment):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,  # своя группа процессов, чтобы убить и потомков
+            env={**os.environ, **self._env} if self._env else None,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

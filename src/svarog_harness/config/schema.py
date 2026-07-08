@@ -28,8 +28,8 @@ class ProviderConfig(StrictModel):
     type: Literal["openai-compatible"] = "openai-compatible"
     base_url: str
     model: str
-    # Именованная ссылка на секрет в SecretStore, не сам ключ (ADR-0006).
-    # До появления SecretStore (M4) разрешается как имя env-переменной.
+    # Именованная ссылка на секрет в SecretStore, не сам ключ (ADR-0006):
+    # значение берётся из secrets-файла или env на execution-слое.
     api_key_ref: str | None = None
     # Цены за миллион токенов — для учета стоимости run; 0 = локальная модель.
     input_usd_per_mtok: float = Field(default=0.0, ge=0)
@@ -113,6 +113,27 @@ class MemoryConfig(StrictModel):
     context_limit_bytes: int = Field(default=16_000, gt=0)
 
 
+class SecretsConfig(StrictModel):
+    # Файл секретов {имя: значение}, права 0600, вне репозитория (ADR-0006).
+    # None — только env-fallback.
+    path: Path | None = Path("~/.svarog/secrets.json")
+    # Имена секретов, явно выдаваемых в окружение sandbox (§12, «только явно выданные»).
+    inject: list[str] = Field(default_factory=list)
+
+
+class CheckSpec(StrictModel):
+    name: str
+    # Shell-команда проверки; исполняется в sandbox после run (§6.11).
+    command: str
+
+
+class VerifierConfig(StrictModel):
+    # Детерминированные проверки после run'а; приоритет над самооценкой агента (§6.11).
+    checks: list[CheckSpec] = Field(default_factory=list)
+    # Secret scan рабочего дерева всегда выполняется (ADR-0006); можно не отключать.
+    secret_scan: bool = True
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -145,6 +166,8 @@ class SvarogConfig(BaseSettings):
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    secrets: SecretsConfig = Field(default_factory=SecretsConfig)
+    verifier: VerifierConfig = Field(default_factory=VerifierConfig)
 
     @classmethod
     def settings_customise_sources(
