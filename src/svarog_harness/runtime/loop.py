@@ -1,9 +1,11 @@
-"""Agent loop v0 (§6.2, §11): линейный run без resume.
+"""Agent loop (§6.2, §11): возобновляемый run как state machine (ADR-0005).
 
-build context → LLM → tool calls → observe → iterate. Остановки:
-финальный ответ модели (completed), max_iterations, бюджет токенов или
-стоимости, переполнение контекста (failed с причиной). Checkpoint/resume —
-M2 (ADR-0005), refuel — M3. Каждый шаг пишется в trace через TraceRecorder.
+build context → LLM → tool calls → observe → iterate; checkpoint после
+каждого шага. Остановки: финальный ответ модели → completed; лимиты
+итераций/токенов/стоимости/контекста → suspended (возобновляется после
+изменения лимитов в конфигурации; compaction/refuel — M3); исключение →
+failed. Tool calls фиксируются в checkpoint до исполнения (write-ahead) —
+при resume недоисполненные вызовы доисполняются первыми.
 """
 
 from collections.abc import Callable
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
 from svarog_harness.llm.provider import ChatMessage, ModelProvider, ToolCallRequest
+from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages
 from svarog_harness.storage.models import Run, RunState
 from svarog_harness.tools.base import ToolResult
@@ -61,25 +64,37 @@ class AgentLoop:
         for message in messages:
             await self._recorder.add_message(run, message.role, {"content": message.content})
 
-        iterations = 0
-        tokens_used = 0
-        cost_usd = 0.0
-        final_answer = ""
+        state = LoopState(workspace=self._workspace, messages=messages)
+        # Стартовый checkpoint: run возобновляем с первой секунды жизни.
+        await self._save_checkpoint(run, state)
+        return await self._drive(run, state)
 
+    async def resume(self, run: Run, state: LoopState) -> RunOutcome:
+        """Продолжить run из checkpoint (run и state загружает recorder)."""
+        await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
+        return await self._drive(run, state)
+
+    async def _drive(self, run: Run, state: LoopState) -> RunOutcome:
         try:
-            while iterations < self._cfg.max_iterations:
-                iterations += 1
+            # Write-ahead: доисполнить вызовы, зафиксированные до остановки.
+            await self._execute_pending(run, state)
+
+            while state.iterations < self._cfg.max_iterations:
+                state.iterations += 1
                 result = await self._provider.complete(
-                    messages,
+                    state.messages,
                     self._registry.definitions(),
                     on_text_delta=self._on_text_delta,
                 )
-                tokens_used += result.usage.total_tokens
-                cost_usd += result.cost_usd
+                state.tokens_used += result.usage.total_tokens
+                state.cost_usd += result.cost_usd
                 await self._recorder.update_progress(
-                    run, iterations=iterations, tokens_used=tokens_used, cost_usd=cost_usd
+                    run,
+                    iterations=state.iterations,
+                    tokens_used=state.tokens_used,
+                    cost_usd=state.cost_usd,
                 )
-                messages.append(
+                state.messages.append(
                     ChatMessage(
                         role="assistant", content=result.content, tool_calls=result.tool_calls
                     )
@@ -97,60 +112,67 @@ class AgentLoop:
                 )
 
                 if not result.tool_calls:
-                    final_answer = result.content
                     await self._recorder.finish_run(run, RunState.COMPLETED)
-                    return self._outcome(
-                        run, RunState.COMPLETED, final_answer, iterations, tokens_used, cost_usd
-                    )
+                    return self._outcome(run, RunState.COMPLETED, state, result.content)
 
-                budget_error = self._budget_exceeded(
-                    result.usage.prompt_tokens, tokens_used, cost_usd
-                )
+                # Write-ahead: tool calls попадают в checkpoint до исполнения.
+                state.pending_tool_calls = result.tool_calls
+                await self._save_checkpoint(run, state)
+
+                budget_error = self._budget_exceeded(result.usage.prompt_tokens, state)
                 if budget_error is not None:
-                    await self._recorder.finish_run(run, RunState.FAILED, error=budget_error)
-                    return self._outcome(
-                        run, RunState.FAILED, "", iterations, tokens_used, cost_usd, budget_error
-                    )
+                    return await self._suspend(run, state, budget_error)
 
-                for call in result.tool_calls:
-                    tool_result = await self._execute_tool(run, call)
-                    messages.append(
-                        ChatMessage(
-                            role="tool",
-                            content=self._render_tool_result(tool_result),
-                            tool_call_id=call.id,
-                        )
-                    )
-                    await self._recorder.add_message(
-                        run,
-                        "tool",
-                        {
-                            "tool_call_id": call.id,
-                            "content": self._render_tool_result(tool_result),
-                        },
-                    )
+                await self._execute_pending(run, state)
 
-            error = f"достигнут лимит итераций ({self._cfg.max_iterations})"
-            await self._recorder.finish_run(run, RunState.FAILED, error=error)
-            return self._outcome(run, RunState.FAILED, "", iterations, tokens_used, cost_usd, error)
+            return await self._suspend(
+                run,
+                state,
+                f"достигнут лимит итераций ({self._cfg.max_iterations}); "
+                f"увеличьте runtime.max_iterations и выполните resume",
+            )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             await self._recorder.finish_run(run, RunState.FAILED, error=error)
-            return self._outcome(run, RunState.FAILED, "", iterations, tokens_used, cost_usd, error)
+            return self._outcome(run, RunState.FAILED, state, "", error)
 
-    def _budget_exceeded(self, prompt_tokens: int, tokens_used: int, cost_usd: float) -> str | None:
-        """Проверка бюджетов (§3.7); в v0 превышение — failed, suspend/refuel позже."""
+    async def _execute_pending(self, run: Run, state: LoopState) -> None:
+        """Исполнить write-ahead вызовы; checkpoint после каждого результата."""
+        while state.pending_tool_calls:
+            call = state.pending_tool_calls[0]
+            tool_result = await self._execute_tool(run, call)
+            rendered = self._render_tool_result(tool_result)
+            state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
+            await self._recorder.add_message(
+                run, "tool", {"tool_call_id": call.id, "content": rendered}
+            )
+            state.pending_tool_calls = state.pending_tool_calls[1:]
+            await self._save_checkpoint(run, state)
+
+    async def _save_checkpoint(self, run: Run, state: LoopState) -> None:
+        await self._recorder.save_checkpoint(run, iteration=state.iterations, state=state.to_dict())
+
+    async def _suspend(self, run: Run, state: LoopState, reason: str) -> RunOutcome:
+        """Приостановка (ADR-0005): checkpoint уже сохранен, состояние — suspended."""
+        await self._save_checkpoint(run, state)
+        await self._recorder.set_run_state(run, RunState.SUSPENDED, error=reason)
+        return self._outcome(run, RunState.SUSPENDED, state, "", reason)
+
+    def _budget_exceeded(self, prompt_tokens: int, state: LoopState) -> str | None:
+        """Проверка бюджетов (§3.7): превышение — suspended, не failed."""
         if prompt_tokens > self._cfg.max_context_tokens:
             return (
                 f"контекст превысил лимит: {prompt_tokens} > {self._cfg.max_context_tokens} "
                 f"токенов (compaction/refuel — M3)"
             )
-        if tokens_used > self._cfg.max_tokens_per_run:
-            return f"превышен бюджет токенов run: {tokens_used} > {self._cfg.max_tokens_per_run}"
-        if cost_usd > self._cfg.max_cost_usd_per_run:
+        if state.tokens_used > self._cfg.max_tokens_per_run:
+            return (
+                f"превышен бюджет токенов run: {state.tokens_used} > {self._cfg.max_tokens_per_run}"
+            )
+        if state.cost_usd > self._cfg.max_cost_usd_per_run:
             return (
                 f"превышен бюджет стоимости run: "
-                f"${cost_usd:.4f} > ${self._cfg.max_cost_usd_per_run}"
+                f"${state.cost_usd:.4f} > ${self._cfg.max_cost_usd_per_run}"
             )
         return None
 
@@ -198,18 +220,16 @@ class AgentLoop:
         self,
         run: Run,
         state: RunState,
+        loop_state: LoopState,
         final_answer: str,
-        iterations: int,
-        tokens_used: int,
-        cost_usd: float,
         error: str | None = None,
     ) -> RunOutcome:
         return RunOutcome(
             run_id=run.id,
             state=state,
             final_answer=final_answer,
-            iterations=iterations,
-            tokens_used=tokens_used,
-            cost_usd=cost_usd,
+            iterations=loop_state.iterations,
+            tokens_used=loop_state.tokens_used,
+            cost_usd=loop_state.cost_usd,
             error=error,
         )

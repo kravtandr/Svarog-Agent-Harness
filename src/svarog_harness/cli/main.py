@@ -17,6 +17,7 @@ from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
@@ -24,9 +25,9 @@ from svarog_harness.storage.models import RunState
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
+from svarog_harness.trace.lookup import RunNotFoundError, RunNotResumableError
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.trace.viewer import (
-    RunNotFoundError,
     fetch_run,
     fetch_runs,
     render_run,
@@ -109,6 +110,32 @@ async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaita
         await engine.dispose()
 
 
+async def _recover_and_warn(recorder: TraceRecorder) -> None:
+    """Recovery незавершенных runs при старте (ADR-0005)."""
+    for run in await recorder.recover_interrupted_runs():
+        console.print(
+            f"[yellow]run {run.id[:8]} был прерван — переведен в suspended "
+            f"(`svarog resume {run.id[:8]}`)[/yellow]"
+        )
+
+
+def _build_loop(
+    cfg: SvarogConfig, workspace: Path, recorder: TraceRecorder, environment: ExecutionEnvironment
+) -> AgentLoop:
+    return AgentLoop(
+        default_provider(cfg.models),
+        _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
+        recorder,
+        cfg.runtime,
+        workspace,
+        model_name=cfg.models.providers[cfg.models.default].model,
+        on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
+        on_tool_call=lambda name, args: console.print(
+            f"\n[dim]→ {name} {args}[/dim]", highlight=False
+        ),
+    )
+
+
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
@@ -119,23 +146,39 @@ async def _run_task(
     try:
 
         async def action(db: AsyncSession) -> RunOutcome:
-            loop = AgentLoop(
-                default_provider(cfg.models),
-                _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
-                TraceRecorder(db),
-                cfg.runtime,
-                workspace,
-                model_name=cfg.models.providers[cfg.models.default].model,
-                on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
-                on_tool_call=lambda name, args: console.print(
-                    f"\n[dim]→ {name} {args}[/dim]", highlight=False
-                ),
-            )
+            recorder = TraceRecorder(db)
+            await _recover_and_warn(recorder)
+            loop = _build_loop(cfg, workspace, recorder, environment)
             return await loop.run(task, autonomy)
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
+    async def action(db: AsyncSession) -> RunOutcome:
+        recorder = TraceRecorder(db)
+        await _recover_and_warn(recorder)
+        run, raw_state = await recorder.load_resumable(run_id)
+        state = LoopState.from_dict(raw_state)
+        workspace = state.workspace
+        if not workspace.is_dir():
+            raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
+        # runtime/sandbox-настройки берутся из конфига проекта workspace,
+        # режим автономии — заморожен в run (ADR-0010).
+        run_cfg = load_config(project_dir=workspace)
+        environment = create_environment(
+            run_cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(run_cfg, workspace)
+        )
+        await environment.start()
+        try:
+            loop = _build_loop(run_cfg, workspace, recorder, environment)
+            return await loop.resume(run, state)
+        finally:
+            await environment.cleanup()
+
+    return await _with_db(cfg, action)
 
 
 @app.command()
@@ -169,7 +212,30 @@ def run(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    _report_outcome(outcome)
 
+
+@app.command()
+def resume(
+    run_id: Annotated[str, typer.Argument(help="id приостановленного run'а или его префикс")],
+) -> None:
+    """Возобновить suspended run из checkpoint (ADR-0005)."""
+    cfg = _load_config_or_exit()
+    try:
+        outcome = asyncio.run(_resume_task(cfg, run_id))
+    except (RunNotFoundError, RunNotResumableError, ConfigError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except ApiKeyError as exc:
+        console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except SandboxError as exc:
+        console.print(f"[red]ошибка sandbox:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    _report_outcome(outcome)
+
+
+def _report_outcome(outcome: RunOutcome) -> None:
     console.print()
     stats = (
         f"run {outcome.run_id[:8]} | {outcome.iterations} итераций | "
@@ -177,6 +243,12 @@ def run(
     )
     if outcome.state is RunState.COMPLETED:
         console.print(f"[green]completed[/green] | {stats}")
+    elif outcome.state is RunState.SUSPENDED:
+        console.print(f"[yellow]suspended[/yellow] | {stats}")
+        if outcome.error:
+            console.print(f"[yellow]{outcome.error}[/yellow]")
+        console.print(f"[dim]возобновить: svarog resume {outcome.run_id[:8]}[/dim]")
+        raise typer.Exit(code=3)
     else:
         console.print(f"[red]{outcome.state.value}[/red] | {stats}")
         if outcome.error:

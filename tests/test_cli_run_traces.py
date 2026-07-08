@@ -107,7 +107,9 @@ def test_run_with_tool_call_touches_workspace(
     assert (workspace / "out.txt").read_text(encoding="utf-8") == "готово"
 
 
-def test_run_failed_returns_exit_code_2(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_iteration_limit_suspends_with_exit_code_3(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     endless = [
         CompletionResult(
             content="",
@@ -118,8 +120,43 @@ def test_run_failed_returns_exit_code_2(workspace: Path, monkeypatch: pytest.Mon
     ]
     _patch_provider(monkeypatch, endless)
     result = runner.invoke(cli_main.app, ["run", "зациклись", "--workspace", str(workspace)])
-    assert result.exit_code == 2
+    assert result.exit_code == 3
     assert "лимит итераций" in result.output
+    assert "svarog resume" in result.output
+
+
+def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(ToolCallRequest(id=f"c{i}", name="list_dir", arguments_json="{}"),),
+                usage=Usage(10, 5),
+            )
+            for i in range(2)
+        ]
+        + [CompletionResult(content="закончил после resume", usage=Usage(10, 5))],
+    )
+    # refuel_after_iterations должен быть меньше max_iterations — валидатор.
+    monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
+    result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])
+    assert result.exit_code == 3, result.output
+
+    run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
+    monkeypatch.delenv("SVAROG_RUNTIME__MAX_ITERATIONS")
+    monkeypatch.delenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS")
+    resumed = runner.invoke(cli_main.app, ["resume", run_id])
+    assert resumed.exit_code == 0, resumed.output
+    assert "закончил после resume" in resumed.output
+    assert "completed" in resumed.output
+
+
+def test_resume_unknown_run(workspace: Path) -> None:
+    result = runner.invoke(cli_main.app, ["resume", "deadbeef"])
+    assert result.exit_code == 1
+    assert "не найден" in result.output
 
 
 def test_run_rejects_conflicting_autonomy_flags(workspace: Path) -> None:

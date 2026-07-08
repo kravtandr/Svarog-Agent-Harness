@@ -10,18 +10,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.storage.models import Message, Run, ToolCall
+from svarog_harness.trace.lookup import RunNotFoundError, find_run_by_prefix
+
+__all__ = [
+    "RunNotFoundError",
+    "fetch_run",
+    "fetch_runs",
+    "render_run",
+    "render_runs_table",
+]
 
 _STATE_STYLES = {
     "completed": "green",
     "failed": "red",
     "running": "yellow",
+    "suspended": "yellow",
     "waiting_approval": "magenta",
 }
-
-
-class RunNotFoundError(Exception):
-    def __init__(self, run_id: str) -> None:
-        super().__init__(f"run '{run_id}' не найден (id или его префикс — см. traces list)")
 
 
 async def fetch_runs(db: AsyncSession, limit: int = 20) -> list[Run]:
@@ -31,13 +36,7 @@ async def fetch_runs(db: AsyncSession, limit: int = 20) -> list[Run]:
 
 async def fetch_run(db: AsyncSession, run_id: str) -> tuple[Run, list[Message], list[ToolCall]]:
     """Найти run по полному id или уникальному префиксу."""
-    result = await db.execute(select(Run).where(Run.id.startswith(run_id)))
-    runs = list(result.scalars())
-    if not runs:
-        raise RunNotFoundError(run_id)
-    if len(runs) > 1:
-        raise RunNotFoundError(f"{run_id} (префикс неоднозначен: {len(runs)} runs)")
-    run = runs[0]
+    run = await find_run_by_prefix(db, run_id)
     messages = list(
         (
             await db.execute(
