@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from svarog_harness.cli import main as cli_main
 from svarog_harness.config.schema import ModelsConfig
+from svarog_harness.runtime import orchestrator
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -68,7 +69,9 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
     def fake_default_provider(models_cfg: ModelsConfig, store: object = None) -> ModelProvider:
         return provider
 
-    monkeypatch.setattr(cli_main, "default_provider", fake_default_provider)
+    # Оркестрация прогона (и с ней default_provider) вынесена в runtime.orchestrator;
+    # CLI лишь делегирует TaskRunner'у (см. рефакторинг M5).
+    monkeypatch.setattr(orchestrator, "default_provider", fake_default_provider)
 
 
 def test_run_completes_and_prints_answer(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

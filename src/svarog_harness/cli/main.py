@@ -19,38 +19,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
+from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
-from svarog_harness.gitflow import (
-    GitError,
-    GitRepo,
-    SecretScanBlockedError,
-    WorkspaceFlow,
-    WorkspacePrep,
-)
-from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
+from svarog_harness.llm.openai_compatible import ApiKeyError
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.memory import MemoryWriter, read_memory
-from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
+from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
-from svarog_harness.runtime.checkpoint import LoopState
-from svarog_harness.runtime.loop import AgentLoop, RunOutcome
-from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
+from svarog_harness.runtime.loop import RunOutcome
+from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import scaffold_agent_home
-from svarog_harness.secrets import (
-    FileSecretStore,
-    SecretStore,
-    default_secret_store,
-    injected_env,
-)
-from svarog_harness.skills import Skill, scan_skills, skill_cards
+from svarog_harness.secrets import FileSecretStore, default_secret_store
+from svarog_harness.skills import scan_skills
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Approval, RunState
-from svarog_harness.tools.approval import RequestApprovalTool
-from svarog_harness.tools.file_tools import file_tools
-from svarog_harness.tools.memory_tools import RememberTool
-from svarog_harness.tools.registry import ToolRegistry
-from svarog_harness.tools.shell import BashTool
-from svarog_harness.tools.skill_tools import ReadSkillTool
+from svarog_harness.storage.models import Approval, Run, RunState
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -63,7 +47,7 @@ from svarog_harness.trace.viewer import (
     render_run,
     render_runs_table,
 )
-from svarog_harness.verifier import Verifier, skill_checks
+from svarog_harness.verifier import CheckOutcome
 
 app = typer.Typer(
     name="svarog",
@@ -144,58 +128,6 @@ def _resolve_autonomy(
     return chosen[0] if chosen else cfg.runtime.autonomy
 
 
-def _build_registry(
-    workspace: Path,
-    environment: ExecutionEnvironment,
-    command_timeout_sec: float,
-    skills: list[Skill],
-    skill_load_sink: list[tuple[str, str | None]],
-    *,
-    memory_enabled: bool,
-    memory_sink: list[dict[str, object]],
-) -> ToolRegistry:
-    registry = ToolRegistry()
-    for tool in file_tools(workspace):
-        registry.register(tool)
-    registry.register(BashTool(environment, command_timeout_sec))
-    registry.register(RequestApprovalTool())
-    if skills:
-        registry.register(
-            ReadSkillTool(
-                skills, on_load=lambda name, version: skill_load_sink.append((name, version))
-            )
-        )
-    if memory_enabled:
-        registry.register(RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict())))
-    return registry
-
-
-def _memory_dir(cfg: SvarogConfig) -> Path | None:
-    """Каталог memory-репозитория (Flow A), если память включена в конфиге."""
-    if cfg.memory.path is None:
-        return None
-    return cfg.memory.path.expanduser().resolve()
-
-
-def _skills_dirs(cfg: SvarogConfig, workspace: Path) -> list[Path]:
-    """Абсолютные пути каталогов skills из конфигурации."""
-    dirs = []
-    for raw in cfg.skills.paths:
-        path = raw.expanduser()
-        if not path.is_absolute():
-            path = workspace / path
-        dirs.append(path.resolve())
-    return dirs
-
-
-def _first_existing_skills_dir(cfg: SvarogConfig, workspace: Path) -> Path | None:
-    """Первый существующий каталог skills — mount ro в sandbox (ADR-0002)."""
-    for path in _skills_dirs(cfg, workspace):
-        if path.is_dir():
-            return path
-    return None
-
-
 async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
     init_db(cfg.storage.db_path)
     engine = create_engine(cfg.storage.db_path.expanduser())
@@ -207,71 +139,43 @@ async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaita
         await engine.dispose()
 
 
-async def _recover_and_warn(recorder: TraceRecorder) -> None:
-    """Recovery незавершенных runs при старте (ADR-0005)."""
-    for run in await recorder.recover_interrupted_runs():
+def _console_hooks() -> RunHooks:
+    """RunHooks, печатающие ход прогона задачи в терминал (§21)."""
+
+    def on_prep(prep: WorkspacePrep) -> None:
+        if prep.is_git and prep.branch:
+            suffix = " (после pull)" if prep.pulled else ""
+            console.print(f"[dim]workspace: ветка {prep.branch}{suffix}[/dim]")
+        if prep.note:
+            console.print(f"[yellow]{prep.note}[/yellow]")
+
+    def on_recovered(run: Run) -> None:
         console.print(
             f"[yellow]run {run.id[:8]} был прерван — переведен в suspended "
             f"(`svarog resume {run.id[:8]}`)[/yellow]"
         )
 
+    def on_check(check: CheckOutcome) -> None:
+        colour = "green" if check.passed else "red"
+        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
 
-def _secret_store(cfg: SvarogConfig) -> SecretStore:
-    return default_secret_store(cfg.secrets.path)
+    def on_commit(sha: str, branch: str, needs_push: bool) -> None:
+        console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
+        if needs_push:
+            console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
 
+    def on_memory(commit_sha: str | None, error: str | None) -> None:
+        if error:
+            console.print(f"[yellow]память: заявка отклонена — {error}[/yellow]")
+        elif commit_sha:
+            console.print(f"[dim]память обновлена ({commit_sha})[/dim]")
 
-def _build_loop(
-    cfg: SvarogConfig,
-    workspace: Path,
-    recorder: TraceRecorder,
-    environment: ExecutionEnvironment,
-    autonomy: AutonomyMode,
-    store: SecretStore,
-) -> AgentLoop:
-    # Режим автономии и policy-правила фиксируются здесь, при старте run,
-    # и не перечитываются во время исполнения (ADR-0010).
-    policy = PolicyEngine(
-        autonomy=autonomy,
-        policies=cfg.policies,
-        workspace=workspace,
-        rules=load_policy_rules(workspace),
-        skills_dirs=_skills_dirs(cfg, workspace),
-    )
-    scan = scan_skills(_skills_dirs(cfg, workspace))
-    for skill_error in scan.errors:
-        console.print(
-            f"[yellow]skill пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]"
-        )
-    memory_dir = _memory_dir(cfg)
-    memory_text = (
-        read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
-        if memory_dir is not None
-        else ""
-    )
-    skill_load_sink: list[tuple[str, str | None]] = []
-    memory_sink: list[dict[str, object]] = []
-    return AgentLoop(
-        default_provider(cfg.models, store),
-        _build_registry(
-            workspace,
-            environment,
-            cfg.sandbox.timeout_sec,
-            scan.skills,
-            skill_load_sink,
-            memory_enabled=memory_dir is not None,
-            memory_sink=memory_sink,
+    return RunHooks(
+        on_skill_skipped=lambda name, reason: console.print(
+            f"[yellow]skill пропущен ({name}): {reason}[/yellow]"
         ),
-        recorder,
-        cfg.runtime,
-        policy,
-        workspace,
-        model_name=cfg.models.providers[cfg.models.default].model,
-        skill_cards=skill_cards(scan.skills),
-        memory=memory_text,
-        skill_load_sink=skill_load_sink,
-        memory_sink=memory_sink,
-        workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
-        secret_values=store.values(),
+        on_workspace_prep=on_prep,
+        on_recovered=on_recovered,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -279,155 +183,26 @@ def _build_loop(
         on_notify=lambda name, reason: console.print(
             f"\n[bold yellow]⚡ notify:[/bold yellow] {name} — {reason}", highlight=False
         ),
+        on_check=on_check,
+        on_verify_failed=lambda count: console.print(
+            f"[red]verifier: {count} проверок не прошли — результат нельзя считать корректным[/red]"
+        ),
+        on_commit=on_commit,
+        on_commit_blocked=lambda msg: console.print(
+            f"[red]коммит workspace заблокирован secret scan:[/red]\n{msg}"
+        ),
+        on_memory=on_memory,
     )
 
 
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
-    # Flow C: подготовить workspace (pull + task branch) до старта sandbox,
-    # чтобы контейнер видел рабочую ветку (ADR-0003).
-    flow = WorkspaceFlow(GitRepo(workspace), cfg.git)
-    prep = await flow.start(task)
-    if prep.is_git and prep.branch:
-        console.print(
-            f"[dim]workspace: ветка {prep.branch}{' (после pull)' if prep.pulled else ''}[/dim]"
-        )
-    if prep.note:
-        console.print(f"[yellow]{prep.note}[/yellow]")
-
-    store = _secret_store(cfg)
-    environment = create_environment(
-        cfg.sandbox,
-        workspace,
-        skills_dir=_first_existing_skills_dir(cfg, workspace),
-        env=injected_env(store, cfg.secrets.inject),  # только явно выданные секреты (§12)
-    )
-    await environment.start()
-    try:
-
-        async def action(db: AsyncSession) -> RunOutcome:
-            recorder = TraceRecorder(db)
-            await _recover_and_warn(recorder)
-            loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
-            outcome = await loop.run(task, autonomy)
-            await _drain_memory(cfg, db)
-            await _verify(cfg, workspace, environment, recorder, outcome, store)
-            await _autocommit_workspace(cfg, flow, prep, task, outcome)
-            return outcome
-
-        return await _with_db(cfg, action)
-    finally:
-        await environment.cleanup()
-
-
-async def _verify(
-    cfg: SvarogConfig,
-    workspace: Path,
-    environment: ExecutionEnvironment,
-    recorder: TraceRecorder,
-    outcome: RunOutcome,
-    store: SecretStore,
-) -> None:
-    """Детерминированный verifier после completed-run (§6.11); пишет CheckResult."""
-    if outcome.state is not RunState.COMPLETED:
-        return
-    run = await recorder.get_run(outcome.run_id)
-    if run is None:
-        return
-    scan = scan_skills(_skills_dirs(cfg, workspace))
-    loaded = await recorder.loaded_skill_names(run)
-    checks = [*cfg.verifier.checks, *skill_checks(scan.skills, loaded)]
-    if not checks and not cfg.verifier.secret_scan:
-        return
-
-    verifier = Verifier(environment, workspace)
-    outcomes = await verifier.run(
-        checks, secret_scan=cfg.verifier.secret_scan, known_values=store.values()
-    )
-    failed = [o for o in outcomes if not o.passed]
-    for check in outcomes:
-        await recorder.log_check_result(
-            run, name=check.name, status=check.status, output=check.output
-        )
-        colour = "green" if check.passed else "red"
-        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
-    if failed:
-        # Детерминированные проверки приоритетнее самооценки агента (§6.11).
-        console.print(
-            f"[red]verifier: {len(failed)} проверок не прошли — результат нельзя "
-            f"считать корректным[/red]"
-        )
-
-
-async def _autocommit_workspace(
-    cfg: SvarogConfig,
-    flow: WorkspaceFlow,
-    prep: WorkspacePrep,
-    task: str,
-    outcome: RunOutcome,
-) -> None:
-    """Flow C: закоммитить изменения workspace на task-ветке после run."""
-    if not (prep.is_git and cfg.git.auto_commit and outcome.state is RunState.COMPLETED):
-        return
-    try:
-        sha = await flow.commit_step(f"svarog: {task[:72]}", run_id=outcome.run_id)
-    except SecretScanBlockedError as exc:
-        console.print(f"[red]коммит workspace заблокирован secret scan:[/red]\n{exc}")
-        return
-    if sha is None:
-        return
-    branch = prep.branch or "HEAD"
-    console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
-    if cfg.git.require_approval_for_push:
-        console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
-
-
-async def _drain_memory(cfg: SvarogConfig, db: AsyncSession) -> None:
-    """Применить очередь заявок памяти single writer'ом после run (ADR-0004)."""
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None or not memory_dir.is_dir():
-        return
-    writer = MemoryWriter(db, memory_dir)
-    for row in await writer.drain():
-        if row.error:
-            console.print(f"[yellow]память: заявка отклонена — {row.error}[/yellow]")
-        elif row.commit_sha:
-            console.print(f"[dim]память обновлена ({row.commit_sha})[/dim]")
+    return await TaskRunner(cfg, workspace).run_once(task, autonomy, hooks=_console_hooks())
 
 
 async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
-    async def action(db: AsyncSession) -> RunOutcome:
-        recorder = TraceRecorder(db)
-        await _recover_and_warn(recorder)
-        run, raw_state = await recorder.load_resumable(run_id)
-        state = LoopState.from_dict(raw_state)
-        workspace = state.workspace
-        if not workspace.is_dir():
-            raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
-        # runtime/sandbox-настройки берутся из конфига проекта workspace,
-        # режим автономии — заморожен в run (ADR-0010).
-        run_cfg = load_config(project_dir=workspace)
-        store = _secret_store(run_cfg)
-        environment = create_environment(
-            run_cfg.sandbox,
-            workspace,
-            skills_dir=_first_existing_skills_dir(run_cfg, workspace),
-            env=injected_env(store, run_cfg.secrets.inject),
-        )
-        await environment.start()
-        try:
-            loop = _build_loop(
-                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy), store
-            )
-            outcome = await loop.resume(run, state)
-            await _drain_memory(run_cfg, db)
-            await _verify(run_cfg, workspace, environment, recorder, outcome, store)
-            return outcome
-        finally:
-            await environment.cleanup()
-
-    return await _with_db(cfg, action)
+    return await TaskRunner(cfg, Path.cwd().resolve()).resume(run_id, hooks=_console_hooks())
 
 
 @app.command()
@@ -505,19 +280,15 @@ def chat(
 
 
 async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
-    store = _secret_store(cfg)
-    environment = create_environment(
-        cfg.sandbox,
-        workspace,
-        skills_dir=_first_existing_skills_dir(cfg, workspace),
-        env=injected_env(store, cfg.secrets.inject),
-    )
+    runner = TaskRunner(cfg, workspace)
+    hooks = _console_hooks()
+    environment = runner.build_environment()
     await environment.start()
     try:
 
         async def action(db: AsyncSession) -> None:
             recorder = TraceRecorder(db)
-            await _recover_and_warn(recorder)
+            await runner.recover(recorder, hooks)
             session_id: str | None = None
             history: list[ChatMessage] = []
             while True:
@@ -529,9 +300,9 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                     break
                 if not task or task in {"/quit", "/exit"}:
                     break
-                loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
+                loop = runner.build_loop(recorder, environment, autonomy, hooks)
                 outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
-                await _drain_memory(cfg, db)
+                await runner.drain_memory(db, hooks)
                 if session_id is None:
                     run = await recorder.get_run(outcome.run_id)
                     session_id = run.session_id if run else None
@@ -542,7 +313,7 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                 history[:] = history[-_CHAT_HISTORY_LIMIT:]
                 _print_chat_turn(outcome)
 
-        await _with_db(cfg, action)
+        await runner.with_db(action)
     finally:
         await environment.cleanup()
 
@@ -778,7 +549,7 @@ def skills_list() -> None:
     """Показать доступные скиллы и их карточки."""
     cfg = _load_config_or_exit()
     workspace = Path.cwd().resolve()
-    scan = scan_skills(_skills_dirs(cfg, workspace))
+    scan = scan_skills(skills_dirs(cfg, workspace))
     if not scan.skills and not scan.errors:
         console.print("скиллов не найдено (проверьте skills.paths в svarog.yaml)")
         return
@@ -793,7 +564,7 @@ def skills_check() -> None:
     """Проверить валидность SKILL.md всех скиллов; exit code 1 при ошибках."""
     cfg = _load_config_or_exit()
     workspace = Path.cwd().resolve()
-    scan = scan_skills(_skills_dirs(cfg, workspace))
+    scan = scan_skills(skills_dirs(cfg, workspace))
     for skill in scan.skills:
         console.print(f"[green]ok[/green] {skill.name} (v{skill.metadata.version})")
     for skill_error in scan.errors:
@@ -811,11 +582,11 @@ app.add_typer(memory_app, name="memory")
 def memory_show() -> None:
     """Показать память, как она попадёт в контекст."""
     cfg = _load_config_or_exit()
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None:
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None:
         console.print("память не настроена (задайте memory.path в svarog.yaml)")
         return
-    text = read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+    text = read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes)
     console.print(text or "память пуста")
 
 
@@ -823,13 +594,13 @@ def memory_show() -> None:
 def memory_flush() -> None:
     """Применить очередь заявок памяти single writer'ом (обычно вызывается после run)."""
     cfg = _load_config_or_exit()
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None or not memory_dir.is_dir():
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None or not mem_dir.is_dir():
         console.print("память не настроена или каталог отсутствует")
         raise typer.Exit(code=1)
 
     async def action(db: AsyncSession) -> int:
-        writer = MemoryWriter(db, memory_dir)
+        writer = MemoryWriter(db, mem_dir)
         rows = await writer.drain()
         for row in rows:
             if row.error:
