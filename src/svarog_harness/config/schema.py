@@ -82,6 +82,7 @@ class RuntimeConfig(StrictModel):
 class SandboxConfig(StrictModel):
     type: Literal["docker", "local-trusted"] = "docker"
     network: Literal["disabled"] = "disabled"  # allowlist-режим — пост-MVP (ADR-0002)
+    image: str = "python:3.12-slim"  # нужен bash и coreutils (timeout)
     memory_limit: str = "8g"
     cpu_limit: float = Field(default=4, gt=0)
     timeout_sec: int = Field(default=120, gt=0)

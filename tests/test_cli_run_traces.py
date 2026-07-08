@@ -49,6 +49,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "    local:\n"
         "      base_url: http://localhost:9/v1\n"
         "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
         f"storage:\n  db_path: {db_path}\n",
         encoding="utf-8",
     )

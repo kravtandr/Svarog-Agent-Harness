@@ -18,6 +18,7 @@ from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
+from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import RunState
 from svarog_harness.tools.file_tools import file_tools
@@ -76,12 +77,25 @@ def _resolve_autonomy(
     return chosen[0] if chosen else cfg.runtime.autonomy
 
 
-def _build_registry(workspace: Path, command_timeout_sec: float) -> ToolRegistry:
+def _build_registry(
+    workspace: Path, environment: ExecutionEnvironment, command_timeout_sec: float
+) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in file_tools(workspace):
         registry.register(tool)
-    registry.register(BashTool(workspace, command_timeout_sec))
+    registry.register(BashTool(environment, command_timeout_sec))
     return registry
+
+
+def _first_existing_skills_dir(cfg: SvarogConfig, workspace: Path) -> Path | None:
+    """Первый существующий каталог skills — mount ro в sandbox (ADR-0002)."""
+    for raw in cfg.skills.paths:
+        path = raw.expanduser()
+        if not path.is_absolute():
+            path = workspace / path
+        if path.is_dir():
+            return path.resolve()
+    return None
 
 
 async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
@@ -98,22 +112,30 @@ async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaita
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
-    async def action(db: AsyncSession) -> RunOutcome:
-        loop = AgentLoop(
-            default_provider(cfg.models),
-            _build_registry(workspace, cfg.sandbox.timeout_sec),
-            TraceRecorder(db),
-            cfg.runtime,
-            workspace,
-            model_name=cfg.models.providers[cfg.models.default].model,
-            on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
-            on_tool_call=lambda name, args: console.print(
-                f"\n[dim]→ {name} {args}[/dim]", highlight=False
-            ),
-        )
-        return await loop.run(task, autonomy)
+    environment = create_environment(
+        cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(cfg, workspace)
+    )
+    await environment.start()
+    try:
 
-    return await _with_db(cfg, action)
+        async def action(db: AsyncSession) -> RunOutcome:
+            loop = AgentLoop(
+                default_provider(cfg.models),
+                _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
+                TraceRecorder(db),
+                cfg.runtime,
+                workspace,
+                model_name=cfg.models.providers[cfg.models.default].model,
+                on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
+                on_tool_call=lambda name, args: console.print(
+                    f"\n[dim]→ {name} {args}[/dim]", highlight=False
+                ),
+            )
+            return await loop.run(task, autonomy)
+
+        return await _with_db(cfg, action)
+    finally:
+        await environment.cleanup()
 
 
 @app.command()
@@ -143,6 +165,9 @@ def run(
         outcome = asyncio.run(_run_task(cfg, workspace, task, autonomy))
     except ApiKeyError as exc:
         console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except SandboxError as exc:
+        console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
 
     console.print()
