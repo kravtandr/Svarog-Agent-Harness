@@ -53,6 +53,15 @@ def default_provider(
     return OpenAICompatibleProvider(models_cfg.providers[models_cfg.default], store=store)
 
 
+def auxiliary_provider(
+    models_cfg: ModelsConfig, store: SecretStore | None = None
+) -> "OpenAICompatibleProvider":
+    """Провайдер для auxiliary-модели: служебные задачи (curator слой 2, §13)."""
+    return OpenAICompatibleProvider(
+        models_cfg.providers[models_cfg.auxiliary_or_default], store=store
+    )
+
+
 def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for msg in messages:

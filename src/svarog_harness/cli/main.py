@@ -22,7 +22,7 @@ from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
-from svarog_harness.llm.openai_compatible import ApiKeyError
+from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
@@ -33,7 +33,14 @@ from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import scaffold_agent_home
 from svarog_harness.secrets import FileSecretStore, default_secret_store
 from svarog_harness.skills import scan_skills
-from svarog_harness.skills.curator import CuratorStore, prune_layer1
+from svarog_harness.skills.curator import (
+    CurationReport,
+    CuratorStore,
+    consolidate_layer2,
+    prune_layer1,
+    rewrite_description,
+)
+from svarog_harness.skills.models import Skill
 from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import (
     SkillProposalManager,
@@ -712,23 +719,104 @@ def skills_proposals_reject(
 
 
 @skills_app.command("curate")
-def skills_curate() -> None:
-    """Curator слой 1: lifecycle-переходы скиллов по usage-статистике (§18.1)."""
+def skills_curate(
+    semantic: Annotated[
+        bool,
+        typer.Option("--semantic", help="Слой 2: LLM-консолидация на auxiliary-модели (opt-in)"),
+    ] = False,
+) -> None:
+    """Curator: слой 1 (lifecycle по usage) и опц. слой 2 (LLM-консолидация, §18.1)."""
     cfg = _load_config_or_exit()
-    scan = scan_skills(skills_dirs(cfg, Path.cwd().resolve()))
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(skills_dirs(cfg, workspace))
 
     async def action(db: AsyncSession) -> None:
         transitions = await prune_layer1(db, scan.skills, cfg.curator)
-        if not transitions:
-            console.print("curator: lifecycle-изменений нет")
-            return
-        for t in transitions:
-            console.print(
-                f"[cyan]{t.skill_name}[/cyan]: {t.old.value} → {t.new.value} "
-                f"[dim]({t.reason})[/dim]"
-            )
+        if transitions:
+            for t in transitions:
+                console.print(
+                    f"[cyan]{t.skill_name}[/cyan]: {t.old.value} → {t.new.value} "
+                    f"[dim]({t.reason})[/dim]"
+                )
+        else:
+            console.print("curator слой 1: lifecycle-изменений нет")
+        if semantic or cfg.curator.semantic:
+            await _curate_semantic(cfg, workspace, scan.skills, db)
 
     asyncio.run(_with_db(cfg, action))
+
+
+async def _curate_semantic(
+    cfg: SvarogConfig, workspace: Path, skills: list[Skill], db: AsyncSession
+) -> None:
+    """Слой 2: LLM-находки → отчёт в artifacts/ + description-proposals (§18.1)."""
+    try:
+        provider = auxiliary_provider(cfg.models, default_secret_store(cfg.secrets.path))
+    except ApiKeyError as exc:
+        console.print(f"[red]слой 2 недоступен: {exc}[/red]")
+        return
+    console.print("[dim]curator слой 2: анализ библиотеки auxiliary-моделью…[/dim]")
+    report = await consolidate_layer2(provider, skills)
+    path = _write_curation_report(workspace, report)
+    console.print(f"[dim]отчёт: {path}[/dim]")
+    if report.parse_error:
+        console.print(
+            f"[yellow]слой 2: LLM вернул неразбираемый ответ ({report.parse_error})[/yellow]"
+        )
+        return
+    if not report.findings:
+        console.print("curator слой 2: находок нет")
+        return
+    for finding in report.findings:
+        console.print(
+            f"[magenta]{finding.kind}[/magenta] {', '.join(finding.skills)}: {finding.detail}"
+        )
+    await _propose_description_improvements(cfg, workspace, skills, report, db)
+
+
+def _write_curation_report(workspace: Path, report: CurationReport) -> Path:
+    from datetime import UTC, datetime
+
+    artifacts = workspace / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    path = artifacts / f"skill-curation-{stamp}.md"
+    path.write_text(report.to_markdown(), encoding="utf-8")
+    return path
+
+
+async def _propose_description_improvements(
+    cfg: SvarogConfig,
+    workspace: Path,
+    skills: list[Skill],
+    report: CurationReport,
+    db: AsyncSession,
+) -> None:
+    """Содержательные правки — только через proposals (Flow B, §18.1)."""
+    by_name = {s.name: s for s in skills}
+    skills_dir = skills_dirs(cfg, workspace)[0] if cfg.skills.paths else None
+    if skills_dir is None:
+        return
+    manager = SkillProposalManager(db, skills_dir)
+    store = default_secret_store(cfg.secrets.path)
+    for finding in report.improvements():
+        for name in finding.skills:
+            skill = by_name.get(name)
+            # Curator предлагает правки только agent-created скиллов (§18.1).
+            if skill is None or skill.metadata.provenance != "agent":
+                continue
+            files = {"SKILL.md": rewrite_description(skill, finding.suggested_description or "")}
+            request = SkillProposalRequest(
+                skill_name=name,
+                action="update",
+                files=files,
+                note=f"curator: улучшить описание — {finding.detail}",
+            )
+            proposal = await manager.persist(request, known_values=store.values())
+            console.print(
+                f"[cyan]proposal[/cyan] {name}: обновить описание "
+                f"[dim]({proposal.status.value}, {proposal.id[:8]})[/dim]"
+            )
 
 
 def _set_pin(name: str, pinned: bool) -> None:
