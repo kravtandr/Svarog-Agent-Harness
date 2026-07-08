@@ -24,6 +24,7 @@ from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
+from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
@@ -315,6 +316,8 @@ def chat(
 async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
+    backends = await connect_mcp_servers(cfg.mcp, runner.store)
+    mcp_tools = build_mcp_tools(backends)
     environment = runner.build_environment()
     await environment.start()
     try:
@@ -336,7 +339,13 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                 proposal_sink: list[SkillProposalRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
                 loop = runner.build_loop(
-                    recorder, environment, autonomy, hooks, proposal_sink, excluded_skills=excluded
+                    recorder,
+                    environment,
+                    autonomy,
+                    hooks,
+                    proposal_sink,
+                    excluded_skills=excluded,
+                    mcp_tools=mcp_tools,
                 )
                 outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await runner.drain_memory(db, hooks)
@@ -354,6 +363,9 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
         await runner.with_db(action)
     finally:
         await environment.cleanup()
+        for backend in backends:
+            with contextlib.suppress(Exception):
+                await backend.close()
 
 
 def _print_chat_turn(outcome: RunOutcome) -> None:
@@ -1011,6 +1023,45 @@ def telegram(
     )
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(bot.run_forever())
+
+
+mcp_app = typer.Typer(help="MCP-серверы: discovery инструментов (§9).", no_args_is_help=True)
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    """Подключить настроенные MCP-серверы и показать обнаруженные инструменты."""
+    cfg = _load_config_or_exit()
+    if not cfg.mcp.servers:
+        console.print("MCP-серверы не настроены (секция mcp.servers в svarog.yaml)")
+        return
+    store = default_secret_store(cfg.secrets.path)
+
+    async def discover() -> None:
+        backends = await connect_mcp_servers(cfg.mcp, store)
+        try:
+            tools = build_mcp_tools(backends)
+            if not tools:
+                console.print("инструменты на MCP-серверах не обнаружены")
+                return
+            for tool in tools:
+                console.print(
+                    f"[cyan]{tool.name}[/cyan] [dim](risk={tool.risk_level.value}, "
+                    f"action={tool.action_type}, по умолчанию approval)[/dim]"
+                )
+                if tool.description:
+                    console.print(f"  {tool.description}")
+        finally:
+            for backend in backends:
+                with contextlib.suppress(Exception):
+                    await backend.close()
+
+    try:
+        asyncio.run(discover())
+    except MCPError as exc:
+        console.print(f"[red]MCP: {exc}[/red]")
+        raise typer.Exit(code=1) from None
 
 
 secrets_app = typer.Typer(

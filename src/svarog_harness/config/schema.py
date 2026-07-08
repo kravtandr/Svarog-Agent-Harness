@@ -134,6 +134,21 @@ class VerifierConfig(StrictModel):
     secret_scan: bool = True
 
 
+class MCPServerConfig(StrictModel):
+    # stdio-транспорт: команда и аргументы запуска MCP-сервера.
+    command: str
+    args: list[str] = Field(default_factory=list)
+    # Имена секретов из SecretStore → env сервера (ADR-0006), не значения.
+    env_refs: list[str] = Field(default_factory=list)
+    # Риск по умолчанию для инструментов сервера: high + approval (§9), пока
+    # администратор не ослабит профилем notify.
+    risk: Literal["low", "medium", "high", "critical"] = "high"
+
+
+class MCPConfig(StrictModel):
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
 class CuratorConfig(StrictModel):
     # Слой 1 (§18.1, ADR-0009): скилл без использования N дней → stale, больше → archived.
     stale_after_days: int = Field(default=30, gt=0)
@@ -198,6 +213,7 @@ class SvarogConfig(BaseSettings):
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     @classmethod
     def settings_customise_sources(

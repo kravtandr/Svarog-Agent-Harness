@@ -9,7 +9,7 @@ JSON Schema для LLM. Валидация аргументов и timeout пр�
 import asyncio
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -65,14 +65,16 @@ class ToolResult(BaseModel):
 
 
 class Tool[ArgsT: BaseModel](ABC):
-    name: ClassVar[str]
-    description: ClassVar[str]
-    risk_level: ClassVar[RiskLevel]
-    sandbox_requirement: ClassVar[SandboxRequirement] = SandboxRequirement.NONE
+    # Не ClassVar: статические tools задают их на уровне класса, а динамические
+    # (MCP — имя/риск/схема известны только при discovery) — на инстансе.
+    name: str
+    description: str
+    risk_level: RiskLevel
+    sandbox_requirement: SandboxRequirement = SandboxRequirement.NONE
     # Типизированная операция для Policy Engine и правил policies/*.yaml
     # (например "file.write"); None — используется имя tool.
-    action_type: ClassVar[str | None] = None
-    # Не ClassVar: tool может переопределить timeout на инстансе (bash берет его из конфига).
+    action_type: str | None = None
+    # Tool может переопределить timeout на инстансе (bash берет его из конфига).
     timeout_sec: float = 60.0
 
     # Параметризованный тип нельзя объявить ClassVar — задается в подклассах на уровне класса.

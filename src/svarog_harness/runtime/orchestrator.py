@@ -7,6 +7,7 @@ CLI, gateway (REST/WS) и Telegram гоняют один и тот же end-to-e
 Так gateway не дублирует ядро (repo-structure: `cli`/`gateway` → `runtime`).
 """
 
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from svarog_harness.config.paths import first_existing_skills_dir, memory_dir, s
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.gitflow import GitRepo, SecretScanBlockedError, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import default_provider
+from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
@@ -62,6 +64,12 @@ class RunHooks:
     on_commit_blocked: Callable[[str], None] | None = None
     on_memory: Callable[[str | None, str | None], None] | None = None
     on_proposal: Callable[[SkillProposal], None] | None = None
+
+
+async def _close_backends(backends: list[MCPBackend]) -> None:
+    for backend in backends:
+        with contextlib.suppress(Exception):
+            await backend.close()
 
 
 class TaskRunner:
@@ -109,6 +117,7 @@ class TaskRunner:
         proposal_sink: list[SkillProposalRequest] | None = None,
         *,
         excluded_skills: frozenset[str] = frozenset(),
+        mcp_tools: list[MCPTool] | None = None,
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
@@ -141,6 +150,7 @@ class TaskRunner:
             memory_sink,
             proposal_sink,
             memory_enabled=mem_dir is not None,
+            mcp_tools=mcp_tools,
         )
         return AgentLoop(
             default_provider(cfg.models, store),
@@ -171,12 +181,17 @@ class TaskRunner:
         proposal_sink: list[SkillProposalRequest] | None,
         *,
         memory_enabled: bool,
+        mcp_tools: list[MCPTool] | None = None,
     ) -> ToolRegistry:
         registry = ToolRegistry()
         for tool in file_tools(self._workspace):
             registry.register(tool)
         registry.register(BashTool(environment, self._cfg.sandbox.timeout_sec))
         registry.register(RequestApprovalTool())
+        for mcp_tool in mcp_tools or []:
+            # MCP tools проходят через Policy Engine как обычные (§9): по умолчанию
+            # require_approval (action_type mcp.*), риск из конфига сервера.
+            registry.register(mcp_tool)
         if skills:
             registry.register(
                 ReadSkillTool(
@@ -200,9 +215,11 @@ class TaskRunner:
         if hooks.on_workspace_prep is not None:
             hooks.on_workspace_prep(prep)
 
+        backends = await connect_mcp_servers(self._cfg.mcp, self._store)
         environment = self.build_environment()
         await environment.start()
         try:
+            mcp_tools = build_mcp_tools(backends)
 
             async def action(db: AsyncSession) -> RunOutcome:
                 recorder = TraceRecorder(db)
@@ -210,7 +227,13 @@ class TaskRunner:
                 proposal_sink: list[SkillProposalRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
                 loop = self.build_loop(
-                    recorder, environment, autonomy, hooks, proposal_sink, excluded_skills=excluded
+                    recorder,
+                    environment,
+                    autonomy,
+                    hooks,
+                    proposal_sink,
+                    excluded_skills=excluded,
+                    mcp_tools=mcp_tools,
                 )
                 outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
@@ -222,6 +245,7 @@ class TaskRunner:
             return await self.with_db(action)
         finally:
             await environment.cleanup()
+            await _close_backends(backends)
 
     async def resume(self, run_id: str, *, hooks: RunHooks) -> RunOutcome:
         """Возобновить run из checkpoint (ADR-0005).
@@ -240,6 +264,7 @@ class TaskRunner:
             if not workspace.is_dir():
                 raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
             runner = TaskRunner(load_config(project_dir=workspace), workspace)
+            backends = await connect_mcp_servers(runner._cfg.mcp, runner._store)
             environment = runner.build_environment()
             await environment.start()
             try:
@@ -252,6 +277,7 @@ class TaskRunner:
                     hooks,
                     proposal_sink,
                     excluded_skills=excluded,
+                    mcp_tools=build_mcp_tools(backends),
                 )
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)
@@ -260,6 +286,7 @@ class TaskRunner:
                 return outcome
             finally:
                 await environment.cleanup()
+                await _close_backends(backends)
 
         return await self.with_db(action)
 

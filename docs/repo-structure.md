@@ -99,6 +99,11 @@ svarog/
       models.py             # pydantic-схемы запросов/ответов
       telegram.py           # Telegram-бот: long-polling, approval-кнопки
 
+    mcp/                    # MCP-интеграция (пост-MVP M5, §9)
+      models.py             # MCPToolSpec, MCPBackend
+      tool.py               # MCPTool: MCP-инструмент как Tool
+      integration.py        # connect_mcp_servers (stdio SDK), build_mcp_tools
+
   skills/                   # official skills (§23), поставляются с платформой
     git-workflow/
     skill-authoring/

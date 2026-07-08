@@ -65,7 +65,10 @@ uv run svarog chat                                          # интеракти
 uv run svarog secrets set PROVIDER_API_KEY                  # записать секрет в файл store (0600)
 uv run svarog serve                                         # REST/WebSocket gateway (extra `server`, §10.4)
 uv run svarog telegram                                      # Telegram-бот (§10.2)
+uv run svarog mcp list                                      # инструменты MCP-серверов (extra `mcp`, §9)
 ```
+
+MCP-серверы (`svarog-harness[mcp]`, §9) подключаются секцией `mcp.servers` в `svarog.yaml`: их инструменты проходят discovery и регистрируются как обычные tools, но по умолчанию получают `risk: high` и требуют approval (§9, ADR-0010), пока администратор не ослабит их профилем `notify`. Токены серверов — секреты (`env_refs` → SecretStore), не значения в конфиге.
 
 Gateway (`svarog-harness[server]`, §10.4) поднимает тот же прогон задачи через HTTP: `POST /runs` создаёт run и сразу возвращает `run_id`, `WS /runs/{id}/events` стримит текст/tool calls/checks/финал, `POST /approvals/{id}` принимает решение и асинхронно возобновляет run (ADR-0005). CLI и gateway используют один `TaskRunner`, поэтому логика агента не дублируется.
 

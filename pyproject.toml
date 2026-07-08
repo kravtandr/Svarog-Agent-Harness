@@ -40,6 +40,11 @@ server = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
 ]
+# MCP-интеграция (§9): подключение внешних MCP-серверов. Ставится как
+# `svarog-harness[mcp]`; базовая установка работает без MCP.
+mcp = [
+    "mcp>=1.2",
+]
 
 [project.urls]
 Repository = "https://github.com/kravtandr/Svarog-Agent-Harness"
@@ -57,6 +62,7 @@ dev = [
     # Опциональные интерфейсы гоняются в тестах и CI.
     "fastapi>=0.115",
     "uvicorn>=0.34",
+    "mcp>=1.2",
 ]
 
 [tool.hatch.build.targets.wheel]
