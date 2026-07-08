@@ -76,6 +76,11 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [tool.ruff.lint.per-file-ignores]
 "src/svarog_harness/storage/migrations/versions/*" = ["E501"]
 
+[tool.ruff.lint.isort]
+# Явная классификация first-party: иначе isort зависит от того, как установлен
+# пакет (editable src/ vs site-packages в CI), и порядок импортов расходится.
+known-first-party = ["svarog_harness", "evals"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
