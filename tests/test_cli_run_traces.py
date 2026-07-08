@@ -49,6 +49,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "    local:\n"
         "      base_url: http://localhost:9/v1\n"
         "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
         f"storage:\n  db_path: {db_path}\n",
         encoding="utf-8",
     )
@@ -106,7 +107,9 @@ def test_run_with_tool_call_touches_workspace(
     assert (workspace / "out.txt").read_text(encoding="utf-8") == "готово"
 
 
-def test_run_failed_returns_exit_code_2(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_iteration_limit_suspends_with_exit_code_3(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     endless = [
         CompletionResult(
             content="",
@@ -117,8 +120,87 @@ def test_run_failed_returns_exit_code_2(workspace: Path, monkeypatch: pytest.Mon
     ]
     _patch_provider(monkeypatch, endless)
     result = runner.invoke(cli_main.app, ["run", "зациклись", "--workspace", str(workspace)])
-    assert result.exit_code == 2
+    assert result.exit_code == 3
     assert "лимит итераций" in result.output
+    assert "svarog resume" in result.output
+
+
+def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(ToolCallRequest(id=f"c{i}", name="list_dir", arguments_json="{}"),),
+                usage=Usage(10, 5),
+            )
+            for i in range(2)
+        ]
+        + [CompletionResult(content="закончил после resume", usage=Usage(10, 5))],
+    )
+    # refuel_after_iterations должен быть меньше max_iterations — валидатор.
+    monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
+    result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])
+    assert result.exit_code == 3, result.output
+
+    run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
+    monkeypatch.delenv("SVAROG_RUNTIME__MAX_ITERATIONS")
+    monkeypatch.delenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS")
+    resumed = runner.invoke(cli_main.app, ["resume", run_id])
+    assert resumed.exit_code == 0, resumed.output
+    assert "закончил после resume" in resumed.output
+    assert "completed" in resumed.output
+
+
+def test_approval_flow_via_cli(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """run → waiting_approval → approvals list/approve → resume → completed."""
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="request_approval",
+                        arguments_json='{"action": "рискованный шаг", "details": "rm -rf build"}',
+                    ),
+                ),
+                usage=Usage(10, 5),
+            ),
+            CompletionResult(content="одобрено, продолжаю", usage=Usage(10, 5)),
+        ],
+    )
+    result = runner.invoke(cli_main.app, ["run", "рискованная", "--workspace", str(workspace)])
+    assert result.exit_code == 3, result.output
+    assert "waiting_approval" in result.output
+    run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
+
+    list_result = runner.invoke(cli_main.app, ["approvals", "list"])
+    assert list_result.exit_code == 0, list_result.output
+    assert "рискованный шаг" in list_result.output
+    approval_id = list_result.output.split("approvals approve/deny ", 1)[1].split()[0]
+
+    approve_result = runner.invoke(cli_main.app, ["approvals", "approve", approval_id])
+    assert approve_result.exit_code == 0, approve_result.output
+    assert "одобрен" in approve_result.output
+
+    resumed = runner.invoke(cli_main.app, ["resume", run_id])
+    assert resumed.exit_code == 0, resumed.output
+    assert "одобрено, продолжаю" in resumed.output
+
+
+def test_approvals_list_empty(workspace: Path) -> None:
+    result = runner.invoke(cli_main.app, ["approvals", "list"])
+    assert result.exit_code == 0
+    assert "ожидающих approvals нет" in result.output
+
+
+def test_resume_unknown_run(workspace: Path) -> None:
+    result = runner.invoke(cli_main.app, ["resume", "deadbeef"])
+    assert result.exit_code == 1
+    assert "не найден" in result.output
 
 
 def test_run_rejects_conflicting_autonomy_flags(workspace: Path) -> None:

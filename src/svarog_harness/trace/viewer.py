@@ -10,18 +10,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.storage.models import Message, Run, ToolCall
+from svarog_harness.trace.lookup import RunNotFoundError, find_run_by_prefix
+
+__all__ = [
+    "RunNotFoundError",
+    "fetch_run",
+    "fetch_runs",
+    "render_run",
+    "render_runs_table",
+]
 
 _STATE_STYLES = {
     "completed": "green",
     "failed": "red",
     "running": "yellow",
+    "suspended": "yellow",
     "waiting_approval": "magenta",
 }
-
-
-class RunNotFoundError(Exception):
-    def __init__(self, run_id: str) -> None:
-        super().__init__(f"run '{run_id}' не найден (id или его префикс — см. traces list)")
 
 
 async def fetch_runs(db: AsyncSession, limit: int = 20) -> list[Run]:
@@ -31,13 +36,7 @@ async def fetch_runs(db: AsyncSession, limit: int = 20) -> list[Run]:
 
 async def fetch_run(db: AsyncSession, run_id: str) -> tuple[Run, list[Message], list[ToolCall]]:
     """Найти run по полному id или уникальному префиксу."""
-    result = await db.execute(select(Run).where(Run.id.startswith(run_id)))
-    runs = list(result.scalars())
-    if not runs:
-        raise RunNotFoundError(run_id)
-    if len(runs) > 1:
-        raise RunNotFoundError(f"{run_id} (префикс неоднозначен: {len(runs)} runs)")
-    run = runs[0]
+    run = await find_run_by_prefix(db, run_id)
     messages = list(
         (
             await db.execute(
@@ -124,13 +123,29 @@ def render_run(run: Run, messages: list[Message], tool_calls: list[ToolCall]) ->
         calls_table.add_column("tool", style="cyan")
         calls_table.add_column("статус")
         calls_table.add_column("риск")
+        calls_table.add_column("policy")
         calls_table.add_column("ошибка", max_width=60)
         for call in tool_calls:
             calls_table.add_row(
                 call.tool_name,
                 call.status.value,
                 call.risk_level or "-",
+                _policy_text(call.policy_decision),
                 call.error or "",
             )
         blocks.append(calls_table)
     return Group(*blocks)
+
+
+# notify и deny выделяются в trace (ADR-0010: post-hoc review вместо pre-approval).
+_POLICY_STYLES = {
+    "notify": "bold yellow",
+    "deny": "bold red",
+    "require_approval": "bold magenta",
+}
+
+
+def _policy_text(decision: str | None) -> Text:
+    if not decision:
+        return Text("-")
+    return Text(decision, style=_POLICY_STYLES.get(decision, "white"))

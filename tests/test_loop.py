@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
+from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -16,6 +16,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
+from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Message, Run, RunState, ToolCall, ToolCallStatus
@@ -85,6 +86,7 @@ def _loop(
         registry,
         TraceRecorder(db),
         cfg or RuntimeConfig(),
+        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=workspace),
         workspace,
         model_name="test-model",
     )
@@ -186,7 +188,7 @@ async def test_invalid_arguments_json_reported_to_model(db: AsyncSession, tmp_pa
     assert tool_call.arguments == {"_raw": "{broken"}
 
 
-async def test_stops_at_max_iterations(db: AsyncSession, tmp_path: Path) -> None:
+async def test_suspends_at_max_iterations(db: AsyncSession, tmp_path: Path) -> None:
     endless = [
         _tool_turn(ToolCallRequest(id=f"c{i}", name="list_dir", arguments_json="{}"))
         for i in range(10)
@@ -195,13 +197,13 @@ async def test_stops_at_max_iterations(db: AsyncSession, tmp_path: Path) -> None
     cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=2)
     outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("зациклись", AutonomyMode.YOLO)
 
-    assert outcome.state is RunState.FAILED
+    assert outcome.state is RunState.SUSPENDED
     assert outcome.iterations == 3
     assert outcome.error is not None
     assert "лимит итераций" in outcome.error
 
 
-async def test_stops_when_cost_budget_exceeded(db: AsyncSession, tmp_path: Path) -> None:
+async def test_suspends_when_cost_budget_exceeded(db: AsyncSession, tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             CompletionResult(
@@ -215,15 +217,16 @@ async def test_stops_when_cost_budget_exceeded(db: AsyncSession, tmp_path: Path)
     )
     outcome = await _loop(provider, db, tmp_path).run("дорогая задача", AutonomyMode.YOLO)
 
-    assert outcome.state is RunState.FAILED
+    assert outcome.state is RunState.SUSPENDED
     assert outcome.error is not None
     assert "бюджет стоимости" in outcome.error
     run = (await db.execute(select(Run))).scalar_one()
-    assert run.state is RunState.FAILED
+    assert run.state is RunState.SUSPENDED
+    assert run.finished_at is None  # suspended — не терминальное состояние
     assert run.cost_usd == pytest.approx(9.99)
 
 
-async def test_stops_when_context_overflows(db: AsyncSession, tmp_path: Path) -> None:
+async def test_suspends_when_context_overflows(db: AsyncSession, tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             _tool_turn(
@@ -235,7 +238,7 @@ async def test_stops_when_context_overflows(db: AsyncSession, tmp_path: Path) ->
     )
     outcome = await _loop(provider, db, tmp_path).run("огромный контекст", AutonomyMode.YOLO)
 
-    assert outcome.state is RunState.FAILED
+    assert outcome.state is RunState.SUSPENDED
     assert outcome.error is not None
     assert "контекст превысил лимит" in outcome.error
 

@@ -1,23 +1,13 @@
-"""Bash tool (§6.5): исполнение shell-команд в workspace.
+"""Bash tool (§6.5): исполнение shell-команд в ExecutionEnvironment.
 
-В M1 единственная среда — local-trusted (§17): команда выполняется на
-хосте без изоляции, это явный режим для доверенных локальных задач.
-Docker sandbox подключается в M2 (ADR-0002); tool уже сейчас декларирует
-sandbox_requirement=REQUIRED, чтобы policy/sandbox могли это enforced'ить.
-
-Timeout обрабатывается внутри execute убийством группы процессов:
-внешний asyncio.wait_for лишь отменил бы communicate(), оставив
-процесс работать.
+Гарантии изоляции — свойство переданной среды (ADR-0002): docker дает
+слой 1, local-trusted (§17) работает без гарантий. Timeout команды
+обеспечивает сама среда; tool лишь форматирует результат для модели.
 """
-
-import asyncio
-import contextlib
-import os
-import signal
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from svarog_harness.sandbox.base import ExecutionEnvironment
 from svarog_harness.tools.base import (
     RiskLevel,
     SandboxRequirement,
@@ -35,45 +25,35 @@ class BashArgs(BaseModel):
 
 class BashTool(Tool[BashArgs]):
     name = "bash"
+    action_type = "bash.exec"
     description = "Выполнить shell-команду в workspace; возвращает exit code, stdout и stderr"
     risk_level = RiskLevel.MEDIUM
     sandbox_requirement = SandboxRequirement.REQUIRED
     args_model = BashArgs
 
-    def __init__(self, workspace: Path, command_timeout_sec: float = 120.0) -> None:
-        self.workspace = workspace
+    def __init__(
+        self, environment: ExecutionEnvironment, command_timeout_sec: float = 120.0
+    ) -> None:
+        self._env = environment
         self._command_timeout = command_timeout_sec
-        # Запас для базового wait_for: сам не сработает, убийство группы — внутри execute.
-        self.timeout_sec = command_timeout_sec + 10
+        # Запас для базового wait_for: за timeout команды отвечает среда.
+        self.timeout_sec = command_timeout_sec + 30
 
     async def execute(self, args: BashArgs) -> ToolResult:
-        proc = await asyncio.create_subprocess_shell(
-            args.command,
-            cwd=self.workspace,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # своя группа процессов, чтобы убить и потомков
-        )
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=self._command_timeout
-            )
-        except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            await proc.wait()
+        result = await self._env.execute(args.command, timeout_sec=self._command_timeout)
+        if result.timed_out:
             return ToolResult.failure(
                 f"команда превысила timeout {self._command_timeout}s и была убита: {args.command}"
             )
 
-        stdout = truncate_text(stdout_bytes.decode(errors="replace"), _MAX_STREAM_CHARS)
-        stderr = truncate_text(stderr_bytes.decode(errors="replace"), _MAX_STREAM_CHARS)
-        parts = [f"exit code: {proc.returncode}"]
+        stdout = truncate_text(result.stdout, _MAX_STREAM_CHARS)
+        stderr = truncate_text(result.stderr, _MAX_STREAM_CHARS)
+        parts = [f"exit code: {result.exit_code}"]
         if stdout:
             parts.append(f"stdout:\n{stdout}")
         if stderr:
             parts.append(f"stderr:\n{stderr}")
         output = "\n".join(parts)
-        if proc.returncode != 0:
-            return ToolResult(ok=False, output=output, error=f"exit code {proc.returncode}")
+        if result.exit_code != 0:
+            return ToolResult(ok=False, output=output, error=f"exit code {result.exit_code}")
         return ToolResult.success(output)

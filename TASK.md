@@ -1083,8 +1083,9 @@ runtime:
   max_cost_usd_per_run: 5.0
 
 sandbox:
-  type: docker
+  type: docker            # docker (по умолчанию) | local-trusted (без изоляции, §17)
   network: disabled
+  image: python:3.12-slim # образ контейнера; нужен bash и coreutils (timeout)
   memory_limit: 8g
   cpu_limit: 4
   timeout_sec: 120
