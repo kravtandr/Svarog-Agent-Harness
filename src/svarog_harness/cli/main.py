@@ -24,12 +24,14 @@ from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_ru
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
+from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, RunState
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
+from svarog_harness.tools.skill_tools import ReadSkillTool
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -52,6 +54,8 @@ traces_app = typer.Typer(help="Просмотр traces выполненных ru
 app.add_typer(traces_app, name="traces")
 approvals_app = typer.Typer(help="Approval-запросы: список и решения.", no_args_is_help=True)
 app.add_typer(approvals_app, name="approvals")
+skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
+app.add_typer(skills_app, name="skills")
 console = Console()
 
 
@@ -90,13 +94,23 @@ def _resolve_autonomy(
 
 
 def _build_registry(
-    workspace: Path, environment: ExecutionEnvironment, command_timeout_sec: float
+    workspace: Path,
+    environment: ExecutionEnvironment,
+    command_timeout_sec: float,
+    skills: list[Skill],
+    skill_load_sink: list[tuple[str, str | None]],
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in file_tools(workspace):
         registry.register(tool)
     registry.register(BashTool(environment, command_timeout_sec))
     registry.register(RequestApprovalTool())
+    if skills:
+        registry.register(
+            ReadSkillTool(
+                skills, on_load=lambda name, version: skill_load_sink.append((name, version))
+            )
+        )
     return registry
 
 
@@ -155,14 +169,24 @@ def _build_loop(
         rules=load_policy_rules(workspace),
         skills_dirs=_skills_dirs(cfg, workspace),
     )
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    for skill_error in scan.errors:
+        console.print(
+            f"[yellow]skill пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]"
+        )
+    skill_load_sink: list[tuple[str, str | None]] = []
     return AgentLoop(
         default_provider(cfg.models),
-        _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
+        _build_registry(
+            workspace, environment, cfg.sandbox.timeout_sec, scan.skills, skill_load_sink
+        ),
         recorder,
         cfg.runtime,
         policy,
         workspace,
         model_name=cfg.models.providers[cfg.models.default].model,
+        skill_cards=skill_cards(scan.skills),
+        skill_load_sink=skill_load_sink,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -451,3 +475,33 @@ def approvals_deny(
 ) -> None:
     """Отклонить действие; агент получит причину отказа при resume."""
     _decide_approval_command(approval_id, approved=False, reason=reason)
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """Показать доступные скиллы и их карточки."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    if not scan.skills and not scan.errors:
+        console.print("скиллов не найдено (проверьте skills.paths в svarog.yaml)")
+        return
+    for skill in scan.skills:
+        console.print(skill.card())
+    for skill_error in scan.errors:
+        console.print(f"[yellow]пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]")
+
+
+@skills_app.command("check")
+def skills_check() -> None:
+    """Проверить валидность SKILL.md всех скиллов; exit code 1 при ошибках."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    for skill in scan.skills:
+        console.print(f"[green]ok[/green] {skill.name} (v{skill.metadata.version})")
+    for skill_error in scan.errors:
+        console.print(f"[red]ошибка[/red] {skill_error.path}: {skill_error.reason}")
+    if scan.errors:
+        raise typer.Exit(code=1)
+    console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")

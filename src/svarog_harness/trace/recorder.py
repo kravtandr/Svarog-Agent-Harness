@@ -17,6 +17,7 @@ from svarog_harness.storage.models import (
     Run,
     RunState,
     Session,
+    SkillLoad,
     ToolCall,
     ToolCallStatus,
     utcnow,
@@ -149,6 +150,20 @@ class TraceRecorder:
         approval.decided_at = utcnow()
         approval.decided_by = decided_by
         approval.reason = reason
+        await self._db.commit()
+
+    async def log_skill_load(
+        self, run: Run, *, skill_name: str, skill_version: str | None, source: str = "full"
+    ) -> None:
+        """Факт загрузки скилла — сырьё для Skill Curator (ADR-0009, §18.1)."""
+        self._db.add(
+            SkillLoad(
+                run_id=run.id,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                source=source,
+            )
+        )
         await self._db.commit()
 
     async def update_progress(

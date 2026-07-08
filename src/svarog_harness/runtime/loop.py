@@ -58,6 +58,9 @@ class AgentLoop:
         workspace: Path,
         *,
         model_name: str,
+        skill_cards: str = "",
+        memory: str = "",
+        skill_load_sink: list[tuple[str, str | None]] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
@@ -69,6 +72,10 @@ class AgentLoop:
         self._policy = policy
         self._workspace = workspace
         self._model_name = model_name
+        self._skill_cards = skill_cards
+        self._memory = memory
+        # read_skill tool пишет сюда (name, version); loop сливает в SkillLoad.
+        self._skill_load_sink = skill_load_sink if skill_load_sink is not None else []
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
@@ -78,7 +85,9 @@ class AgentLoop:
         run = await self._recorder.start_run(
             task=task, autonomy=autonomy.value, model=self._model_name
         )
-        messages = build_initial_messages(task, self._workspace)
+        messages = build_initial_messages(
+            task, self._workspace, skill_cards=self._skill_cards, memory=self._memory
+        )
         for message in messages:
             await self._recorder.add_message(run, message.role, {"content": message.content})
 
@@ -161,6 +170,7 @@ class AgentLoop:
         while state.pending_tool_calls:
             call = state.pending_tool_calls[0]
             tool_result = await self._execute_tool(run, call)
+            await self._flush_skill_loads(run)
             rendered = self._render_tool_result(tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._recorder.add_message(
@@ -168,6 +178,12 @@ class AgentLoop:
             )
             state.pending_tool_calls = state.pending_tool_calls[1:]
             await self._save_checkpoint(run, state)
+
+    async def _flush_skill_loads(self, run: Run) -> None:
+        """Записать SkillLoad для скиллов, загруженных read_skill (ADR-0009)."""
+        while self._skill_load_sink:
+            name, version = self._skill_load_sink.pop(0)
+            await self._recorder.log_skill_load(run, skill_name=name, skill_version=version)
 
     async def _save_checkpoint(self, run: Run, state: LoopState) -> None:
         await self._recorder.save_checkpoint(run, iteration=state.iterations, state=state.to_dict())
