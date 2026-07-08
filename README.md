@@ -1,4 +1,8 @@
-# Svarog Agent Harness
+<p align="center">
+  <img src="assets/svarog_logo.png" alt="Svarog Agent Harness" width="480">
+</p>
+
+<h1 align="center">Svarog Agent Harness</h1>
 
 **Svarog** — open-source, self-hosted, Git-native runtime для ИИ-агентов: скиллы, sandboxed execution, Git-память, refuel loops, approval policies и полный audit trace. Это платформа для сборки агентов, а не готовый агент и не workflow-фреймворк.
 
