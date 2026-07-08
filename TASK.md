@@ -1068,6 +1068,11 @@ models:
       type: openai-compatible
       base_url: http://localhost:8000/v1
       model: qwen3-coder
+      # api_key_ref: PROVIDER_API_KEY  # именованная ссылка на секрет, не значение (ADR-0006)
+      # input_usd_per_mtok: 3.0        # цены за 1M токенов для учета стоимости run
+      # output_usd_per_mtok: 15.0      # 0 (по умолчанию) — локальная модель
+      # timeout_sec: 120
+      # max_retries: 2
 
 runtime:
   autonomy: yolo            # supervised | auto | yolo (по умолчанию)

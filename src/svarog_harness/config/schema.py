@@ -29,7 +29,13 @@ class ProviderConfig(StrictModel):
     base_url: str
     model: str
     # Именованная ссылка на секрет в SecretStore, не сам ключ (ADR-0006).
+    # До появления SecretStore (M4) разрешается как имя env-переменной.
     api_key_ref: str | None = None
+    # Цены за миллион токенов — для учета стоимости run; 0 = локальная модель.
+    input_usd_per_mtok: float = Field(default=0.0, ge=0)
+    output_usd_per_mtok: float = Field(default=0.0, ge=0)
+    timeout_sec: float = Field(default=120.0, gt=0)
+    max_retries: int = Field(default=2, ge=0)
 
 
 class ModelsConfig(StrictModel):
