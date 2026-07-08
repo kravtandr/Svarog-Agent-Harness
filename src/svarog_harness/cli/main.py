@@ -20,6 +20,7 @@ from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
@@ -29,6 +30,7 @@ from svarog_harness.storage.db import create_engine, create_session_factory, ini
 from svarog_harness.storage.models import Approval, RunState
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
+from svarog_harness.tools.memory_tools import RememberTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import ReadSkillTool
@@ -99,6 +101,9 @@ def _build_registry(
     command_timeout_sec: float,
     skills: list[Skill],
     skill_load_sink: list[tuple[str, str | None]],
+    *,
+    memory_enabled: bool,
+    memory_sink: list[dict[str, object]],
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in file_tools(workspace):
@@ -111,7 +116,16 @@ def _build_registry(
                 skills, on_load=lambda name, version: skill_load_sink.append((name, version))
             )
         )
+    if memory_enabled:
+        registry.register(RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict())))
     return registry
+
+
+def _memory_dir(cfg: SvarogConfig) -> Path | None:
+    """Каталог memory-репозитория (Flow A), если память включена в конфиге."""
+    if cfg.memory.path is None:
+        return None
+    return cfg.memory.path.expanduser().resolve()
 
 
 def _skills_dirs(cfg: SvarogConfig, workspace: Path) -> list[Path]:
@@ -174,11 +188,24 @@ def _build_loop(
         console.print(
             f"[yellow]skill пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]"
         )
+    memory_dir = _memory_dir(cfg)
+    memory_text = (
+        read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+        if memory_dir is not None
+        else ""
+    )
     skill_load_sink: list[tuple[str, str | None]] = []
+    memory_sink: list[dict[str, object]] = []
     return AgentLoop(
         default_provider(cfg.models),
         _build_registry(
-            workspace, environment, cfg.sandbox.timeout_sec, scan.skills, skill_load_sink
+            workspace,
+            environment,
+            cfg.sandbox.timeout_sec,
+            scan.skills,
+            skill_load_sink,
+            memory_enabled=memory_dir is not None,
+            memory_sink=memory_sink,
         ),
         recorder,
         cfg.runtime,
@@ -186,7 +213,9 @@ def _build_loop(
         workspace,
         model_name=cfg.models.providers[cfg.models.default].model,
         skill_cards=skill_cards(scan.skills),
+        memory=memory_text,
         skill_load_sink=skill_load_sink,
+        memory_sink=memory_sink,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -210,11 +239,26 @@ async def _run_task(
             recorder = TraceRecorder(db)
             await _recover_and_warn(recorder)
             loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
-            return await loop.run(task, autonomy)
+            outcome = await loop.run(task, autonomy)
+            await _drain_memory(cfg, db)
+            return outcome
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _drain_memory(cfg: SvarogConfig, db: AsyncSession) -> None:
+    """Применить очередь заявок памяти single writer'ом после run (ADR-0004)."""
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None or not memory_dir.is_dir():
+        return
+    writer = MemoryWriter(db, memory_dir)
+    for row in await writer.drain():
+        if row.error:
+            console.print(f"[yellow]память: заявка отклонена — {row.error}[/yellow]")
+        elif row.commit_sha:
+            console.print(f"[dim]память обновлена ({row.commit_sha})[/dim]")
 
 
 async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
@@ -505,3 +549,42 @@ def skills_check() -> None:
     if scan.errors:
         raise typer.Exit(code=1)
     console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")
+
+
+memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    """Показать память, как она попадёт в контекст."""
+    cfg = _load_config_or_exit()
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None:
+        console.print("память не настроена (задайте memory.path в svarog.yaml)")
+        return
+    text = read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+    console.print(text or "память пуста")
+
+
+@memory_app.command("flush")
+def memory_flush() -> None:
+    """Применить очередь заявок памяти single writer'ом (обычно вызывается после run)."""
+    cfg = _load_config_or_exit()
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None or not memory_dir.is_dir():
+        console.print("память не настроена или каталог отсутствует")
+        raise typer.Exit(code=1)
+
+    async def action(db: AsyncSession) -> int:
+        writer = MemoryWriter(db, memory_dir)
+        rows = await writer.drain()
+        for row in rows:
+            if row.error:
+                console.print(f"[yellow]отклонено: {row.error}[/yellow]")
+            elif row.commit_sha:
+                console.print(f"[green]{row.commit_sha}[/green] применено")
+        return len(rows)
+
+    count = asyncio.run(_with_db(cfg, action))
+    console.print(f"обработано заявок: {count}")

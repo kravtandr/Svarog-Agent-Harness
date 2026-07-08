@@ -61,6 +61,7 @@ class AgentLoop:
         skill_cards: str = "",
         memory: str = "",
         skill_load_sink: list[tuple[str, str | None]] | None = None,
+        memory_sink: list[dict[str, object]] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
@@ -76,6 +77,8 @@ class AgentLoop:
         self._memory = memory
         # read_skill tool пишет сюда (name, version); loop сливает в SkillLoad.
         self._skill_load_sink = skill_load_sink if skill_load_sink is not None else []
+        # remember tool пишет сюда заявки; loop сливает в очередь MemoryChange.
+        self._memory_sink = memory_sink if memory_sink is not None else []
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
@@ -171,6 +174,7 @@ class AgentLoop:
             call = state.pending_tool_calls[0]
             tool_result = await self._execute_tool(run, call)
             await self._flush_skill_loads(run)
+            await self._flush_memory(run)
             rendered = self._render_tool_result(tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._recorder.add_message(
@@ -184,6 +188,12 @@ class AgentLoop:
         while self._skill_load_sink:
             name, version = self._skill_load_sink.pop(0)
             await self._recorder.log_skill_load(run, skill_name=name, skill_version=version)
+
+    async def _flush_memory(self, run: Run) -> None:
+        """Поставить заявки remember в очередь single writer'а (ADR-0004)."""
+        while self._memory_sink:
+            change = self._memory_sink.pop(0)
+            await self._recorder.enqueue_memory_change(run, change)
 
     async def _save_checkpoint(self, run: Run, state: LoopState) -> None:
         await self._recorder.save_checkpoint(run, iteration=state.iterations, state=state.to_dict())
