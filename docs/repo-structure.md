@@ -21,10 +21,11 @@ svarog/
     config/                 # svarog.yaml → pydantic-settings
       schema.py
       loader.py
+      paths.py              # разрешение skills/memory-путей (общее для cli/gateway)
 
     runtime/                # ядро (§6.2)
       loop.py               # agent loop: state machine, итерации
-      run_state.py          # состояния run, переходы
+      orchestrator.py       # TaskRunner: один прогон задачи под RunHooks (cli/gateway/telegram)
       checkpoint.py         # сериализация/восстановление (ADR-0005)
       context_builder.py    # слои контекста, budget (§6.3)
       refuel.py             # task_state.md, пересборка контекста (§6.10)
@@ -90,7 +91,10 @@ svarog/
       recorder.py           # запись всех сущностей аудита
       viewer.py             # traces list/show для CLI
 
-    gateway/                # пост-MVP: FastAPI, WebSocket, Telegram
+    gateway/                # внешние интерфейсы (пост-MVP M5, §10.4)
+      service.py            # GatewayService: фоновые runs + стриминг событий
+      api.py                # FastAPI create_app: REST + WebSocket
+      models.py             # pydantic-схемы запросов/ответов
 
   skills/                   # official skills (§23), поставляются с платформой
     git-workflow/
@@ -109,5 +113,5 @@ svarog/
 
 * **Зависимости направлены вниз**: `cli` → `runtime` → (`tools`, `policy`, `sandbox`, `memory`, `gitflow`, `skills`, `llm`) → `storage`/`trace`. Никаких импортов из `cli` в ядро.
 * **Каждый pluggable-интерфейс** (ModelProvider, SandboxBackend, QueueBackend, SecretStore) живет в `base.py`/`provider.py` своего пакета; реализации — соседние модули.
-* **`gateway/` пустой в MVP** — но `runtime` уже общается с внешним миром только через события (`storage/events.py`) и approvals, поэтому подключение Telegram/REST не потребует менять ядро.
+* **`gateway/` — первый внешний интерфейс (M5)**: `runtime` общается с внешним миром только через `RunHooks` оркестратора, события (`storage/events.py`) и approvals, поэтому REST/WS/Telegram подключены без изменений ядра. CLI и gateway гоняют один `TaskRunner`.
 * **`skills/` в корне** — это контент, не код: официальные скиллы копируются в agent-home при `svarog init`.

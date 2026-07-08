@@ -58,7 +58,10 @@ uv run svarog memory show                                   # память, ка
 uv run svarog push <branch>                                 # push task-ветки (Flow C, с policy)
 uv run svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
 uv run svarog secrets set PROVIDER_API_KEY                  # записать секрет в файл store (0600)
+uv run svarog serve                                         # REST/WebSocket gateway (extra `server`, §10.4)
 ```
+
+Gateway (`svarog-harness[server]`, §10.4) поднимает тот же прогон задачи через HTTP: `POST /runs` создаёт run и сразу возвращает `run_id`, `WS /runs/{id}/events` стримит текст/tool calls/checks/финал, `POST /approvals/{id}` принимает решение и асинхронно возобновляет run (ADR-0005). CLI и gateway используют один `TaskRunner`, поэтому логика агента не дублируется.
 
 После завершённого run детерминированный verifier прогоняет проверки (тесты, линтеры из `verifier.checks`, secret scan рабочего дерева и skill-specific checks) — упавшая проверка приоритетнее самооценки агента (§6.11) и даёт exit code 4. Секреты хранятся в SecretStore (файл `~/.svarog/secrets.json` с правами 0600 или env), агент видит только имена (`api_key_ref`); значения инжектируются в окружение sandbox только для явно перечисленных в `secrets.inject` и вырезаются (redaction) из trace и tool-выводов.
 

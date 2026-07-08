@@ -31,6 +31,14 @@ dependencies = [
     "docker>=7.1",
 ]
 
+[project.optional-dependencies]
+# REST/WebSocket gateway (§10.4). Базовая установка (Git+SQLite, ADR-0007)
+# работает без веб-стека; ставится как `svarog-harness[server]`.
+server = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+]
+
 [project.urls]
 Repository = "https://github.com/kravtandr/Svarog-Agent-Harness"
 
@@ -44,6 +52,9 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-pyyaml>=6.0",
+    # Опциональные интерфейсы гоняются в тестах и CI.
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
 ]
 
 [tool.hatch.build.targets.wheel]

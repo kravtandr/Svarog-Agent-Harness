@@ -655,6 +655,41 @@ def push(
     console.print(f"[green]push выполнен[/green]\n{result}")
 
 
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Адрес прослушивания")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Порт")] = 8080,
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+) -> None:
+    """Запустить REST/WebSocket API gateway (§10.4). Нужен extra `server`."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    try:
+        import uvicorn
+
+        from svarog_harness.gateway import GatewayService
+        from svarog_harness.gateway.api import create_app
+    except ImportError:
+        console.print(
+            "[red]gateway требует опциональные зависимости:[/red] "
+            "uv pip install 'svarog-harness[server]'"
+        )
+        raise typer.Exit(code=1) from None
+    api = create_app(GatewayService(cfg, workspace))
+    console.print(
+        f"[green]Svarog gateway[/green] http://{host}:{port} | workspace: {workspace}\n"
+        f"[dim]POST /runs · GET /runs/{{id}} · WS /runs/{{id}}/events · "
+        f"GET /approvals · POST /approvals/{{id}}[/dim]"
+    )
+    uvicorn.run(api, host=host, port=port, log_level="info")
+
+
 secrets_app = typer.Typer(
     help="SecretStore: имена секретов (значения не показываются).", no_args_is_help=True
 )

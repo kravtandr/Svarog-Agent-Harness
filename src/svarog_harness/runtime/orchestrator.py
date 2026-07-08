@@ -49,6 +49,7 @@ class RunHooks:
     on_skill_skipped: Callable[[str, str], None] | None = None
     on_workspace_prep: Callable[[WorkspacePrep], None] | None = None
     on_recovered: Callable[[Run], None] | None = None
+    on_run_started: Callable[[Run], None] | None = None
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
@@ -148,6 +149,7 @@ class TaskRunner:
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
             on_notify=hooks.on_notify,
+            on_run_started=hooks.on_run_started,
         )
 
     def _build_registry(

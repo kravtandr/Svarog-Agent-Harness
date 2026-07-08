@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 
 from svarog_harness.cli import main as cli_main
 from svarog_harness.config.schema import ModelsConfig
-from svarog_harness.runtime import orchestrator
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -17,6 +16,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
+from svarog_harness.runtime import orchestrator
 
 runner = CliRunner()
 
