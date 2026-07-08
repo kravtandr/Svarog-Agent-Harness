@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/svarog_logo.png" alt="Svarog Agent Harness" width="480">
+  <img src="assets/logo.png" alt="Svarog Agent Harness" width="480">
 </p>
 
 <h1 align="center">Svarog Agent Harness</h1>
