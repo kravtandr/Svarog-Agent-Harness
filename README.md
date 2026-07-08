@@ -59,9 +59,12 @@ uv run svarog push <branch>                                 # push task-ветк
 uv run svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
 uv run svarog secrets set PROVIDER_API_KEY                  # записать секрет в файл store (0600)
 uv run svarog serve                                         # REST/WebSocket gateway (extra `server`, §10.4)
+uv run svarog telegram                                      # Telegram-бот (§10.2)
 ```
 
 Gateway (`svarog-harness[server]`, §10.4) поднимает тот же прогон задачи через HTTP: `POST /runs` создаёт run и сразу возвращает `run_id`, `WS /runs/{id}/events` стримит текст/tool calls/checks/финал, `POST /approvals/{id}` принимает решение и асинхронно возобновляет run (ADR-0005). CLI и gateway используют один `TaskRunner`, поэтому логика агента не дублируется.
+
+Telegram-бот (§10.2) — тот же `GatewayService` поверх Bot API: сообщение порождает run, ход прогона идёт в чат, `waiting_approval` показывается inline-кнопками approve/deny. Токен бота — секрет (`telegram.token_ref` → SecretStore, ADR-0006), доступ ограничен allowlist'ом `telegram.allowed_users` (§16).
 
 После завершённого run детерминированный verifier прогоняет проверки (тесты, линтеры из `verifier.checks`, secret scan рабочего дерева и skill-specific checks) — упавшая проверка приоритетнее самооценки агента (§6.11) и даёт exit code 4. Секреты хранятся в SecretStore (файл `~/.svarog/secrets.json` с правами 0600 или env), агент видит только имена (`api_key_ref`); значения инжектируются в окружение sandbox только для явно перечисленных в `secrets.inject` и вырезаются (redaction) из trace и tool-выводов.
 

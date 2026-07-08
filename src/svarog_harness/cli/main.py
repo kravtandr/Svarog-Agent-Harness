@@ -690,6 +690,57 @@ def serve(
     uvicorn.run(api, host=host, port=port, log_level="info")
 
 
+@app.command()
+def telegram(
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+) -> None:
+    """Запустить Telegram-бота (§10.2). Токен — секрет (telegram.token_ref)."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    tg = cfg.telegram
+    if tg.token_ref is None:
+        console.print("[red]telegram.token_ref не задан[/red] (имя секрета с bot-токеном)")
+        raise typer.Exit(code=1)
+    if not tg.allowed_users:
+        console.print(
+            "[red]telegram.allowed_users пуст[/red] — задайте allowlist user-id "
+            "(бот без allowlist отвечает всем отказом)"
+        )
+        raise typer.Exit(code=1)
+    token = default_secret_store(cfg.secrets.path).get(tg.token_ref)
+    if not token:
+        console.print(
+            f"[red]секрет '{tg.token_ref}' не найден[/red] в SecretStore/окружении; "
+            f"svarog secrets set {tg.token_ref}"
+        )
+        raise typer.Exit(code=1)
+
+    from svarog_harness.gateway import GatewayService
+    from svarog_harness.gateway.telegram import (
+        HttpxTelegramTransport,
+        TelegramBot,
+    )
+
+    bot = TelegramBot(
+        GatewayService(cfg, workspace),
+        HttpxTelegramTransport(token),
+        allowed_users=set(tg.allowed_users),
+        poll_timeout=tg.poll_timeout_sec,
+    )
+    console.print(
+        f"[green]Svarog Telegram bot[/green] | workspace: {workspace} | "
+        f"allowlist: {len(tg.allowed_users)} user(s)\n[dim]Ctrl-C для остановки[/dim]"
+    )
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(bot.run_forever())
+
+
 secrets_app = typer.Typer(
     help="SecretStore: имена секретов (значения не показываются).", no_args_is_help=True
 )

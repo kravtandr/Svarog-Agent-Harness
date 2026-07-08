@@ -134,6 +134,17 @@ class VerifierConfig(StrictModel):
     secret_scan: bool = True
 
 
+class TelegramConfig(StrictModel):
+    # Имя секрета с bot-токеном в SecretStore (ADR-0006), не сам токен: проект
+    # публичный, токен в конфиге/истории = скомпрометирован. None — бот выключен.
+    token_ref: str | None = None
+    # Allowlist Telegram user-id, которым разрешён доступ (§16 auth). Пустой —
+    # бот отвечает всем отказом: интернет-facing интерфейс без allowlist опасен.
+    allowed_users: list[int] = Field(default_factory=list)
+    # Таймаут long-polling getUpdates (сек).
+    poll_timeout_sec: int = Field(default=30, ge=0)
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -168,6 +179,7 @@ class SvarogConfig(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
     @classmethod
     def settings_customise_sources(

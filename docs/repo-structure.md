@@ -91,10 +91,11 @@ svarog/
       recorder.py           # запись всех сущностей аудита
       viewer.py             # traces list/show для CLI
 
-    gateway/                # внешние интерфейсы (пост-MVP M5, §10.4)
+    gateway/                # внешние интерфейсы (пост-MVP M5, §10.2/§10.4)
       service.py            # GatewayService: фоновые runs + стриминг событий
       api.py                # FastAPI create_app: REST + WebSocket
       models.py             # pydantic-схемы запросов/ответов
+      telegram.py           # Telegram-бот: long-polling, approval-кнопки
 
   skills/                   # official skills (§23), поставляются с платформой
     git-workflow/
