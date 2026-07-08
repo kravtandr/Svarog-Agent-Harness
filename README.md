@@ -44,9 +44,24 @@ models:
 uv run svarog run "создай hello.py, который печатает время" # выполнить задачу
 uv run svarog traces list                                   # последние runs
 uv run svarog traces show <run-id>                          # полный trace run'а
+uv run svarog resume <run-id>                               # продолжить приостановленный run
+uv run svarog approvals list                                # ожидающие подтверждения
+uv run svarog approvals approve <id>                        # или deny <id> --reason "…"
 ```
 
-В M1 команды выполняются в режиме local-trusted (без изоляции); Docker sandbox и policy engine — M2 (см. backlog).
+Bash-команды агента по умолчанию исполняются в **Docker sandbox** (сеть выключена, non-root, лимиты CPU/RAM — ADR-0002); нужен установленный Docker или Podman. Без изоляции — явный режим `sandbox: {type: local-trusted}` в `svarog.yaml`.
+
+Run — возобновляемый state machine (ADR-0005): при превышении лимитов итераций/токенов/стоимости он приостанавливается (`suspended`), а не падает — поднимите лимит в конфиге и выполните `svarog resume`. Approval-запросы (critical-действия, режим `--supervised`, tool `request_approval`) переводят run в `waiting_approval`: в терминале решение запрашивается сразу, без TTY — через `svarog approvals`, затем `resume`.
+
+Policy-правила проекта живут в `policies/*.yaml` и могут только ужесточать поведение:
+
+```yaml
+rules:
+  - match: "file.*"          # fnmatch по типу операции (file.write, bash.exec, …)
+    decision: deny           # deny | require_approval | notify
+    reason: "инфраструктуру руками не трогаем"
+    paths: ["infra/**"]      # опционально, по аргументу path
+```
 
 ## Документация
 

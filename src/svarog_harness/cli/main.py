@@ -1,7 +1,8 @@
 """Точка входа CLI `svarog` (§10.1).
 
-Команды init/chat/skills/approvals добавляются по мере milestones
-(см. docs/first-issues.md); в M1 доступны run, traces list/show, version.
+Команды init/chat/skills добавляются по мере milestones (см.
+docs/first-issues.md); после M2 доступны run, resume, traces list/show,
+approvals list/approve/deny, version.
 """
 
 import asyncio
