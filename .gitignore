@@ -1,4 +1,6 @@
-# Секреты — никогда не коммитить (ADR-0006)
+# Секреты — никогда не коммитить (ADR-0006).
+# Паттерны каталогов якорим к корню репозитория (ведущий /), иначе они
+# глотают одноимённые исходники, например src/svarog_harness/secrets/.
 .env
 .env.*
 *.pem
@@ -6,8 +8,9 @@
 *.p12
 *.pfx
 credentials*.json
-secrets/
-.secrets/
+/secrets/
+/.secrets/
+.svarog/secrets*
 
 # Python
 __pycache__/
