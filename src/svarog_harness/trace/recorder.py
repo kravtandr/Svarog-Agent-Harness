@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.storage.models import (
+    Approval,
     Checkpoint,
     Message,
     Run,
@@ -67,13 +68,20 @@ class TraceRecorder:
         return index
 
     async def start_tool_call(
-        self, run: Run, *, tool_name: str, arguments: dict[str, Any], risk_level: str | None
+        self,
+        run: Run,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        risk_level: str | None,
+        policy_decision: str | None = None,
     ) -> ToolCall:
         tool_call = ToolCall(
             run_id=run.id,
             tool_name=tool_name,
             arguments=arguments,
             risk_level=risk_level,
+            policy_decision=policy_decision,
             status=ToolCallStatus.RUNNING,
             started_at=utcnow(),
         )
@@ -82,13 +90,33 @@ class TraceRecorder:
         return tool_call
 
     async def finish_tool_call(
-        self, tool_call: ToolCall, *, ok: bool, output: str, error: str | None
+        self, tool_call: ToolCall, *, ok: bool, output: str, error: str | None, denied: bool = False
     ) -> None:
-        tool_call.status = ToolCallStatus.SUCCEEDED if ok else ToolCallStatus.FAILED
+        if denied:
+            tool_call.status = ToolCallStatus.DENIED
+        else:
+            tool_call.status = ToolCallStatus.SUCCEEDED if ok else ToolCallStatus.FAILED
         tool_call.result = {"output": output}
         tool_call.error = error
         tool_call.finished_at = utcnow()
         await self._db.commit()
+
+    async def create_approval(
+        self, run: Run, *, action_type: str, payload: dict[str, Any]
+    ) -> Approval:
+        """ApprovalRequest: payload содержит фактическую команду/аргументы (§12)."""
+        approval = Approval(run_id=run.id, action_type=action_type, payload=payload)
+        self._db.add(approval)
+        await self._db.commit()
+        return approval
+
+    async def find_approval_for_call(self, run: Run, call_id: str) -> Approval | None:
+        """Approval для конкретного tool call (payload.call_id) — любой статус."""
+        result = await self._db.execute(select(Approval).where(Approval.run_id == run.id))
+        for approval in result.scalars():
+            if approval.payload.get("call_id") == call_id:
+                return approval
+        return None
 
     async def update_progress(
         self, run: Run, *, iterations: int, tokens_used: int, cost_usd: float

@@ -17,6 +17,7 @@ from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
@@ -88,14 +89,22 @@ def _build_registry(
     return registry
 
 
-def _first_existing_skills_dir(cfg: SvarogConfig, workspace: Path) -> Path | None:
-    """Первый существующий каталог skills — mount ro в sandbox (ADR-0002)."""
+def _skills_dirs(cfg: SvarogConfig, workspace: Path) -> list[Path]:
+    """Абсолютные пути каталогов skills из конфигурации."""
+    dirs = []
     for raw in cfg.skills.paths:
         path = raw.expanduser()
         if not path.is_absolute():
             path = workspace / path
+        dirs.append(path.resolve())
+    return dirs
+
+
+def _first_existing_skills_dir(cfg: SvarogConfig, workspace: Path) -> Path | None:
+    """Первый существующий каталог skills — mount ro в sandbox (ADR-0002)."""
+    for path in _skills_dirs(cfg, workspace):
         if path.is_dir():
-            return path.resolve()
+            return path
     return None
 
 
@@ -120,18 +129,35 @@ async def _recover_and_warn(recorder: TraceRecorder) -> None:
 
 
 def _build_loop(
-    cfg: SvarogConfig, workspace: Path, recorder: TraceRecorder, environment: ExecutionEnvironment
+    cfg: SvarogConfig,
+    workspace: Path,
+    recorder: TraceRecorder,
+    environment: ExecutionEnvironment,
+    autonomy: AutonomyMode,
 ) -> AgentLoop:
+    # Режим автономии и policy-правила фиксируются здесь, при старте run,
+    # и не перечитываются во время исполнения (ADR-0010).
+    policy = PolicyEngine(
+        autonomy=autonomy,
+        policies=cfg.policies,
+        workspace=workspace,
+        rules=load_policy_rules(workspace),
+        skills_dirs=_skills_dirs(cfg, workspace),
+    )
     return AgentLoop(
         default_provider(cfg.models),
         _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
         recorder,
         cfg.runtime,
+        policy,
         workspace,
         model_name=cfg.models.providers[cfg.models.default].model,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
+        ),
+        on_notify=lambda name, reason: console.print(
+            f"\n[bold yellow]⚡ notify:[/bold yellow] {name} — {reason}", highlight=False
         ),
     )
 
@@ -148,7 +174,7 @@ async def _run_task(
         async def action(db: AsyncSession) -> RunOutcome:
             recorder = TraceRecorder(db)
             await _recover_and_warn(recorder)
-            loop = _build_loop(cfg, workspace, recorder, environment)
+            loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
             return await loop.run(task, autonomy)
 
         return await _with_db(cfg, action)
@@ -173,7 +199,9 @@ async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
         )
         await environment.start()
         try:
-            loop = _build_loop(run_cfg, workspace, recorder, environment)
+            loop = _build_loop(
+                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy)
+            )
             return await loop.resume(run, state)
         finally:
             await environment.cleanup()
@@ -212,6 +240,9 @@ def run(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    except PolicyRulesError as exc:
+        console.print(f"[red]ошибка policy-правил:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     _report_outcome(outcome)
 
 
@@ -223,7 +254,7 @@ def resume(
     cfg = _load_config_or_exit()
     try:
         outcome = asyncio.run(_resume_task(cfg, run_id))
-    except (RunNotFoundError, RunNotResumableError, ConfigError) as exc:
+    except (RunNotFoundError, RunNotResumableError, ConfigError, PolicyRulesError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     except ApiKeyError as exc:
@@ -248,6 +279,12 @@ def _report_outcome(outcome: RunOutcome) -> None:
         if outcome.error:
             console.print(f"[yellow]{outcome.error}[/yellow]")
         console.print(f"[dim]возобновить: svarog resume {outcome.run_id[:8]}[/dim]")
+        raise typer.Exit(code=3)
+    elif outcome.state is RunState.WAITING_APPROVAL:
+        console.print(f"[magenta]waiting_approval[/magenta] | {stats}")
+        if outcome.error:
+            console.print(f"[magenta]{outcome.error}[/magenta]")
+        console.print(f"[dim]после решения возобновить: svarog resume {outcome.run_id[:8]}[/dim]")
         raise typer.Exit(code=3)
     else:
         console.print(f"[red]{outcome.state.value}[/red] | {stats}")

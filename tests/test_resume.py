@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
+from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -16,6 +16,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
+from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
@@ -76,6 +77,7 @@ def _loop(
         registry,
         TraceRecorder(db),
         cfg or RuntimeConfig(),
+        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=workspace),
         workspace,
         model_name="test-model",
     )

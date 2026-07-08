@@ -25,6 +25,7 @@ class BashArgs(BaseModel):
 
 class BashTool(Tool[BashArgs]):
     name = "bash"
+    action_type = "bash.exec"
     description = "Выполнить shell-команду в workspace; возвращает exit code, stdout и stderr"
     risk_level = RiskLevel.MEDIUM
     sandbox_requirement = SandboxRequirement.REQUIRED

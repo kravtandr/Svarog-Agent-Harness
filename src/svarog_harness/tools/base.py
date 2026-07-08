@@ -69,6 +69,9 @@ class Tool[ArgsT: BaseModel](ABC):
     description: ClassVar[str]
     risk_level: ClassVar[RiskLevel]
     sandbox_requirement: ClassVar[SandboxRequirement] = SandboxRequirement.NONE
+    # Типизированная операция для Policy Engine и правил policies/*.yaml
+    # (например "file.write"); None — используется имя tool.
+    action_type: ClassVar[str | None] = None
     # Не ClassVar: tool может переопределить timeout на инстансе (bash берет его из конфига).
     timeout_sec: float = 60.0
 

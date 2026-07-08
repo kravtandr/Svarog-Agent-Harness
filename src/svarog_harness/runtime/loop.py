@@ -14,6 +14,7 @@ from pathlib import Path
 
 from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
 from svarog_harness.llm.provider import ChatMessage, ModelProvider, ToolCallRequest
+from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages
 from svarog_harness.storage.models import Run, RunState
@@ -33,6 +34,18 @@ class RunOutcome:
     error: str | None = None
 
 
+class _ApprovalRequiredError(Exception):
+    """Policy потребовал approval — run уходит в waiting_approval (ADR-0005)."""
+
+    def __init__(
+        self, call: ToolCallRequest, arguments: dict[str, object], decision: PolicyDecision
+    ) -> None:
+        super().__init__(decision.reason)
+        self.call = call
+        self.arguments = arguments
+        self.decision = decision
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -40,20 +53,24 @@ class AgentLoop:
         registry: ToolRegistry,
         recorder: TraceRecorder,
         runtime_cfg: RuntimeConfig,
+        policy: PolicyEngine,
         workspace: Path,
         *,
         model_name: str,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
+        on_notify: Callable[[str, str], None] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._recorder = recorder
         self._cfg = runtime_cfg
+        self._policy = policy
         self._workspace = workspace
         self._model_name = model_name
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
+        self._on_notify = on_notify
 
     async def run(self, task: str, autonomy: AutonomyMode) -> RunOutcome:
         """Выполнить задачу; режим автономии фиксируется в run (ADR-0010)."""
@@ -131,6 +148,8 @@ class AgentLoop:
                 f"достигнут лимит итераций ({self._cfg.max_iterations}); "
                 f"увеличьте runtime.max_iterations и выполните resume",
             )
+        except _ApprovalRequiredError as approval:
+            return await self._wait_for_approval(run, state, approval)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             await self._recorder.finish_run(run, RunState.FAILED, error=error)
@@ -157,6 +176,33 @@ class AgentLoop:
         await self._save_checkpoint(run, state)
         await self._recorder.set_run_state(run, RunState.SUSPENDED, error=reason)
         return self._outcome(run, RunState.SUSPENDED, state, "", reason)
+
+    async def _wait_for_approval(
+        self, run: Run, state: LoopState, approval: _ApprovalRequiredError
+    ) -> RunOutcome:
+        """require_approval: Approval-запрос + waiting_approval (ADR-0005, ADR-0010).
+
+        Вызов остается в pending_tool_calls checkpoint'а — после решения
+        человека resume доисполнит его (или вернет отказ модели).
+        """
+        existing = await self._recorder.find_approval_for_call(run, approval.call.id)
+        if existing is None:
+            # Approval показывает фактические аргументы, не пересказ агента (§12).
+            await self._recorder.create_approval(
+                run,
+                action_type=approval.decision.action_type,
+                payload={
+                    "call_id": approval.call.id,
+                    "tool": approval.call.name,
+                    "arguments": approval.arguments,
+                    "reason": approval.decision.reason,
+                },
+            )
+        await self._save_checkpoint(run, state)
+        await self._recorder.set_run_state(
+            run, RunState.WAITING_APPROVAL, error=approval.decision.reason
+        )
+        return self._outcome(run, RunState.WAITING_APPROVAL, state, "", approval.decision.reason)
 
     def _budget_exceeded(self, prompt_tokens: int, state: LoopState) -> str | None:
         """Проверка бюджетов (§3.7): превышение — suspended, не failed."""
@@ -197,10 +243,33 @@ class AgentLoop:
             await self._recorder.finish_tool_call(record, ok=False, output="", error=result.error)
             return result
 
+        decision = self._policy.evaluate(tool, arguments)
+        if decision.action is PolicyAction.DENY:
+            record = await self._recorder.start_tool_call(
+                run,
+                tool_name=call.name,
+                arguments=arguments,
+                risk_level=decision.risk_level.value,
+                policy_decision=decision.action.value,
+            )
+            result = ToolResult.failure(f"запрещено политикой: {decision.reason}")
+            await self._recorder.finish_tool_call(
+                record, ok=False, output="", error=result.error, denied=True
+            )
+            return result
+        if decision.action is PolicyAction.REQUIRE_APPROVAL:
+            raise _ApprovalRequiredError(call, arguments, decision)
+        if decision.action is PolicyAction.NOTIFY and self._on_notify is not None:
+            self._on_notify(call.name, decision.reason)
+
         if self._on_tool_call is not None:
             self._on_tool_call(call.name, dict(arguments))
         record = await self._recorder.start_tool_call(
-            run, tool_name=call.name, arguments=arguments, risk_level=tool.risk_level.value
+            run,
+            tool_name=call.name,
+            arguments=arguments,
+            risk_level=decision.risk_level.value,
+            policy_decision=decision.action.value,
         )
         result = await tool.call(arguments)
         await self._recorder.finish_tool_call(

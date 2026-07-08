@@ -47,6 +47,7 @@ class ReadFileArgs(BaseModel):
 
 class ReadFileTool(_WorkspaceTool[ReadFileArgs]):
     name = "read_file"
+    action_type = "file.read"
     description = "Прочитать текстовый файл внутри workspace"
     risk_level = RiskLevel.LOW
     args_model = ReadFileArgs
@@ -69,6 +70,7 @@ class WriteFileArgs(BaseModel):
 
 class WriteFileTool(_WorkspaceTool[WriteFileArgs]):
     name = "write_file"
+    action_type = "file.write"
     description = "Создать или перезаписать файл внутри workspace"
     risk_level = RiskLevel.MEDIUM
     args_model = WriteFileArgs
@@ -89,6 +91,7 @@ class EditFileArgs(BaseModel):
 
 class EditFileTool(_WorkspaceTool[EditFileArgs]):
     name = "edit_file"
+    action_type = "file.edit"
     description = (
         "Заменить точное вхождение old_string на new_string в файле. "
         "old_string должен встречаться ровно один раз, либо укажите replace_all"
@@ -121,6 +124,7 @@ class ListDirArgs(BaseModel):
 
 class ListDirTool(_WorkspaceTool[ListDirArgs]):
     name = "list_dir"
+    action_type = "file.list"
     description = "Показать содержимое директории (директории помечены '/')"
     risk_level = RiskLevel.LOW
     args_model = ListDirArgs
@@ -142,6 +146,7 @@ class SearchFilesArgs(BaseModel):
 
 class SearchFilesTool(_WorkspaceTool[SearchFilesArgs]):
     name = "search_files"
+    action_type = "file.search"
     description = "Поиск по содержимому файлов регулярным выражением; вывод path:line: текст"
     risk_level = RiskLevel.LOW
     args_model = SearchFilesArgs
