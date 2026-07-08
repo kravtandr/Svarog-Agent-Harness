@@ -25,6 +25,7 @@ from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, create_environment
 from svarog_harness.secrets import SecretStore, default_secret_store, injected_env
 from svarog_harness.skills import Skill, scan_skills, skill_cards
+from svarog_harness.skills.curator import CuratorStore
 from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
@@ -106,6 +107,8 @@ class TaskRunner:
         autonomy: AutonomyMode,
         hooks: RunHooks,
         proposal_sink: list[SkillProposalRequest] | None = None,
+        *,
+        excluded_skills: frozenset[str] = frozenset(),
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
@@ -121,6 +124,8 @@ class TaskRunner:
         for skill_error in scan.errors:
             if hooks.on_skill_skipped is not None:
                 hooks.on_skill_skipped(skill_error.path.name, skill_error.reason)
+        # archived-скиллы (Curator слой 1, §18.1) не попадают в карточки и read_skill.
+        active_skills = [s for s in scan.skills if s.name not in excluded_skills]
         mem_dir = memory_dir(cfg)
         memory_text = (
             read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes)
@@ -131,7 +136,7 @@ class TaskRunner:
         memory_sink: list[dict[str, object]] = []
         registry = self._build_registry(
             environment,
-            scan.skills,
+            active_skills,
             skill_load_sink,
             memory_sink,
             proposal_sink,
@@ -145,7 +150,7 @@ class TaskRunner:
             policy,
             workspace,
             model_name=cfg.models.providers[cfg.models.default].model,
-            skill_cards=skill_cards(scan.skills),
+            skill_cards=skill_cards(active_skills),
             memory=memory_text,
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
@@ -203,7 +208,10 @@ class TaskRunner:
                 recorder = TraceRecorder(db)
                 await self.recover(recorder, hooks)
                 proposal_sink: list[SkillProposalRequest] = []
-                loop = self.build_loop(recorder, environment, autonomy, hooks, proposal_sink)
+                excluded = frozenset(await CuratorStore(db).archived_names())
+                loop = self.build_loop(
+                    recorder, environment, autonomy, hooks, proposal_sink, excluded_skills=excluded
+                )
                 outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
@@ -236,8 +244,14 @@ class TaskRunner:
             await environment.start()
             try:
                 proposal_sink: list[SkillProposalRequest] = []
+                excluded = frozenset(await CuratorStore(db).archived_names())
                 loop = runner.build_loop(
-                    recorder, environment, AutonomyMode(run.autonomy), hooks, proposal_sink
+                    recorder,
+                    environment,
+                    AutonomyMode(run.autonomy),
+                    hooks,
+                    proposal_sink,
+                    excluded_skills=excluded,
                 )
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)

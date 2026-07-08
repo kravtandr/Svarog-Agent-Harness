@@ -75,6 +75,18 @@ class SkillProposalStatus(StrEnum):
     FAILED = "failed"  # не удалось создать (валидация/secret scan/не git-репо)
 
 
+class SkillLifecycleStatus(StrEnum):
+    """Lifecycle-статус скилла, которым управляет Curator слой 1 (§18.1, ADR-0009).
+
+    Полный жизненный цикл (§18) шире (draft/deprecated/blocked); механический
+    слой 1 оперирует только обратимой тройкой active↔stale↔archived.
+    """
+
+    ACTIVE = "active"
+    STALE = "stale"
+    ARCHIVED = "archived"
+
+
 def _enum(enum_cls: type[StrEnum]) -> Enum:
     """Хранить StrEnum по значениям, строкой (переносимо между SQLite/Postgres)."""
     return Enum(
@@ -283,6 +295,29 @@ class SkillProposal(TimestampedBase):
     decided_at: Mapped[datetime | None]
     decided_by: Mapped[str | None] = mapped_column(String(128))
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class SkillState(TimestampedBase):
+    """Кураторское состояние скилла (§18.1, ADR-0009): lifecycle + pin.
+
+    Usage-телеметрия остаётся в `skill_loads` (не во frontmatter); здесь —
+    производный lifecycle-статус, который слой 1 применяет автоматически.
+    `created_at` служит якорем «new skill»: свежий скилл не архивируется до
+    первого использования. Только agent-created скиллы попадают под curator.
+    """
+
+    __tablename__ = "skill_states"
+
+    skill_name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    provenance: Mapped[str] = mapped_column(String(32), default="agent")
+    status: Mapped[SkillLifecycleStatus] = mapped_column(
+        _enum(SkillLifecycleStatus), default=SkillLifecycleStatus.ACTIVE, index=True
+    )
+    # pinned выводит скилл из-под любых автоматических переходов (§18.1).
+    pinned: Mapped[bool] = mapped_column(default=False)
+    last_used_at: Mapped[datetime | None]
+    archived_at: Mapped[datetime | None]
+    note: Mapped[str | None] = mapped_column(Text)
 
 
 class Artifact(TimestampedBase):

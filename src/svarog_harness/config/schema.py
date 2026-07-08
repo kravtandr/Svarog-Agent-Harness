@@ -134,6 +134,23 @@ class VerifierConfig(StrictModel):
     secret_scan: bool = True
 
 
+class CuratorConfig(StrictModel):
+    # Слой 1 (§18.1, ADR-0009): скилл без использования N дней → stale, больше → archived.
+    stale_after_days: int = Field(default=30, gt=0)
+    archive_after_days: int = Field(default=90, gt=0)
+    # Слой 2 (LLM-консолидация) выключен по умолчанию — opt-in (ADR-0009).
+    semantic: bool = False
+
+    @model_validator(mode="after")
+    def _check_thresholds(self) -> Self:
+        if self.archive_after_days <= self.stale_after_days:
+            raise ValueError(
+                f"curator.archive_after_days ({self.archive_after_days}) должен быть больше "
+                f"stale_after_days ({self.stale_after_days})"
+            )
+        return self
+
+
 class TelegramConfig(StrictModel):
     # Имя секрета с bot-токеном в SecretStore (ADR-0006), не сам токен: проект
     # публичный, токен в конфиге/истории = скомпрометирован. None — бот выключен.
@@ -180,6 +197,7 @@ class SvarogConfig(BaseSettings):
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    curator: CuratorConfig = Field(default_factory=CuratorConfig)
 
     @classmethod
     def settings_customise_sources(

@@ -72,9 +72,10 @@ svarog/
       models.py             # Skill, SkillMetadata
       proposal.py           # SkillProposalRequest + валидация (Flow B, §18)
       proposal_manager.py   # governance-flow: persist/merge/reject proposals
-      curator/              # пост-MVP (ADR-0009)
-        pruning.py          # слой 1: механический
-        consolidation.py    # слой 2: LLM
+      curator/              # Skill Curator (ADR-0009, §18.1)
+        state.py            # CuratorStore: lifecycle-состояние скиллов в SQLite
+        pruning.py          # слой 1: механические lifecycle-переходы
+        consolidation.py    # слой 2: LLM (пост-#28)
 
     secrets/                # (ADR-0006)
       store.py              # интерфейс SecretStore

@@ -33,6 +33,7 @@ from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import scaffold_agent_home
 from svarog_harness.secrets import FileSecretStore, default_secret_store
 from svarog_harness.skills import scan_skills
+from svarog_harness.skills.curator import CuratorStore, prune_layer1
 from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import (
     SkillProposalManager,
@@ -326,7 +327,10 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                 if not task or task in {"/quit", "/exit"}:
                     break
                 proposal_sink: list[SkillProposalRequest] = []
-                loop = runner.build_loop(recorder, environment, autonomy, hooks, proposal_sink)
+                excluded = frozenset(await CuratorStore(db).archived_names())
+                loop = runner.build_loop(
+                    recorder, environment, autonomy, hooks, proposal_sink, excluded_skills=excluded
+                )
                 outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await runner.drain_memory(db, hooks)
                 await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
@@ -684,9 +688,7 @@ def _decide_proposal(proposal_id: str, *, approved: bool, reason: str | None) ->
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     if approved:
-        console.print(
-            f"[green]proposal {proposal.id[:8]} влит[/green] в {proposal.base} ({sha})"
-        )
+        console.print(f"[green]proposal {proposal.id[:8]} влит[/green] в {proposal.base} ({sha})")
     else:
         console.print(f"[yellow]proposal {proposal.id[:8]} отклонён[/yellow]")
 
@@ -707,6 +709,53 @@ def skills_proposals_reject(
 ) -> None:
     """Отклонить skill proposal и удалить его ветку."""
     _decide_proposal(proposal_id, approved=False, reason=reason)
+
+
+@skills_app.command("curate")
+def skills_curate() -> None:
+    """Curator слой 1: lifecycle-переходы скиллов по usage-статистике (§18.1)."""
+    cfg = _load_config_or_exit()
+    scan = scan_skills(skills_dirs(cfg, Path.cwd().resolve()))
+
+    async def action(db: AsyncSession) -> None:
+        transitions = await prune_layer1(db, scan.skills, cfg.curator)
+        if not transitions:
+            console.print("curator: lifecycle-изменений нет")
+            return
+        for t in transitions:
+            console.print(
+                f"[cyan]{t.skill_name}[/cyan]: {t.old.value} → {t.new.value} "
+                f"[dim]({t.reason})[/dim]"
+            )
+
+    asyncio.run(_with_db(cfg, action))
+
+
+def _set_pin(name: str, pinned: bool) -> None:
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> None:
+        await CuratorStore(db).set_pinned(name, pinned)
+
+    asyncio.run(_with_db(cfg, action))
+    verb = "закреплён" if pinned else "откреплён"
+    console.print(f"скилл '{name}' {verb} (pinned={str(pinned).lower()})")
+
+
+@skills_app.command("pin")
+def skills_pin(
+    name: Annotated[str, typer.Argument(help="Имя скилла")],
+) -> None:
+    """Закрепить скилл: вывести из-под автоматических lifecycle-переходов (§18.1)."""
+    _set_pin(name, True)
+
+
+@skills_app.command("unpin")
+def skills_unpin(
+    name: Annotated[str, typer.Argument(help="Имя скилла")],
+) -> None:
+    """Снять закрепление скилла."""
+    _set_pin(name, False)
 
 
 memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)

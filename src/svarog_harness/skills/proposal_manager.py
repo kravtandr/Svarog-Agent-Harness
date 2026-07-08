@@ -111,9 +111,7 @@ class SkillProposalManager:
     ) -> str | None:
         """Одобрить (merge в базовую ветку) или отклонить (удалить ветку) proposal."""
         if proposal.status is not SkillProposalStatus.PENDING:
-            raise SkillProposalStateError(
-                f"proposal {proposal.id[:8]} уже {proposal.status.value}"
-            )
+            raise SkillProposalStateError(f"proposal {proposal.id[:8]} уже {proposal.status.value}")
         branch = proposal.branch or ""
         base = proposal.base or "main"
         merged_sha: str | None = None
