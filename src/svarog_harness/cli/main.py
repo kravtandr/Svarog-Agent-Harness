@@ -19,9 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.gitflow import (
+    GitError,
+    GitRepo,
+    SecretScanBlockedError,
+    WorkspaceFlow,
+    WorkspacePrep,
+)
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
+from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
@@ -229,6 +237,17 @@ def _build_loop(
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
+    # Flow C: подготовить workspace (pull + task branch) до старта sandbox,
+    # чтобы контейнер видел рабочую ветку (ADR-0003).
+    flow = WorkspaceFlow(GitRepo(workspace), cfg.git)
+    prep = await flow.start(task)
+    if prep.is_git and prep.branch:
+        console.print(
+            f"[dim]workspace: ветка {prep.branch}{' (после pull)' if prep.pulled else ''}[/dim]"
+        )
+    if prep.note:
+        console.print(f"[yellow]{prep.note}[/yellow]")
+
     environment = create_environment(
         cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(cfg, workspace)
     )
@@ -241,11 +260,35 @@ async def _run_task(
             loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
             outcome = await loop.run(task, autonomy)
             await _drain_memory(cfg, db)
+            await _autocommit_workspace(cfg, flow, prep, task, outcome)
             return outcome
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _autocommit_workspace(
+    cfg: SvarogConfig,
+    flow: WorkspaceFlow,
+    prep: WorkspacePrep,
+    task: str,
+    outcome: RunOutcome,
+) -> None:
+    """Flow C: закоммитить изменения workspace на task-ветке после run."""
+    if not (prep.is_git and cfg.git.auto_commit and outcome.state is RunState.COMPLETED):
+        return
+    try:
+        sha = await flow.commit_step(f"svarog: {task[:72]}", run_id=outcome.run_id)
+    except SecretScanBlockedError as exc:
+        console.print(f"[red]коммит workspace заблокирован secret scan:[/red]\n{exc}")
+        return
+    if sha is None:
+        return
+    branch = prep.branch or "HEAD"
+    console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
+    if cfg.git.require_approval_for_push:
+        console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
 
 
 async def _drain_memory(cfg: SvarogConfig, db: AsyncSession) -> None:
@@ -588,3 +631,45 @@ def memory_flush() -> None:
 
     count = asyncio.run(_with_db(cfg, action))
     console.print(f"обработано заявок: {count}")
+
+
+@app.command()
+def push(
+    branch: Annotated[
+        str | None, typer.Argument(help="Ветка для push (по умолчанию текущая)")
+    ] = None,
+    remote: Annotated[str, typer.Option("--remote", help="Remote")] = "origin",
+) -> None:
+    """Протолкнуть task-ветку в remote (Flow C). Protected ветки требуют approval."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    repo = GitRepo(workspace)
+    flow = WorkspaceFlow(repo, cfg.git)
+
+    async def do_push() -> str:
+        if not await repo.is_repo():
+            raise GitError("текущий каталог не является git-репозиторием")
+        target = branch or await repo.current_branch()
+        # Policy: push в protected ветку — critical-набор, approval в любом режиме (§3.6).
+        policy = PolicyEngine(
+            autonomy=cfg.runtime.autonomy, policies=cfg.policies, workspace=workspace
+        )
+        decision = policy.evaluate_action("git.push", {"branch": target})
+        if decision.action is PolicyAction.REQUIRE_APPROVAL:
+            raise GitError(
+                f"push в '{target}' требует approval ({decision.reason}); "
+                f"protected ветки нельзя пушить командой push напрямую"
+            )
+        findings = await flow.push_precheck(target)
+        if findings:
+            raise GitError(
+                f"secret scan перед push нашёл {len(findings)} секрет(ов) — push отменён"
+            )
+        return await flow.push(target, remote=remote)
+
+    try:
+        result = asyncio.run(do_push())
+    except GitError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]push выполнен[/green]\n{result}")
