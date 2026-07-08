@@ -1,0 +1,40 @@
+# Секреты — никогда не коммитить (ADR-0006)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets/
+.secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.python-version
+
+# Инструменты
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Локальные данные
+*.sqlite3
+*.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Референсные репозитории (если склонированы внутрь проекта)
+reference/
