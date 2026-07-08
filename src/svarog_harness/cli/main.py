@@ -62,6 +62,7 @@ from svarog_harness.trace.viewer import (
     render_run,
     render_runs_table,
 )
+from svarog_harness.verifier import Verifier, skill_checks
 
 app = typer.Typer(
     name="svarog",
@@ -310,12 +311,52 @@ async def _run_task(
             loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
             outcome = await loop.run(task, autonomy)
             await _drain_memory(cfg, db)
+            await _verify(cfg, workspace, environment, recorder, outcome, store)
             await _autocommit_workspace(cfg, flow, prep, task, outcome)
             return outcome
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _verify(
+    cfg: SvarogConfig,
+    workspace: Path,
+    environment: ExecutionEnvironment,
+    recorder: TraceRecorder,
+    outcome: RunOutcome,
+    store: SecretStore,
+) -> None:
+    """Детерминированный verifier после completed-run (§6.11); пишет CheckResult."""
+    if outcome.state is not RunState.COMPLETED:
+        return
+    run = await recorder.get_run(outcome.run_id)
+    if run is None:
+        return
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    loaded = await recorder.loaded_skill_names(run)
+    checks = [*cfg.verifier.checks, *skill_checks(scan.skills, loaded)]
+    if not checks and not cfg.verifier.secret_scan:
+        return
+
+    verifier = Verifier(environment, workspace)
+    outcomes = await verifier.run(
+        checks, secret_scan=cfg.verifier.secret_scan, known_values=store.values()
+    )
+    failed = [o for o in outcomes if not o.passed]
+    for check in outcomes:
+        await recorder.log_check_result(
+            run, name=check.name, status=check.status, output=check.output
+        )
+        colour = "green" if check.passed else "red"
+        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
+    if failed:
+        # Детерминированные проверки приоритетнее самооценки агента (§6.11).
+        console.print(
+            f"[red]verifier: {len(failed)} проверок не прошли — результат нельзя "
+            f"считать корректным[/red]"
+        )
 
 
 async def _autocommit_workspace(
@@ -378,7 +419,10 @@ async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
             loop = _build_loop(
                 run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy), store
             )
-            return await loop.resume(run, state)
+            outcome = await loop.resume(run, state)
+            await _drain_memory(run_cfg, db)
+            await _verify(run_cfg, workspace, environment, recorder, outcome, store)
+            return outcome
         finally:
             await environment.cleanup()
 
@@ -420,7 +464,7 @@ def run(
         console.print(f"[red]ошибка policy-правил:[/red] {exc}")
         raise typer.Exit(code=1) from None
     outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome))
 
 
 @app.command()
@@ -441,7 +485,18 @@ def resume(
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
     outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome))
+
+
+def _failed_checks(cfg: SvarogConfig, outcome: RunOutcome) -> int:
+    """Сколько verifier-проверок не прошло у completed-run (для exit-кода)."""
+    if outcome.state is not RunState.COMPLETED:
+        return 0
+
+    async def action(db: AsyncSession) -> int:
+        return await TraceRecorder(db).failed_check_count(outcome.run_id)
+
+    return asyncio.run(_with_db(cfg, action))
 
 
 def _show_approval(approval: Approval) -> None:
@@ -499,13 +554,17 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
     return outcome
 
 
-def _report_outcome(outcome: RunOutcome) -> None:
+def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
     console.print()
     stats = (
         f"run {outcome.run_id[:8]} | {outcome.iterations} итераций | "
         f"{outcome.tokens_used} токенов | ${outcome.cost_usd:.4f}"
     )
     if outcome.state is RunState.COMPLETED:
+        if failed_checks:
+            # Детерминированные checks приоритетнее самооценки агента (§6.11).
+            console.print(f"[red]completed, но {failed_checks} проверок не прошли[/red] | {stats}")
+            raise typer.Exit(code=4)
         console.print(f"[green]completed[/green] | {stats}")
     elif outcome.state is RunState.SUSPENDED:
         console.print(f"[yellow]suspended[/yellow] | {stats}")
@@ -555,11 +614,11 @@ def traces_show(
 
     async def action(db: AsyncSession) -> None:
         try:
-            run, messages, tool_calls = await fetch_run(db, run_id)
+            run, messages, tool_calls, checks = await fetch_run(db, run_id)
         except RunNotFoundError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
-        console.print(render_run(run, messages, tool_calls))
+        console.print(render_run(run, messages, tool_calls, checks))
 
     asyncio.run(_with_db(cfg, action))
 

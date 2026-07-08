@@ -13,6 +13,8 @@ from svarog_harness.storage.models import (
     Approval,
     ApprovalStatus,
     Checkpoint,
+    CheckResult,
+    CheckStatus,
     MemoryChange,
     Message,
     Run,
@@ -173,6 +175,35 @@ class TraceRecorder:
             )
         )
         await self._db.commit()
+
+    async def loaded_skill_names(self, run: Run) -> set[str]:
+        """Имена скиллов, загруженных в run (для skill-specific checks)."""
+        result = await self._db.execute(
+            select(SkillLoad.skill_name).where(SkillLoad.run_id == run.id)
+        )
+        return set(result.scalars())
+
+    async def log_check_result(
+        self, run: Run, *, name: str, status: CheckStatus, output: str
+    ) -> None:
+        """Результат детерминированной проверки verifier'а (§6.11)."""
+        self._db.add(CheckResult(run_id=run.id, check_name=name, status=status, output=output))
+        await self._db.commit()
+
+    async def get_run(self, run_id: str) -> Run | None:
+        return await self._db.get(Run, run_id)
+
+    async def failed_check_count(self, run_id: str) -> int:
+        """Число непрошедших проверок run'а (FAILED/ERROR) — для exit-кода."""
+        result = await self._db.execute(
+            select(func.count())
+            .select_from(CheckResult)
+            .where(
+                CheckResult.run_id == run_id,
+                CheckResult.status.in_([CheckStatus.FAILED, CheckStatus.ERROR]),
+            )
+        )
+        return int(result.scalar_one())
 
     async def update_progress(
         self, run: Run, *, iterations: int, tokens_used: int, cost_usd: float

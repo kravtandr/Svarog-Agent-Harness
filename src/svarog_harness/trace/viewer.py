@@ -9,7 +9,7 @@ from rich.text import Text
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.storage.models import Message, Run, ToolCall
+from svarog_harness.storage.models import CheckResult, Message, Run, ToolCall
 from svarog_harness.trace.lookup import RunNotFoundError, find_run_by_prefix
 
 __all__ = [
@@ -34,7 +34,9 @@ async def fetch_runs(db: AsyncSession, limit: int = 20) -> list[Run]:
     return list(result.scalars())
 
 
-async def fetch_run(db: AsyncSession, run_id: str) -> tuple[Run, list[Message], list[ToolCall]]:
+async def fetch_run(
+    db: AsyncSession, run_id: str
+) -> tuple[Run, list[Message], list[ToolCall], list[CheckResult]]:
     """Найти run по полному id или уникальному префиксу."""
     run = await find_run_by_prefix(db, run_id)
     messages = list(
@@ -51,7 +53,16 @@ async def fetch_run(db: AsyncSession, run_id: str) -> tuple[Run, list[Message], 
             )
         ).scalars()
     )
-    return run, messages, tool_calls
+    checks = list(
+        (
+            await db.execute(
+                select(CheckResult)
+                .where(CheckResult.run_id == run.id)
+                .order_by(CheckResult.created_at)
+            )
+        ).scalars()
+    )
+    return run, messages, tool_calls, checks
 
 
 def _state_text(state: str) -> Text:
@@ -89,7 +100,12 @@ def _message_body(content: dict[str, Any]) -> str:
     return "\n".join(parts) or "(пусто)"
 
 
-def render_run(run: Run, messages: list[Message], tool_calls: list[ToolCall]) -> RenderableType:
+def render_run(
+    run: Run,
+    messages: list[Message],
+    tool_calls: list[ToolCall],
+    checks: list[CheckResult] | None = None,
+) -> RenderableType:
     header = Table.grid(padding=(0, 2))
     header.add_column(style="bold")
     header.add_column()
@@ -134,6 +150,15 @@ def render_run(run: Run, messages: list[Message], tool_calls: list[ToolCall]) ->
                 call.error or "",
             )
         blocks.append(calls_table)
+
+    if checks:
+        checks_table = Table(title="Checks (verifier)")
+        checks_table.add_column("проверка", style="cyan")
+        checks_table.add_column("статус")
+        for check in checks:
+            style = "green" if check.status.value == "passed" else "red"
+            checks_table.add_row(check.check_name, Text(check.status.value, style=style))
+        blocks.append(checks_table)
     return Group(*blocks)
 
 
