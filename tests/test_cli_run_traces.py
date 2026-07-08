@@ -153,6 +153,50 @@ def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.Mon
     assert "completed" in resumed.output
 
 
+def test_approval_flow_via_cli(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """run → waiting_approval → approvals list/approve → resume → completed."""
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="request_approval",
+                        arguments_json='{"action": "рискованный шаг", "details": "rm -rf build"}',
+                    ),
+                ),
+                usage=Usage(10, 5),
+            ),
+            CompletionResult(content="одобрено, продолжаю", usage=Usage(10, 5)),
+        ],
+    )
+    result = runner.invoke(cli_main.app, ["run", "рискованная", "--workspace", str(workspace)])
+    assert result.exit_code == 3, result.output
+    assert "waiting_approval" in result.output
+    run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
+
+    list_result = runner.invoke(cli_main.app, ["approvals", "list"])
+    assert list_result.exit_code == 0, list_result.output
+    assert "рискованный шаг" in list_result.output
+    approval_id = list_result.output.split("approvals approve/deny ", 1)[1].split()[0]
+
+    approve_result = runner.invoke(cli_main.app, ["approvals", "approve", approval_id])
+    assert approve_result.exit_code == 0, approve_result.output
+    assert "одобрен" in approve_result.output
+
+    resumed = runner.invoke(cli_main.app, ["resume", run_id])
+    assert resumed.exit_code == 0, resumed.output
+    assert "одобрено, продолжаю" in resumed.output
+
+
+def test_approvals_list_empty(workspace: Path) -> None:
+    result = runner.invoke(cli_main.app, ["approvals", "list"])
+    assert result.exit_code == 0
+    assert "ожидающих approvals нет" in result.output
+
+
 def test_resume_unknown_run(workspace: Path) -> None:
     result = runner.invoke(cli_main.app, ["resume", "deadbeef"])
     assert result.exit_code == 1

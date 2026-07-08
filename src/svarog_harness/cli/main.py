@@ -5,6 +5,8 @@
 """
 
 import asyncio
+import json
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
@@ -22,11 +24,16 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import RunState
+from svarog_harness.storage.models import Approval, RunState
+from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
-from svarog_harness.trace.lookup import RunNotFoundError, RunNotResumableError
+from svarog_harness.trace.lookup import (
+    ApprovalNotFoundError,
+    RunNotFoundError,
+    RunNotResumableError,
+)
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.trace.viewer import (
     fetch_run,
@@ -42,6 +49,8 @@ app = typer.Typer(
 )
 traces_app = typer.Typer(help="Просмотр traces выполненных runs.", no_args_is_help=True)
 app.add_typer(traces_app, name="traces")
+approvals_app = typer.Typer(help="Approval-запросы: список и решения.", no_args_is_help=True)
+app.add_typer(approvals_app, name="approvals")
 console = Console()
 
 
@@ -86,6 +95,7 @@ def _build_registry(
     for tool in file_tools(workspace):
         registry.register(tool)
     registry.register(BashTool(environment, command_timeout_sec))
+    registry.register(RequestApprovalTool())
     return registry
 
 
@@ -243,6 +253,7 @@ def run(
     except PolicyRulesError as exc:
         console.print(f"[red]ошибка policy-правил:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    outcome = _interactive_approvals(cfg, outcome)
     _report_outcome(outcome)
 
 
@@ -263,7 +274,63 @@ def resume(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    outcome = _interactive_approvals(cfg, outcome)
     _report_outcome(outcome)
+
+
+def _show_approval(approval: Approval) -> None:
+    """Показать фактическое действие (команду/аргументы), не пересказ (§12)."""
+    payload = approval.payload or {}
+    console.print(f"[bold]approval {approval.id[:8]}[/bold] | run {approval.run_id[:8]}")
+    console.print(f"  действие: {approval.action_type}")
+    if payload.get("tool"):
+        console.print(f"  tool: {payload['tool']}")
+    if payload.get("arguments"):
+        console.print(
+            f"  аргументы: {json.dumps(payload['arguments'], ensure_ascii=False, indent=2)}"
+        )
+    if payload.get("reason"):
+        console.print(f"  причина: {payload['reason']}")
+
+
+def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome:
+    """Промпт решения прямо в терминале, затем resume — пока run не завершится.
+
+    Асинхронный путь (ADR-0005) остается основным: без TTY команда выходит
+    с кодом 3, решение принимается через `svarog approvals`, затем resume.
+    """
+    while outcome.state is RunState.WAITING_APPROVAL and sys.stdin.isatty():
+
+        async def fetch(db: AsyncSession, run_id: str = outcome.run_id) -> list[Approval]:
+            pending = await TraceRecorder(db).fetch_pending_approvals()
+            return [a for a in pending if a.run_id == run_id]
+
+        approvals = asyncio.run(_with_db(cfg, fetch))
+        if not approvals:
+            break
+        console.print()
+        for approval in approvals:
+            _show_approval(approval)
+            approved = typer.confirm("одобрить действие?", default=False)
+            reason = None
+            if not approved:
+                reason = typer.prompt("причина отказа", default="", show_default=False) or None
+
+            async def decide(
+                db: AsyncSession,
+                approval_id: str = approval.id,
+                verdict: bool = approved,
+                why: str | None = reason,
+            ) -> None:
+                recorder = TraceRecorder(db)
+                found = await recorder.find_approval_by_prefix(approval_id)
+                await recorder.decide_approval(
+                    found, approved=verdict, decided_by="cli", reason=why
+                )
+
+            asyncio.run(_with_db(cfg, decide))
+        outcome = asyncio.run(_resume_task(cfg, outcome.run_id))
+    return outcome
 
 
 def _report_outcome(outcome: RunOutcome) -> None:
@@ -284,7 +351,10 @@ def _report_outcome(outcome: RunOutcome) -> None:
         console.print(f"[magenta]waiting_approval[/magenta] | {stats}")
         if outcome.error:
             console.print(f"[magenta]{outcome.error}[/magenta]")
-        console.print(f"[dim]после решения возобновить: svarog resume {outcome.run_id[:8]}[/dim]")
+        console.print(
+            f"[dim]решение: svarog approvals list → svarog approvals approve/deny <id>, "
+            f"затем svarog resume {outcome.run_id[:8]}[/dim]"
+        )
         raise typer.Exit(code=3)
     else:
         console.print(f"[red]{outcome.state.value}[/red] | {stats}")
@@ -326,3 +396,57 @@ def traces_show(
         console.print(render_run(run, messages, tool_calls))
 
     asyncio.run(_with_db(cfg, action))
+
+
+@approvals_app.command("list")
+def approvals_list() -> None:
+    """Показать ожидающие approval-запросы."""
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> None:
+        approvals = await TraceRecorder(db).fetch_pending_approvals()
+        if not approvals:
+            console.print("ожидающих approvals нет")
+            return
+        for approval in approvals:
+            _show_approval(approval)
+            console.print(f"  [dim]решение: svarog approvals approve/deny {approval.id[:8]}[/dim]")
+
+    asyncio.run(_with_db(cfg, action))
+
+
+def _decide_approval_command(approval_id: str, *, approved: bool, reason: str | None) -> None:
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> Approval:
+        recorder = TraceRecorder(db)
+        approval = await recorder.find_approval_by_prefix(approval_id)
+        await recorder.decide_approval(approval, approved=approved, decided_by="cli", reason=reason)
+        return approval
+
+    try:
+        approval = asyncio.run(_with_db(cfg, action))
+    except ApprovalNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    verdict = "[green]одобрен[/green]" if approved else "[red]отклонен[/red]"
+    console.print(f"approval {approval.id[:8]} {verdict}")
+    console.print(f"[dim]продолжить run: svarog resume {approval.run_id[:8]}[/dim]")
+
+
+@approvals_app.command("approve")
+def approvals_approve(
+    approval_id: Annotated[str, typer.Argument(help="id approval'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
+) -> None:
+    """Одобрить действие; run возобновляется командой resume."""
+    _decide_approval_command(approval_id, approved=True, reason=reason)
+
+
+@approvals_app.command("deny")
+def approvals_deny(
+    approval_id: Annotated[str, typer.Argument(help="id approval'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
+) -> None:
+    """Отклонить действие; агент получит причину отказа при resume."""
+    _decide_approval_command(approval_id, approved=False, reason=reason)

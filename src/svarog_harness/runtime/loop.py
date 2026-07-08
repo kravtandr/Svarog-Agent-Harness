@@ -11,13 +11,14 @@ failed. Tool calls фиксируются в checkpoint до исполнени�
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
 from svarog_harness.llm.provider import ChatMessage, ModelProvider, ToolCallRequest
 from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages
-from svarog_harness.storage.models import Run, RunState
+from svarog_harness.storage.models import ApprovalStatus, Run, RunState
 from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.trace.recorder import TraceRecorder
@@ -177,6 +178,39 @@ class AgentLoop:
         await self._recorder.set_run_state(run, RunState.SUSPENDED, error=reason)
         return self._outcome(run, RunState.SUSPENDED, state, "", reason)
 
+    async def _consume_approval(
+        self,
+        run: Run,
+        call: ToolCallRequest,
+        arguments: dict[str, Any],
+        decision: PolicyDecision,
+    ) -> ToolResult | None:
+        """Применить решение человека по approval для этого вызова.
+
+        None — approval одобрен, вызов исполняется дальше; ToolResult —
+        отказ (или истечение), который возвращается модели; нет решения —
+        run уходит в waiting_approval через _ApprovalRequiredError.
+        """
+        approval = await self._recorder.find_approval_for_call(run, call.id)
+        if approval is None or approval.status is ApprovalStatus.PENDING:
+            raise _ApprovalRequiredError(call, arguments, decision)
+        if approval.status is ApprovalStatus.APPROVED:
+            return None
+        reason = approval.reason or "без указания причины"
+        verb = "истек" if approval.status is ApprovalStatus.EXPIRED else "отклонен пользователем"
+        record = await self._recorder.start_tool_call(
+            run,
+            tool_name=call.name,
+            arguments=arguments,
+            risk_level=decision.risk_level.value,
+            policy_decision=decision.action.value,
+        )
+        result = ToolResult.failure(f"approval {verb}: {reason}")
+        await self._recorder.finish_tool_call(
+            record, ok=False, output="", error=result.error, denied=True
+        )
+        return result
+
     async def _wait_for_approval(
         self, run: Run, state: LoopState, approval: _ApprovalRequiredError
     ) -> RunOutcome:
@@ -258,7 +292,9 @@ class AgentLoop:
             )
             return result
         if decision.action is PolicyAction.REQUIRE_APPROVAL:
-            raise _ApprovalRequiredError(call, arguments, decision)
+            verdict = await self._consume_approval(run, call, arguments, decision)
+            if verdict is not None:
+                return verdict
         if decision.action is PolicyAction.NOTIFY and self._on_notify is not None:
             self._on_notify(call.name, decision.reason)
 

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.storage.models import (
     Approval,
+    ApprovalStatus,
     Checkpoint,
     Message,
     Run,
@@ -20,7 +21,11 @@ from svarog_harness.storage.models import (
     ToolCallStatus,
     utcnow,
 )
-from svarog_harness.trace.lookup import RunNotResumableError, find_run_by_prefix
+from svarog_harness.trace.lookup import (
+    ApprovalNotFoundError,
+    RunNotResumableError,
+    find_run_by_prefix,
+)
 
 # Состояния, из которых run можно возобновить (ADR-0005).
 _RESUMABLE_STATES = frozenset({RunState.SUSPENDED, RunState.WAITING_APPROVAL})
@@ -117,6 +122,34 @@ class TraceRecorder:
             if approval.payload.get("call_id") == call_id:
                 return approval
         return None
+
+    async def fetch_pending_approvals(self, limit: int = 50) -> list[Approval]:
+        result = await self._db.execute(
+            select(Approval)
+            .where(Approval.status == ApprovalStatus.PENDING)
+            .order_by(Approval.created_at)
+            .limit(limit)
+        )
+        return list(result.scalars())
+
+    async def find_approval_by_prefix(self, approval_id: str) -> Approval:
+        result = await self._db.execute(select(Approval).where(Approval.id.startswith(approval_id)))
+        approvals = list(result.scalars())
+        if not approvals:
+            raise ApprovalNotFoundError(approval_id)
+        if len(approvals) > 1:
+            raise ApprovalNotFoundError(f"{approval_id} (префикс неоднозначен: {len(approvals)})")
+        return approvals[0]
+
+    async def decide_approval(
+        self, approval: Approval, *, approved: bool, decided_by: str, reason: str | None = None
+    ) -> None:
+        """ApprovalDecision: зафиксировать решение человека (§15)."""
+        approval.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
+        approval.decided_at = utcnow()
+        approval.decided_by = decided_by
+        approval.reason = reason
+        await self._db.commit()
 
     async def update_progress(
         self, run: Run, *, iterations: int, tokens_used: int, cost_usd: float

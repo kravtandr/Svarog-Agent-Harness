@@ -15,6 +15,13 @@ class RunNotResumableError(Exception):
     """Run нельзя возобновить: не тот state или нет checkpoint."""
 
 
+class ApprovalNotFoundError(Exception):
+    def __init__(self, approval_id: str) -> None:
+        super().__init__(
+            f"approval '{approval_id}' не найден (id или префикс — см. approvals list)"
+        )
+
+
 async def find_run_by_prefix(db: AsyncSession, run_id: str) -> Run:
     result = await db.execute(select(Run).where(Run.id.startswith(run_id)))
     runs = list(result.scalars())

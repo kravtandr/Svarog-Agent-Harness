@@ -123,13 +123,29 @@ def render_run(run: Run, messages: list[Message], tool_calls: list[ToolCall]) ->
         calls_table.add_column("tool", style="cyan")
         calls_table.add_column("статус")
         calls_table.add_column("риск")
+        calls_table.add_column("policy")
         calls_table.add_column("ошибка", max_width=60)
         for call in tool_calls:
             calls_table.add_row(
                 call.tool_name,
                 call.status.value,
                 call.risk_level or "-",
+                _policy_text(call.policy_decision),
                 call.error or "",
             )
         blocks.append(calls_table)
     return Group(*blocks)
+
+
+# notify и deny выделяются в trace (ADR-0010: post-hoc review вместо pre-approval).
+_POLICY_STYLES = {
+    "notify": "bold yellow",
+    "deny": "bold red",
+    "require_approval": "bold magenta",
+}
+
+
+def _policy_text(decision: str | None) -> Text:
+    if not decision:
+        return Text("-")
+    return Text(decision, style=_POLICY_STYLES.get(decision, "white"))
