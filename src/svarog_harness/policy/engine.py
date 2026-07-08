@@ -158,6 +158,16 @@ class PolicyEngine:
             )
             return PolicyDecision(PolicyAction.NOTIFY, action_type, risk, reason)
 
+        # MCP-инструменты по умолчанию требуют approval, пока администратор не
+        # ослабит их профилем/правилом notify (§9); risk остаётся high.
+        if action_type.startswith("mcp."):
+            return PolicyDecision(
+                PolicyAction.REQUIRE_APPROVAL,
+                action_type,
+                risk,
+                "MCP-инструмент по умолчанию требует approval (§9)",
+            )
+
         if risk is RiskLevel.HIGH:
             if self._autonomy is AutonomyMode.SUPERVISED:
                 return PolicyDecision(

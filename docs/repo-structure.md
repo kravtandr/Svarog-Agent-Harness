@@ -21,10 +21,11 @@ svarog/
     config/                 # svarog.yaml → pydantic-settings
       schema.py
       loader.py
+      paths.py              # разрешение skills/memory-путей (общее для cli/gateway)
 
     runtime/                # ядро (§6.2)
       loop.py               # agent loop: state machine, итерации
-      run_state.py          # состояния run, переходы
+      orchestrator.py       # TaskRunner: один прогон задачи под RunHooks (cli/gateway/telegram)
       checkpoint.py         # сериализация/восстановление (ADR-0005)
       context_builder.py    # слои контекста, budget (§6.3)
       refuel.py             # task_state.md, пересборка контекста (§6.10)
@@ -61,18 +62,20 @@ svarog/
       writer.py             # single writer + очередь
 
     gitflow/                # (ADR-0003)
-      gitcmd.py             # subprocess-обертка над git
-      memory_repo.py        # Flow A
-      skill_repo.py         # Flow B (MVP: создание proposal-ветки)
-      workspace_repo.py     # Flow C: pull/branch/commit/push-with-approval
+      repo.py               # subprocess-обертка над git
+      commit_gate.py        # обязательный secret scan перед commit (все flow)
+      skill_repo.py         # Flow B: proposal-ветка, diff, merge/reject (§18)
+      workspace.py          # Flow C: pull/branch/commit/push-with-approval
 
     skills/                 # (§6.4)
-      loader.py             # сканирование, SKILL.md frontmatter
-      card.py               # skill cards для контекста
-      validation.py         # skills check
-      curator/              # пост-MVP (ADR-0009)
-        pruning.py          # слой 1: механический
-        consolidation.py    # слой 2: LLM
+      loader.py             # сканирование, SKILL.md frontmatter, skill cards
+      models.py             # Skill, SkillMetadata
+      proposal.py           # SkillProposalRequest + валидация (Flow B, §18)
+      proposal_manager.py   # governance-flow: persist/merge/reject proposals
+      curator/              # Skill Curator (ADR-0009, §18.1)
+        state.py            # CuratorStore: lifecycle-состояние скиллов в SQLite
+        pruning.py          # слой 1: механические lifecycle-переходы
+        consolidation.py    # слой 2: LLM (пост-#28)
 
     secrets/                # (ADR-0006)
       store.py              # интерфейс SecretStore
@@ -90,7 +93,16 @@ svarog/
       recorder.py           # запись всех сущностей аудита
       viewer.py             # traces list/show для CLI
 
-    gateway/                # пост-MVP: FastAPI, WebSocket, Telegram
+    gateway/                # внешние интерфейсы (пост-MVP M5, §10.2/§10.4)
+      service.py            # GatewayService: фоновые runs + стриминг событий
+      api.py                # FastAPI create_app: REST + WebSocket
+      models.py             # pydantic-схемы запросов/ответов
+      telegram.py           # Telegram-бот: long-polling, approval-кнопки
+
+    mcp/                    # MCP-интеграция (пост-MVP M5, §9)
+      models.py             # MCPToolSpec, MCPBackend
+      tool.py               # MCPTool: MCP-инструмент как Tool
+      integration.py        # connect_mcp_servers (stdio SDK), build_mcp_tools
 
   skills/                   # official skills (§23), поставляются с платформой
     git-workflow/
@@ -109,5 +121,5 @@ svarog/
 
 * **Зависимости направлены вниз**: `cli` → `runtime` → (`tools`, `policy`, `sandbox`, `memory`, `gitflow`, `skills`, `llm`) → `storage`/`trace`. Никаких импортов из `cli` в ядро.
 * **Каждый pluggable-интерфейс** (ModelProvider, SandboxBackend, QueueBackend, SecretStore) живет в `base.py`/`provider.py` своего пакета; реализации — соседние модули.
-* **`gateway/` пустой в MVP** — но `runtime` уже общается с внешним миром только через события (`storage/events.py`) и approvals, поэтому подключение Telegram/REST не потребует менять ядро.
+* **`gateway/` — первый внешний интерфейс (M5)**: `runtime` общается с внешним миром только через `RunHooks` оркестратора, события (`storage/events.py`) и approvals, поэтому REST/WS/Telegram подключены без изменений ядра. CLI и gateway гоняют один `TaskRunner`.
 * **`skills/` в корне** — это контент, не код: официальные скиллы копируются в agent-home при `svarog init`.

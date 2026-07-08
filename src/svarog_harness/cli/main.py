@@ -19,38 +19,37 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
+from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
-from svarog_harness.gitflow import (
-    GitError,
-    GitRepo,
-    SecretScanBlockedError,
-    WorkspaceFlow,
-    WorkspacePrep,
-)
-from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
+from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
+from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
-from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
+from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
-from svarog_harness.runtime.checkpoint import LoopState
-from svarog_harness.runtime.loop import AgentLoop, RunOutcome
-from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
+from svarog_harness.runtime.loop import RunOutcome
+from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import scaffold_agent_home
-from svarog_harness.secrets import (
-    FileSecretStore,
-    SecretStore,
-    default_secret_store,
-    injected_env,
+from svarog_harness.secrets import FileSecretStore, default_secret_store
+from svarog_harness.skills import scan_skills
+from svarog_harness.skills.curator import (
+    CurationReport,
+    CuratorStore,
+    consolidate_layer2,
+    prune_layer1,
+    rewrite_description,
 )
-from svarog_harness.skills import Skill, scan_skills, skill_cards
+from svarog_harness.skills.models import Skill
+from svarog_harness.skills.proposal import SkillProposalRequest
+from svarog_harness.skills.proposal_manager import (
+    SkillProposalManager,
+    SkillProposalNotFoundError,
+    SkillProposalStateError,
+)
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Approval, RunState
-from svarog_harness.tools.approval import RequestApprovalTool
-from svarog_harness.tools.file_tools import file_tools
-from svarog_harness.tools.memory_tools import RememberTool
-from svarog_harness.tools.registry import ToolRegistry
-from svarog_harness.tools.shell import BashTool
-from svarog_harness.tools.skill_tools import ReadSkillTool
+from svarog_harness.storage.models import Approval, Run, RunState, SkillProposal
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -63,7 +62,7 @@ from svarog_harness.trace.viewer import (
     render_run,
     render_runs_table,
 )
-from svarog_harness.verifier import Verifier, skill_checks
+from svarog_harness.verifier import CheckOutcome
 
 app = typer.Typer(
     name="svarog",
@@ -105,16 +104,21 @@ def init(
     for skipped in result.skipped:
         console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
 
-    async def init_memory_repo() -> None:
-        repo = GitRepo(target / "memory")
+    async def init_git_subrepo(path: Path, message: str) -> None:
+        repo = GitRepo(path)
         if not await repo.is_repo():
             await repo.init()
             await repo.ensure_identity()
             await repo.add_all()
             with contextlib.suppress(GitError):
-                await repo.commit("svarog init: memory repo")
+                await repo.commit(message)
 
-    asyncio.run(init_memory_repo())
+    async def init_subrepos() -> None:
+        # memory — Flow A (ADR-0004); skills — Flow B базовая ветка для proposals (§18).
+        await init_git_subrepo(target / "memory", "svarog init: memory repo")
+        await init_git_subrepo(target / "skills", "svarog init: skills repo")
+
+    asyncio.run(init_subrepos())
     console.print(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
         f'[dim]отредактируйте svarog.yaml (endpoint модели) и запустите `svarog run "…"`[/dim]'
@@ -144,58 +148,6 @@ def _resolve_autonomy(
     return chosen[0] if chosen else cfg.runtime.autonomy
 
 
-def _build_registry(
-    workspace: Path,
-    environment: ExecutionEnvironment,
-    command_timeout_sec: float,
-    skills: list[Skill],
-    skill_load_sink: list[tuple[str, str | None]],
-    *,
-    memory_enabled: bool,
-    memory_sink: list[dict[str, object]],
-) -> ToolRegistry:
-    registry = ToolRegistry()
-    for tool in file_tools(workspace):
-        registry.register(tool)
-    registry.register(BashTool(environment, command_timeout_sec))
-    registry.register(RequestApprovalTool())
-    if skills:
-        registry.register(
-            ReadSkillTool(
-                skills, on_load=lambda name, version: skill_load_sink.append((name, version))
-            )
-        )
-    if memory_enabled:
-        registry.register(RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict())))
-    return registry
-
-
-def _memory_dir(cfg: SvarogConfig) -> Path | None:
-    """Каталог memory-репозитория (Flow A), если память включена в конфиге."""
-    if cfg.memory.path is None:
-        return None
-    return cfg.memory.path.expanduser().resolve()
-
-
-def _skills_dirs(cfg: SvarogConfig, workspace: Path) -> list[Path]:
-    """Абсолютные пути каталогов skills из конфигурации."""
-    dirs = []
-    for raw in cfg.skills.paths:
-        path = raw.expanduser()
-        if not path.is_absolute():
-            path = workspace / path
-        dirs.append(path.resolve())
-    return dirs
-
-
-def _first_existing_skills_dir(cfg: SvarogConfig, workspace: Path) -> Path | None:
-    """Первый существующий каталог skills — mount ro в sandbox (ADR-0002)."""
-    for path in _skills_dirs(cfg, workspace):
-        if path.is_dir():
-            return path
-    return None
-
-
 async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
     init_db(cfg.storage.db_path)
     engine = create_engine(cfg.storage.db_path.expanduser())
@@ -207,71 +159,56 @@ async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaita
         await engine.dispose()
 
 
-async def _recover_and_warn(recorder: TraceRecorder) -> None:
-    """Recovery незавершенных runs при старте (ADR-0005)."""
-    for run in await recorder.recover_interrupted_runs():
+def _console_hooks() -> RunHooks:
+    """RunHooks, печатающие ход прогона задачи в терминал (§21)."""
+
+    def on_prep(prep: WorkspacePrep) -> None:
+        if prep.is_git and prep.branch:
+            suffix = " (после pull)" if prep.pulled else ""
+            console.print(f"[dim]workspace: ветка {prep.branch}{suffix}[/dim]")
+        if prep.note:
+            console.print(f"[yellow]{prep.note}[/yellow]")
+
+    def on_recovered(run: Run) -> None:
         console.print(
             f"[yellow]run {run.id[:8]} был прерван — переведен в suspended "
             f"(`svarog resume {run.id[:8]}`)[/yellow]"
         )
 
+    def on_check(check: CheckOutcome) -> None:
+        colour = "green" if check.passed else "red"
+        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
 
-def _secret_store(cfg: SvarogConfig) -> SecretStore:
-    return default_secret_store(cfg.secrets.path)
+    def on_commit(sha: str, branch: str, needs_push: bool) -> None:
+        console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
+        if needs_push:
+            console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
 
+    def on_memory(commit_sha: str | None, error: str | None) -> None:
+        if error:
+            console.print(f"[yellow]память: заявка отклонена — {error}[/yellow]")
+        elif commit_sha:
+            console.print(f"[dim]память обновлена ({commit_sha})[/dim]")
 
-def _build_loop(
-    cfg: SvarogConfig,
-    workspace: Path,
-    recorder: TraceRecorder,
-    environment: ExecutionEnvironment,
-    autonomy: AutonomyMode,
-    store: SecretStore,
-) -> AgentLoop:
-    # Режим автономии и policy-правила фиксируются здесь, при старте run,
-    # и не перечитываются во время исполнения (ADR-0010).
-    policy = PolicyEngine(
-        autonomy=autonomy,
-        policies=cfg.policies,
-        workspace=workspace,
-        rules=load_policy_rules(workspace),
-        skills_dirs=_skills_dirs(cfg, workspace),
-    )
-    scan = scan_skills(_skills_dirs(cfg, workspace))
-    for skill_error in scan.errors:
-        console.print(
-            f"[yellow]skill пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]"
-        )
-    memory_dir = _memory_dir(cfg)
-    memory_text = (
-        read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
-        if memory_dir is not None
-        else ""
-    )
-    skill_load_sink: list[tuple[str, str | None]] = []
-    memory_sink: list[dict[str, object]] = []
-    return AgentLoop(
-        default_provider(cfg.models, store),
-        _build_registry(
-            workspace,
-            environment,
-            cfg.sandbox.timeout_sec,
-            scan.skills,
-            skill_load_sink,
-            memory_enabled=memory_dir is not None,
-            memory_sink=memory_sink,
+    def on_proposal(proposal: SkillProposal) -> None:
+        if proposal.status.value == "pending":
+            console.print(
+                f"[cyan]skill proposal[/cyan] {proposal.skill_name} → ветка {proposal.branch} "
+                f"[dim](review: svarog skills proposals show {proposal.id[:8]})[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]skill proposal {proposal.skill_name}: {proposal.status.value}[/yellow]"
+            )
+            for message in SkillProposalManager.validation_messages(proposal):
+                console.print(f"[yellow]  - {message}[/yellow]")
+
+    return RunHooks(
+        on_skill_skipped=lambda name, reason: console.print(
+            f"[yellow]skill пропущен ({name}): {reason}[/yellow]"
         ),
-        recorder,
-        cfg.runtime,
-        policy,
-        workspace,
-        model_name=cfg.models.providers[cfg.models.default].model,
-        skill_cards=skill_cards(scan.skills),
-        memory=memory_text,
-        skill_load_sink=skill_load_sink,
-        memory_sink=memory_sink,
-        workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
-        secret_values=store.values(),
+        on_workspace_prep=on_prep,
+        on_recovered=on_recovered,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -279,155 +216,27 @@ def _build_loop(
         on_notify=lambda name, reason: console.print(
             f"\n[bold yellow]⚡ notify:[/bold yellow] {name} — {reason}", highlight=False
         ),
+        on_check=on_check,
+        on_verify_failed=lambda count: console.print(
+            f"[red]verifier: {count} проверок не прошли — результат нельзя считать корректным[/red]"
+        ),
+        on_commit=on_commit,
+        on_commit_blocked=lambda msg: console.print(
+            f"[red]коммит workspace заблокирован secret scan:[/red]\n{msg}"
+        ),
+        on_memory=on_memory,
+        on_proposal=on_proposal,
     )
 
 
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
-    # Flow C: подготовить workspace (pull + task branch) до старта sandbox,
-    # чтобы контейнер видел рабочую ветку (ADR-0003).
-    flow = WorkspaceFlow(GitRepo(workspace), cfg.git)
-    prep = await flow.start(task)
-    if prep.is_git and prep.branch:
-        console.print(
-            f"[dim]workspace: ветка {prep.branch}{' (после pull)' if prep.pulled else ''}[/dim]"
-        )
-    if prep.note:
-        console.print(f"[yellow]{prep.note}[/yellow]")
-
-    store = _secret_store(cfg)
-    environment = create_environment(
-        cfg.sandbox,
-        workspace,
-        skills_dir=_first_existing_skills_dir(cfg, workspace),
-        env=injected_env(store, cfg.secrets.inject),  # только явно выданные секреты (§12)
-    )
-    await environment.start()
-    try:
-
-        async def action(db: AsyncSession) -> RunOutcome:
-            recorder = TraceRecorder(db)
-            await _recover_and_warn(recorder)
-            loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
-            outcome = await loop.run(task, autonomy)
-            await _drain_memory(cfg, db)
-            await _verify(cfg, workspace, environment, recorder, outcome, store)
-            await _autocommit_workspace(cfg, flow, prep, task, outcome)
-            return outcome
-
-        return await _with_db(cfg, action)
-    finally:
-        await environment.cleanup()
-
-
-async def _verify(
-    cfg: SvarogConfig,
-    workspace: Path,
-    environment: ExecutionEnvironment,
-    recorder: TraceRecorder,
-    outcome: RunOutcome,
-    store: SecretStore,
-) -> None:
-    """Детерминированный verifier после completed-run (§6.11); пишет CheckResult."""
-    if outcome.state is not RunState.COMPLETED:
-        return
-    run = await recorder.get_run(outcome.run_id)
-    if run is None:
-        return
-    scan = scan_skills(_skills_dirs(cfg, workspace))
-    loaded = await recorder.loaded_skill_names(run)
-    checks = [*cfg.verifier.checks, *skill_checks(scan.skills, loaded)]
-    if not checks and not cfg.verifier.secret_scan:
-        return
-
-    verifier = Verifier(environment, workspace)
-    outcomes = await verifier.run(
-        checks, secret_scan=cfg.verifier.secret_scan, known_values=store.values()
-    )
-    failed = [o for o in outcomes if not o.passed]
-    for check in outcomes:
-        await recorder.log_check_result(
-            run, name=check.name, status=check.status, output=check.output
-        )
-        colour = "green" if check.passed else "red"
-        console.print(f"[{colour}]check {check.status.value}[/{colour}] {check.name}")
-    if failed:
-        # Детерминированные проверки приоритетнее самооценки агента (§6.11).
-        console.print(
-            f"[red]verifier: {len(failed)} проверок не прошли — результат нельзя "
-            f"считать корректным[/red]"
-        )
-
-
-async def _autocommit_workspace(
-    cfg: SvarogConfig,
-    flow: WorkspaceFlow,
-    prep: WorkspacePrep,
-    task: str,
-    outcome: RunOutcome,
-) -> None:
-    """Flow C: закоммитить изменения workspace на task-ветке после run."""
-    if not (prep.is_git and cfg.git.auto_commit and outcome.state is RunState.COMPLETED):
-        return
-    try:
-        sha = await flow.commit_step(f"svarog: {task[:72]}", run_id=outcome.run_id)
-    except SecretScanBlockedError as exc:
-        console.print(f"[red]коммит workspace заблокирован secret scan:[/red]\n{exc}")
-        return
-    if sha is None:
-        return
-    branch = prep.branch or "HEAD"
-    console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
-    if cfg.git.require_approval_for_push:
-        console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
-
-
-async def _drain_memory(cfg: SvarogConfig, db: AsyncSession) -> None:
-    """Применить очередь заявок памяти single writer'ом после run (ADR-0004)."""
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None or not memory_dir.is_dir():
-        return
-    writer = MemoryWriter(db, memory_dir)
-    for row in await writer.drain():
-        if row.error:
-            console.print(f"[yellow]память: заявка отклонена — {row.error}[/yellow]")
-        elif row.commit_sha:
-            console.print(f"[dim]память обновлена ({row.commit_sha})[/dim]")
+    return await TaskRunner(cfg, workspace).run_once(task, autonomy, hooks=_console_hooks())
 
 
 async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
-    async def action(db: AsyncSession) -> RunOutcome:
-        recorder = TraceRecorder(db)
-        await _recover_and_warn(recorder)
-        run, raw_state = await recorder.load_resumable(run_id)
-        state = LoopState.from_dict(raw_state)
-        workspace = state.workspace
-        if not workspace.is_dir():
-            raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
-        # runtime/sandbox-настройки берутся из конфига проекта workspace,
-        # режим автономии — заморожен в run (ADR-0010).
-        run_cfg = load_config(project_dir=workspace)
-        store = _secret_store(run_cfg)
-        environment = create_environment(
-            run_cfg.sandbox,
-            workspace,
-            skills_dir=_first_existing_skills_dir(run_cfg, workspace),
-            env=injected_env(store, run_cfg.secrets.inject),
-        )
-        await environment.start()
-        try:
-            loop = _build_loop(
-                run_cfg, workspace, recorder, environment, AutonomyMode(run.autonomy), store
-            )
-            outcome = await loop.resume(run, state)
-            await _drain_memory(run_cfg, db)
-            await _verify(run_cfg, workspace, environment, recorder, outcome, store)
-            return outcome
-        finally:
-            await environment.cleanup()
-
-    return await _with_db(cfg, action)
+    return await TaskRunner(cfg, Path.cwd().resolve()).resume(run_id, hooks=_console_hooks())
 
 
 @app.command()
@@ -505,19 +314,17 @@ def chat(
 
 
 async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
-    store = _secret_store(cfg)
-    environment = create_environment(
-        cfg.sandbox,
-        workspace,
-        skills_dir=_first_existing_skills_dir(cfg, workspace),
-        env=injected_env(store, cfg.secrets.inject),
-    )
+    runner = TaskRunner(cfg, workspace)
+    hooks = _console_hooks()
+    backends = await connect_mcp_servers(cfg.mcp, runner.store)
+    mcp_tools = build_mcp_tools(backends)
+    environment = runner.build_environment()
     await environment.start()
     try:
 
         async def action(db: AsyncSession) -> None:
             recorder = TraceRecorder(db)
-            await _recover_and_warn(recorder)
+            await runner.recover(recorder, hooks)
             session_id: str | None = None
             history: list[ChatMessage] = []
             while True:
@@ -529,9 +336,20 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                     break
                 if not task or task in {"/quit", "/exit"}:
                     break
-                loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
+                proposal_sink: list[SkillProposalRequest] = []
+                excluded = frozenset(await CuratorStore(db).archived_names())
+                loop = runner.build_loop(
+                    recorder,
+                    environment,
+                    autonomy,
+                    hooks,
+                    proposal_sink,
+                    excluded_skills=excluded,
+                    mcp_tools=mcp_tools,
+                )
                 outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
-                await _drain_memory(cfg, db)
+                await runner.drain_memory(db, hooks)
+                await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 if session_id is None:
                     run = await recorder.get_run(outcome.run_id)
                     session_id = run.session_id if run else None
@@ -542,9 +360,12 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                 history[:] = history[-_CHAT_HISTORY_LIMIT:]
                 _print_chat_turn(outcome)
 
-        await _with_db(cfg, action)
+        await runner.with_db(action)
     finally:
         await environment.cleanup()
+        for backend in backends:
+            with contextlib.suppress(Exception):
+                await backend.close()
 
 
 def _print_chat_turn(outcome: RunOutcome) -> None:
@@ -778,7 +599,7 @@ def skills_list() -> None:
     """Показать доступные скиллы и их карточки."""
     cfg = _load_config_or_exit()
     workspace = Path.cwd().resolve()
-    scan = scan_skills(_skills_dirs(cfg, workspace))
+    scan = scan_skills(skills_dirs(cfg, workspace))
     if not scan.skills and not scan.errors:
         console.print("скиллов не найдено (проверьте skills.paths в svarog.yaml)")
         return
@@ -793,7 +614,7 @@ def skills_check() -> None:
     """Проверить валидность SKILL.md всех скиллов; exit code 1 при ошибках."""
     cfg = _load_config_or_exit()
     workspace = Path.cwd().resolve()
-    scan = scan_skills(_skills_dirs(cfg, workspace))
+    scan = scan_skills(skills_dirs(cfg, workspace))
     for skill in scan.skills:
         console.print(f"[green]ok[/green] {skill.name} (v{skill.metadata.version})")
     for skill_error in scan.errors:
@@ -801,6 +622,240 @@ def skills_check() -> None:
     if scan.errors:
         raise typer.Exit(code=1)
     console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")
+
+
+proposals_app = typer.Typer(
+    help="Skill proposals (Flow B): review, merge, reject.", no_args_is_help=True
+)
+skills_app.add_typer(proposals_app, name="proposals")
+
+
+def _proposals_skills_dir(cfg: SvarogConfig) -> Path:
+    dirs = skills_dirs(cfg, Path.cwd().resolve())
+    if not dirs:
+        console.print("[red]skills.paths пуст в svarog.yaml[/red]")
+        raise typer.Exit(code=1)
+    return dirs[0]
+
+
+@proposals_app.command("list")
+def skills_proposals_list() -> None:
+    """Показать skill proposals, ожидающие review (Flow B, §18)."""
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        proposals = await SkillProposalManager(db, skills_dir).list_pending()
+        if not proposals:
+            console.print("ожидающих skill proposals нет")
+            return
+        for proposal in proposals:
+            console.print(
+                f"[cyan]{proposal.id[:8]}[/cyan] {proposal.skill_name} "
+                f"({proposal.action}) → ветка {proposal.branch}"
+            )
+            console.print(
+                f"  [dim]review: svarog skills proposals show {proposal.id[:8]} → "
+                f"approve/reject {proposal.id[:8]}[/dim]"
+            )
+
+    asyncio.run(_with_db(cfg, action))
+
+
+@proposals_app.command("show")
+def skills_proposals_show(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+) -> None:
+    """Показать diff и метаданные skill proposal (фактические изменения, §12)."""
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        try:
+            proposal = await SkillProposalManager(db, skills_dir).get(proposal_id)
+        except SkillProposalNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        console.print(f"[bold]proposal {proposal.id[:8]}[/bold] | {proposal.status.value}")
+        console.print(f"  скилл: {proposal.skill_name} ({proposal.action})")
+        console.print(f"  ветка: {proposal.branch} → {proposal.base}")
+        if proposal.note:
+            console.print(f"  примечание: {proposal.note}")
+        for message in SkillProposalManager.validation_messages(proposal):
+            console.print(f"  [yellow]валидация: {message}[/yellow]")
+        console.print(proposal.diff or "(diff пуст)")
+
+    asyncio.run(_with_db(cfg, action))
+
+
+def _decide_proposal(proposal_id: str, *, approved: bool, reason: str | None) -> None:
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> tuple[SkillProposal, str | None]:
+        manager = SkillProposalManager(db, skills_dir)
+        proposal = await manager.get(proposal_id)
+        sha = await manager.decide(proposal, approved=approved, decided_by="cli", reason=reason)
+        return proposal, sha
+
+    try:
+        proposal, sha = asyncio.run(_with_db(cfg, action))
+    except SkillProposalNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except (SkillProposalStateError, GitError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if approved:
+        console.print(f"[green]proposal {proposal.id[:8]} влит[/green] в {proposal.base} ({sha})")
+    else:
+        console.print(f"[yellow]proposal {proposal.id[:8]} отклонён[/yellow]")
+
+
+@proposals_app.command("approve")
+def skills_proposals_approve(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
+) -> None:
+    """Одобрить и влить skill proposal в базовую ветку (§18)."""
+    _decide_proposal(proposal_id, approved=True, reason=reason)
+
+
+@proposals_app.command("reject")
+def skills_proposals_reject(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
+) -> None:
+    """Отклонить skill proposal и удалить его ветку."""
+    _decide_proposal(proposal_id, approved=False, reason=reason)
+
+
+@skills_app.command("curate")
+def skills_curate(
+    semantic: Annotated[
+        bool,
+        typer.Option("--semantic", help="Слой 2: LLM-консолидация на auxiliary-модели (opt-in)"),
+    ] = False,
+) -> None:
+    """Curator: слой 1 (lifecycle по usage) и опц. слой 2 (LLM-консолидация, §18.1)."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(skills_dirs(cfg, workspace))
+
+    async def action(db: AsyncSession) -> None:
+        transitions = await prune_layer1(db, scan.skills, cfg.curator)
+        if transitions:
+            for t in transitions:
+                console.print(
+                    f"[cyan]{t.skill_name}[/cyan]: {t.old.value} → {t.new.value} "
+                    f"[dim]({t.reason})[/dim]"
+                )
+        else:
+            console.print("curator слой 1: lifecycle-изменений нет")
+        if semantic or cfg.curator.semantic:
+            await _curate_semantic(cfg, workspace, scan.skills, db)
+
+    asyncio.run(_with_db(cfg, action))
+
+
+async def _curate_semantic(
+    cfg: SvarogConfig, workspace: Path, skills: list[Skill], db: AsyncSession
+) -> None:
+    """Слой 2: LLM-находки → отчёт в artifacts/ + description-proposals (§18.1)."""
+    try:
+        provider = auxiliary_provider(cfg.models, default_secret_store(cfg.secrets.path))
+    except ApiKeyError as exc:
+        console.print(f"[red]слой 2 недоступен: {exc}[/red]")
+        return
+    console.print("[dim]curator слой 2: анализ библиотеки auxiliary-моделью…[/dim]")
+    report = await consolidate_layer2(provider, skills)
+    path = _write_curation_report(workspace, report)
+    console.print(f"[dim]отчёт: {path}[/dim]")
+    if report.parse_error:
+        console.print(
+            f"[yellow]слой 2: LLM вернул неразбираемый ответ ({report.parse_error})[/yellow]"
+        )
+        return
+    if not report.findings:
+        console.print("curator слой 2: находок нет")
+        return
+    for finding in report.findings:
+        console.print(
+            f"[magenta]{finding.kind}[/magenta] {', '.join(finding.skills)}: {finding.detail}"
+        )
+    await _propose_description_improvements(cfg, workspace, skills, report, db)
+
+
+def _write_curation_report(workspace: Path, report: CurationReport) -> Path:
+    from datetime import UTC, datetime
+
+    artifacts = workspace / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    path = artifacts / f"skill-curation-{stamp}.md"
+    path.write_text(report.to_markdown(), encoding="utf-8")
+    return path
+
+
+async def _propose_description_improvements(
+    cfg: SvarogConfig,
+    workspace: Path,
+    skills: list[Skill],
+    report: CurationReport,
+    db: AsyncSession,
+) -> None:
+    """Содержательные правки — только через proposals (Flow B, §18.1)."""
+    by_name = {s.name: s for s in skills}
+    skills_dir = skills_dirs(cfg, workspace)[0] if cfg.skills.paths else None
+    if skills_dir is None:
+        return
+    manager = SkillProposalManager(db, skills_dir)
+    store = default_secret_store(cfg.secrets.path)
+    for finding in report.improvements():
+        for name in finding.skills:
+            skill = by_name.get(name)
+            # Curator предлагает правки только agent-created скиллов (§18.1).
+            if skill is None or skill.metadata.provenance != "agent":
+                continue
+            files = {"SKILL.md": rewrite_description(skill, finding.suggested_description or "")}
+            request = SkillProposalRequest(
+                skill_name=name,
+                action="update",
+                files=files,
+                note=f"curator: улучшить описание — {finding.detail}",
+            )
+            proposal = await manager.persist(request, known_values=store.values())
+            console.print(
+                f"[cyan]proposal[/cyan] {name}: обновить описание "
+                f"[dim]({proposal.status.value}, {proposal.id[:8]})[/dim]"
+            )
+
+
+def _set_pin(name: str, pinned: bool) -> None:
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> None:
+        await CuratorStore(db).set_pinned(name, pinned)
+
+    asyncio.run(_with_db(cfg, action))
+    verb = "закреплён" if pinned else "откреплён"
+    console.print(f"скилл '{name}' {verb} (pinned={str(pinned).lower()})")
+
+
+@skills_app.command("pin")
+def skills_pin(
+    name: Annotated[str, typer.Argument(help="Имя скилла")],
+) -> None:
+    """Закрепить скилл: вывести из-под автоматических lifecycle-переходов (§18.1)."""
+    _set_pin(name, True)
+
+
+@skills_app.command("unpin")
+def skills_unpin(
+    name: Annotated[str, typer.Argument(help="Имя скилла")],
+) -> None:
+    """Снять закрепление скилла."""
+    _set_pin(name, False)
 
 
 memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)
@@ -811,11 +866,11 @@ app.add_typer(memory_app, name="memory")
 def memory_show() -> None:
     """Показать память, как она попадёт в контекст."""
     cfg = _load_config_or_exit()
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None:
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None:
         console.print("память не настроена (задайте memory.path в svarog.yaml)")
         return
-    text = read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+    text = read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes)
     console.print(text or "память пуста")
 
 
@@ -823,13 +878,13 @@ def memory_show() -> None:
 def memory_flush() -> None:
     """Применить очередь заявок памяти single writer'ом (обычно вызывается после run)."""
     cfg = _load_config_or_exit()
-    memory_dir = _memory_dir(cfg)
-    if memory_dir is None or not memory_dir.is_dir():
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None or not mem_dir.is_dir():
         console.print("память не настроена или каталог отсутствует")
         raise typer.Exit(code=1)
 
     async def action(db: AsyncSession) -> int:
-        writer = MemoryWriter(db, memory_dir)
+        writer = MemoryWriter(db, mem_dir)
         rows = await writer.drain()
         for row in rows:
             if row.error:
@@ -882,6 +937,131 @@ def push(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]push выполнен[/green]\n{result}")
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Адрес прослушивания")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Порт")] = 8080,
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+) -> None:
+    """Запустить REST/WebSocket API gateway (§10.4). Нужен extra `server`."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    try:
+        import uvicorn
+
+        from svarog_harness.gateway import GatewayService
+        from svarog_harness.gateway.api import create_app
+    except ImportError:
+        console.print(
+            "[red]gateway требует опциональные зависимости:[/red] "
+            "uv pip install 'svarog-harness[server]'"
+        )
+        raise typer.Exit(code=1) from None
+    api = create_app(GatewayService(cfg, workspace))
+    console.print(
+        f"[green]Svarog gateway[/green] http://{host}:{port} | workspace: {workspace}\n"
+        f"[dim]POST /runs · GET /runs/{{id}} · WS /runs/{{id}}/events · "
+        f"GET /approvals · POST /approvals/{{id}}[/dim]"
+    )
+    uvicorn.run(api, host=host, port=port, log_level="info")
+
+
+@app.command()
+def telegram(
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+) -> None:
+    """Запустить Telegram-бота (§10.2). Токен — секрет (telegram.token_ref)."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    tg = cfg.telegram
+    if tg.token_ref is None:
+        console.print("[red]telegram.token_ref не задан[/red] (имя секрета с bot-токеном)")
+        raise typer.Exit(code=1)
+    if not tg.allowed_users:
+        console.print(
+            "[red]telegram.allowed_users пуст[/red] — задайте allowlist user-id "
+            "(бот без allowlist отвечает всем отказом)"
+        )
+        raise typer.Exit(code=1)
+    token = default_secret_store(cfg.secrets.path).get(tg.token_ref)
+    if not token:
+        console.print(
+            f"[red]секрет '{tg.token_ref}' не найден[/red] в SecretStore/окружении; "
+            f"svarog secrets set {tg.token_ref}"
+        )
+        raise typer.Exit(code=1)
+
+    from svarog_harness.gateway import GatewayService
+    from svarog_harness.gateway.telegram import (
+        HttpxTelegramTransport,
+        TelegramBot,
+    )
+
+    bot = TelegramBot(
+        GatewayService(cfg, workspace),
+        HttpxTelegramTransport(token),
+        allowed_users=set(tg.allowed_users),
+        poll_timeout=tg.poll_timeout_sec,
+    )
+    console.print(
+        f"[green]Svarog Telegram bot[/green] | workspace: {workspace} | "
+        f"allowlist: {len(tg.allowed_users)} user(s)\n[dim]Ctrl-C для остановки[/dim]"
+    )
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(bot.run_forever())
+
+
+mcp_app = typer.Typer(help="MCP-серверы: discovery инструментов (§9).", no_args_is_help=True)
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    """Подключить настроенные MCP-серверы и показать обнаруженные инструменты."""
+    cfg = _load_config_or_exit()
+    if not cfg.mcp.servers:
+        console.print("MCP-серверы не настроены (секция mcp.servers в svarog.yaml)")
+        return
+    store = default_secret_store(cfg.secrets.path)
+
+    async def discover() -> None:
+        backends = await connect_mcp_servers(cfg.mcp, store)
+        try:
+            tools = build_mcp_tools(backends)
+            if not tools:
+                console.print("инструменты на MCP-серверах не обнаружены")
+                return
+            for tool in tools:
+                console.print(
+                    f"[cyan]{tool.name}[/cyan] [dim](risk={tool.risk_level.value}, "
+                    f"action={tool.action_type}, по умолчанию approval)[/dim]"
+                )
+                if tool.description:
+                    console.print(f"  {tool.description}")
+        finally:
+            for backend in backends:
+                with contextlib.suppress(Exception):
+                    await backend.close()
+
+    try:
+        asyncio.run(discover())
+    except MCPError as exc:
+        console.print(f"[red]MCP: {exc}[/red]")
+        raise typer.Exit(code=1) from None
 
 
 secrets_app = typer.Typer(

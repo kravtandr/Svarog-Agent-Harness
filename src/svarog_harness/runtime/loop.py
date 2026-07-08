@@ -71,6 +71,7 @@ class AgentLoop:
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
+        on_run_started: Callable[[Run], None] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -91,6 +92,9 @@ class AgentLoop:
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
+        # Интерфейсам (gateway/Telegram) нужен run_id сразу после создания run,
+        # чтобы подписаться на его события до завершения (§6.1).
+        self._on_run_started = on_run_started
 
     async def run(
         self,
@@ -108,6 +112,8 @@ class AgentLoop:
         run = await self._recorder.start_run(
             task=task, autonomy=autonomy.value, model=self._model_name, session_id=session_id
         )
+        if self._on_run_started is not None:
+            self._on_run_started(run)
         messages = build_initial_messages(
             task,
             self._workspace,
