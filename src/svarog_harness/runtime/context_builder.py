@@ -27,6 +27,16 @@ Workspace: {workspace}
 """
 
 
+def _system_prompt(workspace: Path, *, skill_cards: str, memory: str) -> str:
+    system = _SYSTEM_PROMPT.format(workspace=workspace)
+    if memory:
+        # Память — доверенный контекст агента (в отличие от файлов workspace).
+        system = f"{system}\n# Память агента\n{memory}\n"
+    if skill_cards:
+        system = f"{system}\n# {skill_cards}\n"
+    return system
+
+
 def build_initial_messages(
     task: str,
     workspace: Path,
@@ -34,13 +44,37 @@ def build_initial_messages(
     skill_cards: str = "",
     memory: str = "",
 ) -> list[ChatMessage]:
-    system = _SYSTEM_PROMPT.format(workspace=workspace)
-    if memory:
-        # Память — доверенный контекст агента (в отличие от файлов workspace).
-        system = f"{system}\n# Память агента\n{memory}\n"
-    if skill_cards:
-        system = f"{system}\n# {skill_cards}\n"
     return [
-        ChatMessage(role="system", content=system),
+        ChatMessage(
+            role="system",
+            content=_system_prompt(workspace, skill_cards=skill_cards, memory=memory),
+        ),
         ChatMessage(role="user", content=task),
+    ]
+
+
+def build_refuel_messages(
+    task: str,
+    workspace: Path,
+    task_state: str,
+    *,
+    skill_cards: str = "",
+    memory: str = "",
+) -> list[ChatMessage]:
+    """Пересобрать контекст после refuel из task_state.md (§6.10) — раздутая
+    история отбрасывается, состояние восстанавливается из сохранённого summary."""
+    return [
+        ChatMessage(
+            role="system",
+            content=_system_prompt(workspace, skill_cards=skill_cards, memory=memory),
+        ),
+        ChatMessage(
+            role="user",
+            content=(
+                f"Задача: {task}\n\n"
+                f"Работа над задачей была приостановлена и контекст сброшен. "
+                f"Ниже — сохранённое состояние (task_state.md). Продолжи с этого места.\n\n"
+                f"{task_state}"
+            ),
+        ),
     ]

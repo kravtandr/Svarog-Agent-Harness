@@ -224,6 +224,7 @@ def _build_loop(
         memory=memory_text,
         skill_load_sink=skill_load_sink,
         memory_sink=memory_sink,
+        workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
