@@ -31,6 +31,28 @@
 
 Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0010](docs/adr/).
 
+## Сравнение с Hermes и coding-агентами
+
+Честно о том, где Svarog отличается, а где проигрывает.
+
+**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерны заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается архитектурой, а не объёмом фич: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом), а не поверх; **resumable-first** loop и решения, задокументированные в ADR. Hermes — мощный готовый агент; Svarog — платформа с более чистыми границами, которую проще аудировать и разворачивать в закрытом контуре.
+
+**OpenClaw / Claude Code / OpenCode** — coding-CLI-агенты: отличный DX для работы с кодом в терминале, и на чистом «написать/поправить код здесь и сейчас» они удобнее Svarog. Но это **продукты-ассистенты**, а не runtime: обычно один интерфейс (терминал), память сессии эфемерна или project-local, нет governance-процесса для навыков и кураторства библиотеки, а безопасность — на доверии к среде. Svarog — **платформа, чтобы собрать такого агента** (и не только coding), с backbone из Git-памяти, policy engine, approval-политик, sandbox и полного trace.
+
+| | **Svarog** | **Hermes** | **OpenClaw / coding-CLI** |
+|---|---|---|---|
+| Тип | платформа/runtime | готовый агент | продукт-ассистент |
+| Долгосрочная память | Git-native, 3 flow, single-writer | provider-модель + FTS5 по сессиям | сессия / project-local |
+| Скиллы | agentskills.io + governance + Curator | agentskills.io + Curator | обычно нет |
+| Безопасность | enforcement + prompt-injection hardening | эвристики + smart approval | доверие к среде |
+| Автономия | yolo-first + неотключаемый critical-набор | YOLO с заморозкой | ручное подтверждение |
+| Resumability | state machine + checkpoints (основа) | checkpoints | обычно нет |
+| Интерфейсы | CLI + REST/WS + Telegram (один core) | 6 платформ | терминал |
+| Модель/хостинг | любой OpenAI-совместимый, Git+SQLite | API-модель, монолит | часто привязка к провайдеру |
+| Зрелость | pre-alpha | production | зависит от проекта |
+
+Итого: за широтой фич идите в Hermes, за coding-DX — в специализированные CLI-агенты; Svarog выбирают, когда нужна **самохостируемая, аудируемая платформа** с Git-native памятью, контролем безопасности и управляемым самоулучшением.
+
 ## Установка (для разработки)
 
 ```bash
