@@ -8,7 +8,7 @@ CLI, gateway (REST/WS) и Telegram гоняют один и тот же end-to-e
 """
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,14 +25,16 @@ from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, create_environment
 from svarog_harness.secrets import SecretStore, default_secret_store, injected_env
 from svarog_harness.skills import Skill, scan_skills, skill_cards
+from svarog_harness.skills.proposal import SkillProposalRequest
+from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Run, RunState
+from svarog_harness.storage.models import Run, RunState, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import RememberTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
-from svarog_harness.tools.skill_tools import ReadSkillTool
+from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.trace.lookup import RunNotResumableError
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import CheckOutcome, Verifier, skill_checks
@@ -58,6 +60,7 @@ class RunHooks:
     on_commit: Callable[[str, str, bool], None] | None = None
     on_commit_blocked: Callable[[str], None] | None = None
     on_memory: Callable[[str | None, str | None], None] | None = None
+    on_proposal: Callable[[SkillProposal], None] | None = None
 
 
 class TaskRunner:
@@ -102,6 +105,7 @@ class TaskRunner:
         environment: ExecutionEnvironment,
         autonomy: AutonomyMode,
         hooks: RunHooks,
+        proposal_sink: list[SkillProposalRequest] | None = None,
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
@@ -130,6 +134,7 @@ class TaskRunner:
             scan.skills,
             skill_load_sink,
             memory_sink,
+            proposal_sink,
             memory_enabled=mem_dir is not None,
         )
         return AgentLoop(
@@ -158,6 +163,7 @@ class TaskRunner:
         skills: list[Skill],
         skill_load_sink: list[tuple[str, str | None]],
         memory_sink: list[dict[str, object]],
+        proposal_sink: list[SkillProposalRequest] | None,
         *,
         memory_enabled: bool,
     ) -> ToolRegistry:
@@ -176,6 +182,10 @@ class TaskRunner:
             registry.register(
                 RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict()))
             )
+        if proposal_sink is not None:
+            # Skill governance (Flow B, §18): агент предлагает скиллы через proposal,
+            # прямые правки skills/ запрещены policy.
+            registry.register(CreateSkillProposalTool(on_propose=proposal_sink.append))
         return registry
 
     async def run_once(self, task: str, autonomy: AutonomyMode, *, hooks: RunHooks) -> RunOutcome:
@@ -192,9 +202,11 @@ class TaskRunner:
             async def action(db: AsyncSession) -> RunOutcome:
                 recorder = TraceRecorder(db)
                 await self.recover(recorder, hooks)
-                loop = self.build_loop(recorder, environment, autonomy, hooks)
+                proposal_sink: list[SkillProposalRequest] = []
+                loop = self.build_loop(recorder, environment, autonomy, hooks, proposal_sink)
                 outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
+                await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 await self.verify(environment, recorder, outcome, hooks)
                 await self._autocommit(flow, prep, task, outcome, hooks)
                 return outcome
@@ -223,9 +235,13 @@ class TaskRunner:
             environment = runner.build_environment()
             await environment.start()
             try:
-                loop = runner.build_loop(recorder, environment, AutonomyMode(run.autonomy), hooks)
+                proposal_sink: list[SkillProposalRequest] = []
+                loop = runner.build_loop(
+                    recorder, environment, AutonomyMode(run.autonomy), hooks, proposal_sink
+                )
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)
+                await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 await runner.verify(environment, recorder, outcome, hooks)
                 return outcome
             finally:
@@ -275,6 +291,32 @@ class TaskRunner:
         for row in await writer.drain():
             if hooks.on_memory is not None:
                 hooks.on_memory(row.commit_sha, row.error)
+
+    async def drain_proposals(
+        self,
+        db: AsyncSession,
+        sink: list[SkillProposalRequest],
+        run_id: str,
+        hooks: RunHooks,
+    ) -> None:
+        """Материализовать skill proposals в ветках skills-репозитория (Flow B, §18)."""
+        if not sink:
+            return
+        skills_dir = self._proposals_dir()
+        if skills_dir is None:
+            return
+        manager = SkillProposalManager(db, skills_dir)
+        for request in sink:
+            row = await manager.persist(
+                replace(request, source_run_id=run_id), known_values=self._store.values()
+            )
+            if hooks.on_proposal is not None:
+                hooks.on_proposal(row)
+
+    def _proposals_dir(self) -> Path | None:
+        """Каталог skills для proposals — первый настроенный путь (project ./skills)."""
+        dirs = skills_dirs(self._cfg, self._workspace)
+        return dirs[0] if dirs else None
 
     async def _autocommit(
         self,

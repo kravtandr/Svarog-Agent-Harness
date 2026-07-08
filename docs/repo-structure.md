@@ -62,15 +62,16 @@ svarog/
       writer.py             # single writer + очередь
 
     gitflow/                # (ADR-0003)
-      gitcmd.py             # subprocess-обертка над git
-      memory_repo.py        # Flow A
-      skill_repo.py         # Flow B (MVP: создание proposal-ветки)
-      workspace_repo.py     # Flow C: pull/branch/commit/push-with-approval
+      repo.py               # subprocess-обертка над git
+      commit_gate.py        # обязательный secret scan перед commit (все flow)
+      skill_repo.py         # Flow B: proposal-ветка, diff, merge/reject (§18)
+      workspace.py          # Flow C: pull/branch/commit/push-with-approval
 
     skills/                 # (§6.4)
-      loader.py             # сканирование, SKILL.md frontmatter
-      card.py               # skill cards для контекста
-      validation.py         # skills check
+      loader.py             # сканирование, SKILL.md frontmatter, skill cards
+      models.py             # Skill, SkillMetadata
+      proposal.py           # SkillProposalRequest + валидация (Flow B, §18)
+      proposal_manager.py   # governance-flow: persist/merge/reject proposals
       curator/              # пост-MVP (ADR-0009)
         pruning.py          # слой 1: механический
         consolidation.py    # слой 2: LLM

@@ -106,3 +106,17 @@ class GitRepo:
 
     async def is_dirty(self) -> bool:
         return bool(await self.status_porcelain())
+
+    async def diff_refs(self, base: str, ref: str) -> str:
+        """Diff между двумя рефами (для показа skill proposal, Flow B)."""
+        _, out, _ = await self._git("diff", f"{base}..{ref}")
+        return out
+
+    async def delete_branch(self, name: str) -> None:
+        await self._git("branch", "-D", name)
+
+    async def merge_no_ff(self, ref: str, *, message: str) -> str:
+        """Влить ветку в текущую отдельным merge-коммитом; вернуть короткий SHA."""
+        await self._git("merge", "--no-ff", ref, "-m", message)
+        _, out, _ = await self._git("rev-parse", "--short", "HEAD")
+        return out.strip()

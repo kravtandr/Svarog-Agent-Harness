@@ -33,8 +33,14 @@ from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import scaffold_agent_home
 from svarog_harness.secrets import FileSecretStore, default_secret_store
 from svarog_harness.skills import scan_skills
+from svarog_harness.skills.proposal import SkillProposalRequest
+from svarog_harness.skills.proposal_manager import (
+    SkillProposalManager,
+    SkillProposalNotFoundError,
+    SkillProposalStateError,
+)
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Approval, Run, RunState
+from svarog_harness.storage.models import Approval, Run, RunState, SkillProposal
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -89,16 +95,21 @@ def init(
     for skipped in result.skipped:
         console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
 
-    async def init_memory_repo() -> None:
-        repo = GitRepo(target / "memory")
+    async def init_git_subrepo(path: Path, message: str) -> None:
+        repo = GitRepo(path)
         if not await repo.is_repo():
             await repo.init()
             await repo.ensure_identity()
             await repo.add_all()
             with contextlib.suppress(GitError):
-                await repo.commit("svarog init: memory repo")
+                await repo.commit(message)
 
-    asyncio.run(init_memory_repo())
+    async def init_subrepos() -> None:
+        # memory — Flow A (ADR-0004); skills — Flow B базовая ветка для proposals (§18).
+        await init_git_subrepo(target / "memory", "svarog init: memory repo")
+        await init_git_subrepo(target / "skills", "svarog init: skills repo")
+
+    asyncio.run(init_subrepos())
     console.print(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
         f'[dim]отредактируйте svarog.yaml (endpoint модели) и запустите `svarog run "…"`[/dim]'
@@ -170,6 +181,19 @@ def _console_hooks() -> RunHooks:
         elif commit_sha:
             console.print(f"[dim]память обновлена ({commit_sha})[/dim]")
 
+    def on_proposal(proposal: SkillProposal) -> None:
+        if proposal.status.value == "pending":
+            console.print(
+                f"[cyan]skill proposal[/cyan] {proposal.skill_name} → ветка {proposal.branch} "
+                f"[dim](review: svarog skills proposals show {proposal.id[:8]})[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]skill proposal {proposal.skill_name}: {proposal.status.value}[/yellow]"
+            )
+            for message in SkillProposalManager.validation_messages(proposal):
+                console.print(f"[yellow]  - {message}[/yellow]")
+
     return RunHooks(
         on_skill_skipped=lambda name, reason: console.print(
             f"[yellow]skill пропущен ({name}): {reason}[/yellow]"
@@ -192,6 +216,7 @@ def _console_hooks() -> RunHooks:
             f"[red]коммит workspace заблокирован secret scan:[/red]\n{msg}"
         ),
         on_memory=on_memory,
+        on_proposal=on_proposal,
     )
 
 
@@ -300,9 +325,11 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
                     break
                 if not task or task in {"/quit", "/exit"}:
                     break
-                loop = runner.build_loop(recorder, environment, autonomy, hooks)
+                proposal_sink: list[SkillProposalRequest] = []
+                loop = runner.build_loop(recorder, environment, autonomy, hooks, proposal_sink)
                 outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await runner.drain_memory(db, hooks)
+                await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 if session_id is None:
                     run = await recorder.get_run(outcome.run_id)
                     session_id = run.session_id if run else None
@@ -572,6 +599,114 @@ def skills_check() -> None:
     if scan.errors:
         raise typer.Exit(code=1)
     console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")
+
+
+proposals_app = typer.Typer(
+    help="Skill proposals (Flow B): review, merge, reject.", no_args_is_help=True
+)
+skills_app.add_typer(proposals_app, name="proposals")
+
+
+def _proposals_skills_dir(cfg: SvarogConfig) -> Path:
+    dirs = skills_dirs(cfg, Path.cwd().resolve())
+    if not dirs:
+        console.print("[red]skills.paths пуст в svarog.yaml[/red]")
+        raise typer.Exit(code=1)
+    return dirs[0]
+
+
+@proposals_app.command("list")
+def skills_proposals_list() -> None:
+    """Показать skill proposals, ожидающие review (Flow B, §18)."""
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        proposals = await SkillProposalManager(db, skills_dir).list_pending()
+        if not proposals:
+            console.print("ожидающих skill proposals нет")
+            return
+        for proposal in proposals:
+            console.print(
+                f"[cyan]{proposal.id[:8]}[/cyan] {proposal.skill_name} "
+                f"({proposal.action}) → ветка {proposal.branch}"
+            )
+            console.print(
+                f"  [dim]review: svarog skills proposals show {proposal.id[:8]} → "
+                f"approve/reject {proposal.id[:8]}[/dim]"
+            )
+
+    asyncio.run(_with_db(cfg, action))
+
+
+@proposals_app.command("show")
+def skills_proposals_show(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+) -> None:
+    """Показать diff и метаданные skill proposal (фактические изменения, §12)."""
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        try:
+            proposal = await SkillProposalManager(db, skills_dir).get(proposal_id)
+        except SkillProposalNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        console.print(f"[bold]proposal {proposal.id[:8]}[/bold] | {proposal.status.value}")
+        console.print(f"  скилл: {proposal.skill_name} ({proposal.action})")
+        console.print(f"  ветка: {proposal.branch} → {proposal.base}")
+        if proposal.note:
+            console.print(f"  примечание: {proposal.note}")
+        for message in SkillProposalManager.validation_messages(proposal):
+            console.print(f"  [yellow]валидация: {message}[/yellow]")
+        console.print(proposal.diff or "(diff пуст)")
+
+    asyncio.run(_with_db(cfg, action))
+
+
+def _decide_proposal(proposal_id: str, *, approved: bool, reason: str | None) -> None:
+    cfg = _load_config_or_exit()
+    skills_dir = _proposals_skills_dir(cfg)
+
+    async def action(db: AsyncSession) -> tuple[SkillProposal, str | None]:
+        manager = SkillProposalManager(db, skills_dir)
+        proposal = await manager.get(proposal_id)
+        sha = await manager.decide(proposal, approved=approved, decided_by="cli", reason=reason)
+        return proposal, sha
+
+    try:
+        proposal, sha = asyncio.run(_with_db(cfg, action))
+    except SkillProposalNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except (SkillProposalStateError, GitError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if approved:
+        console.print(
+            f"[green]proposal {proposal.id[:8]} влит[/green] в {proposal.base} ({sha})"
+        )
+    else:
+        console.print(f"[yellow]proposal {proposal.id[:8]} отклонён[/yellow]")
+
+
+@proposals_app.command("approve")
+def skills_proposals_approve(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
+) -> None:
+    """Одобрить и влить skill proposal в базовую ветку (§18)."""
+    _decide_proposal(proposal_id, approved=True, reason=reason)
+
+
+@proposals_app.command("reject")
+def skills_proposals_reject(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
+) -> None:
+    """Отклонить skill proposal и удалить его ветку."""
+    _decide_proposal(proposal_id, approved=False, reason=reason)
 
 
 memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)
