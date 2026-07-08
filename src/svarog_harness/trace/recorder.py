@@ -40,17 +40,30 @@ class TraceRecorder:
         self._db = db
         self._message_index: dict[str, int] = {}
 
-    async def start_run(self, *, task: str, autonomy: str, model: str) -> Run:
-        session = Session(title=task[:200])
-        run = Run(
-            session=session,
-            state=RunState.RUNNING,
-            task=task,
-            autonomy=autonomy,
-            started_at=utcnow(),
-            meta={"model": model},
-        )
-        self._db.add(session)
+    async def start_run(
+        self, *, task: str, autonomy: str, model: str, session_id: str | None = None
+    ) -> Run:
+        # chat переиспользует одну Session на серию runs (§10.1, ADR-0008).
+        if session_id is None:
+            session = Session(title=task[:200])
+            self._db.add(session)
+            run = Run(
+                session=session,
+                state=RunState.RUNNING,
+                task=task,
+                autonomy=autonomy,
+                started_at=utcnow(),
+                meta={"model": model},
+            )
+        else:
+            run = Run(
+                session_id=session_id,
+                state=RunState.RUNNING,
+                task=task,
+                autonomy=autonomy,
+                started_at=utcnow(),
+                meta={"model": model},
+            )
         self._db.add(run)
         await self._db.flush()
         self._message_index[run.id] = 0

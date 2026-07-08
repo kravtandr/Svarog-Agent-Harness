@@ -92,13 +92,28 @@ class AgentLoop:
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
 
-    async def run(self, task: str, autonomy: AutonomyMode) -> RunOutcome:
-        """Выполнить задачу; режим автономии фиксируется в run (ADR-0010)."""
+    async def run(
+        self,
+        task: str,
+        autonomy: AutonomyMode,
+        *,
+        session_id: str | None = None,
+        history: list[ChatMessage] | None = None,
+    ) -> RunOutcome:
+        """Выполнить задачу; режим автономии фиксируется в run (ADR-0010).
+
+        session_id/history — для chat: run включается в общую сессию и видит
+        предыдущий диалог (§10.1).
+        """
         run = await self._recorder.start_run(
-            task=task, autonomy=autonomy.value, model=self._model_name
+            task=task, autonomy=autonomy.value, model=self._model_name, session_id=session_id
         )
         messages = build_initial_messages(
-            task, self._workspace, skill_cards=self._skill_cards, memory=self._memory
+            task,
+            self._workspace,
+            skill_cards=self._skill_cards,
+            memory=self._memory,
+            history=history,
         )
         for message in messages:
             await self._recorder.add_message(run, message.role, {"content": message.content})

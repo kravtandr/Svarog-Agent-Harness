@@ -28,6 +28,7 @@ from svarog_harness.gitflow import (
     WorkspacePrep,
 )
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
 from svarog_harness.policy.engine import PolicyAction
@@ -465,6 +466,101 @@ def run(
         raise typer.Exit(code=1) from None
     outcome = _interactive_approvals(cfg, outcome)
     _report_outcome(outcome, _failed_checks(cfg, outcome))
+
+
+_CHAT_HISTORY_LIMIT = 24  # сообщений диалога в контексте, чтобы не раздувать промпт
+
+
+@app.command()
+def chat(
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Рабочая директория агента (по умолчанию cwd)"),
+    ] = None,
+    yolo: Annotated[bool, typer.Option("--yolo", help="Режим автономии yolo")] = False,
+    auto: Annotated[bool, typer.Option("--auto", help="Режим автономии auto")] = False,
+    supervised: Annotated[
+        bool, typer.Option("--supervised", help="Режим автономии supervised")
+    ] = False,
+) -> None:
+    """Интерактивная сессия: каждое сообщение — run в общей session (§10.1)."""
+    workspace = (workspace or Path.cwd()).resolve()
+    if not workspace.is_dir():
+        console.print(f"[red]workspace не существует:[/red] {workspace}")
+        raise typer.Exit(code=1)
+    cfg = _load_config_or_exit(project_dir=workspace)
+    autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
+    console.print(
+        f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
+        f"[dim]пустая строка или /quit — выход[/dim]"
+    )
+    try:
+        asyncio.run(_chat_session(cfg, workspace, autonomy))
+    except ApiKeyError as exc:
+        console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except SandboxError as exc:
+        console.print(f"[red]ошибка sandbox:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+
+async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
+    store = _secret_store(cfg)
+    environment = create_environment(
+        cfg.sandbox,
+        workspace,
+        skills_dir=_first_existing_skills_dir(cfg, workspace),
+        env=injected_env(store, cfg.secrets.inject),
+    )
+    await environment.start()
+    try:
+
+        async def action(db: AsyncSession) -> None:
+            recorder = TraceRecorder(db)
+            await _recover_and_warn(recorder)
+            session_id: str | None = None
+            history: list[ChatMessage] = []
+            while True:
+                try:
+                    task = (
+                        await asyncio.to_thread(console.input, "\n[bold cyan]› [/bold cyan]")
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if not task or task in {"/quit", "/exit"}:
+                    break
+                loop = _build_loop(cfg, workspace, recorder, environment, autonomy, store)
+                outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
+                await _drain_memory(cfg, db)
+                if session_id is None:
+                    run = await recorder.get_run(outcome.run_id)
+                    session_id = run.session_id if run else None
+                history.append(ChatMessage(role="user", content=task))
+                history.append(
+                    ChatMessage(role="assistant", content=outcome.final_answer or "(без ответа)")
+                )
+                history[:] = history[-_CHAT_HISTORY_LIMIT:]
+                _print_chat_turn(outcome)
+
+        await _with_db(cfg, action)
+    finally:
+        await environment.cleanup()
+
+
+def _print_chat_turn(outcome: RunOutcome) -> None:
+    stats = f"{outcome.iterations} итер. | ${outcome.cost_usd:.4f}"
+    if outcome.state is RunState.COMPLETED:
+        console.print(f"[dim]— {stats}[/dim]")
+    elif outcome.state is RunState.WAITING_APPROVAL:
+        console.print(
+            f"[magenta]ожидает approval[/magenta] | {stats} "
+            f"[dim](svarog approvals list, затем resume {outcome.run_id[:8]})[/dim]"
+        )
+    else:
+        label = outcome.state.value
+        console.print(f"[yellow]{label}[/yellow] | {stats}")
+        if outcome.error:
+            console.print(f"[yellow]{outcome.error}[/yellow]")
 
 
 @app.command()

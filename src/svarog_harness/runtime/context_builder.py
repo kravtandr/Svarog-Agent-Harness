@@ -43,12 +43,15 @@ def build_initial_messages(
     *,
     skill_cards: str = "",
     memory: str = "",
+    history: list[ChatMessage] | None = None,
 ) -> list[ChatMessage]:
+    # history — предыдущий диалог сессии (chat, §6.3 recent conversation).
     return [
         ChatMessage(
             role="system",
             content=_system_prompt(workspace, skill_cards=skill_cards, memory=memory),
         ),
+        *(history or []),
         ChatMessage(role="user", content=task),
     ]
 
