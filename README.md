@@ -14,7 +14,7 @@
 * **Безопасность через enforcement, а не «распознавание опасных команд».** LLM считается недоверенным компонентом. Гарантии дают инварианты: sandbox с выключенной сетью, non-root и без доступа к секретам; секреты живут только как **именованные ссылки** и вырезаются из контекста и trace; режим автономии и policy **замораживаются при старте run** — инъекция из файла или документа не может повысить права.
 * **Yolo-first, но с неотключаемым тормозом.** По умолчанию агент автономен (основной сценарий — работа без няньки). Approval требуется только для типизированного critical-набора (продовый деплой, выдача секретов, force-push, ослабление политик) — и его нельзя отключить конфигом. Всё остальное — обратимо (ветки, коммиты, rollback) и видно в trace.
 * **Resumable по построению.** Run — это state machine с checkpoint'ами. Ожидание approval, refuel при переполнении контекста, падение процесса, лимит стоимости — ничто не теряет прогресс; run поднимается с последнего шага. Долгие задачи живут часами и днями.
-* **Self-hosted и model-agnostic.** Любой OpenAI-совместимый endpoint (vLLM, Ollama, llama.cpp, LiteLLM, OpenRouter, корпоративный). Обязательны только Git и SQLite — ни одного внешнего сервиса; работает в закрытом контуре и air-gapped.
+* **Model-agnostic и минимум инфраструктуры.** Self-hosted, как и Hermes с OpenClaw, — но без обязательных внешних сервисов: нужны только Git и SQLite. Любой OpenAI-совместимый endpoint (vLLM, Ollama, llama.cpp, LiteLLM, OpenRouter, корпоративный); работает в закрытом контуре и air-gapped.
 * **Один core — много интерфейсов.** CLI, REST/WebSocket и Telegram гоняют один и тот же прогон задачи; approval можно выдать через любой канал, а не только там, где запустили.
 * **Проверяемость важнее самооценки.** Детерминированный verifier (тесты, линтеры, secret scan) имеет приоритет над «я всё сделал» от модели, а полный trace отвечает на вопросы «почему выбран этот скилл», «что запускалось», «кто подтвердил».
 
@@ -31,27 +31,28 @@
 
 Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0010](docs/adr/).
 
-## Сравнение с Hermes и coding-агентами
+## Сравнение с Hermes и OpenClaw
 
-Честно о том, где Svarog отличается, а где проигрывает.
+Все три — self-hosted, поэтому различие не в этом. Ниже честно, где Svarog отличается, а где проигрывает.
 
-**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерны заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается архитектурой, а не объёмом фич: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом), а не поверх; **resumable-first** loop и решения, задокументированные в ADR. Hermes — мощный готовый агент; Svarog — платформа с более чистыми границами, которую проще аудировать и разворачивать в закрытом контуре.
+**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент на Python и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерн заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается архитектурой, а не объёмом фич: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом); **resumable-first** loop и решения, задокументированные в ADR.
 
-**OpenClaw / Claude Code / OpenCode** — coding-CLI-агенты: отличный DX для работы с кодом в терминале, и на чистом «написать/поправить код здесь и сейчас» они удобнее Svarog. Но это **продукты-ассистенты**, а не runtime: обычно один интерфейс (терминал), память сессии эфемерна или project-local, нет governance-процесса для навыков и кураторства библиотеки, а безопасность — на доверии к среде. Svarog — **платформа, чтобы собрать такого агента** (и не только coding), с backbone из Git-памяти, policy engine, approval-политик, sandbox и полного trace.
+**OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — очень популярный self-hosted персональный ассистент на TypeScript/Node: голос, Canvas, ноды для macOS/iOS/Android и охват **20+ каналов** (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, WeChat и др.). У него есть скиллы (`SKILL.md` + реестр ClawHub), sandbox (Docker/SSH) для не-основных сессий и pairing-политика доступа в DM. По охвату каналов, зрелости и DX Svarog ему сильно уступает. Отличие Svarog — не «ассистент на все мессенджеры», а **runtime/платформа для сборки агента** с более строгим backbone: Git-native версионируемая память с тремя flow (у OpenClaw — workspace-файлы и сессии), **governance для скиллов** (proposals + review, а не только реестр) и **Curator**, формальный Policy Engine с типизированным critical-набором и enforcement-инвариантами, resumable state machine с checkpoint'ами, а обязательная инфраструктура — только Git + SQLite.
 
-| | **Svarog** | **Hermes** | **OpenClaw / coding-CLI** |
+| | **Svarog** | **Hermes** | **OpenClaw** |
 |---|---|---|---|
-| Тип | платформа/runtime | готовый агент | продукт-ассистент |
-| Долгосрочная память | Git-native, 3 flow, single-writer | provider-модель + FTS5 по сессиям | сессия / project-local |
-| Скиллы | agentskills.io + governance + Curator | agentskills.io + Curator | обычно нет |
-| Безопасность | enforcement + prompt-injection hardening | эвристики + smart approval | доверие к среде |
-| Автономия | yolo-first + неотключаемый critical-набор | YOLO с заморозкой | ручное подтверждение |
-| Resumability | state machine + checkpoints (основа) | checkpoints | обычно нет |
-| Интерфейсы | CLI + REST/WS + Telegram (один core) | 6 платформ | терминал |
-| Модель/хостинг | любой OpenAI-совместимый, Git+SQLite | API-модель, монолит | часто привязка к провайдеру |
-| Зрелость | pre-alpha | production | зависит от проекта |
+| Тип | платформа/runtime для агентов | готовый агент | персональный ассистент |
+| Стек | Python | Python (монолит) | TypeScript/Node |
+| Долгосрочная память | Git-native, 3 flow, single-writer | provider-модель + FTS5 по сессиям | workspace-файлы + сессии |
+| Скиллы | `SKILL.md` + governance + Curator | agentskills.io + Curator | `SKILL.md` + реестр ClawHub |
+| Безопасность | enforcement + prompt-injection hardening | эвристики + smart approval | sandbox + pairing-политика DM |
+| Автономия | yolo-first + неотключаемый critical-набор | YOLO с заморозкой | pairing / approval незнакомцев |
+| Resumability | state machine + checkpoints (основа) | checkpoints | сессии |
+| Интерфейсы | CLI + REST/WS + Telegram (один core) | 6 платформ | 20+ каналов, голос, Canvas, mobile |
+| Инфраструктура | только Git + SQLite | монолит | Node-gateway, workspace |
+| Зрелость | pre-alpha | production | очень зрелый, большое сообщество |
 
-Итого: за широтой фич идите в Hermes, за coding-DX — в специализированные CLI-агенты; Svarog выбирают, когда нужна **самохостируемая, аудируемая платформа** с Git-native памятью, контролем безопасности и управляемым самоулучшением.
+Итого: за охватом каналов и зрелостью — в OpenClaw, за широтой фич готового агента — в Hermes; Svarog выбирают, когда нужна аудируемая **платформа** с Git-native памятью, контролем безопасности и управляемым самоулучшением, а не готовый ассистент.
 
 ## Установка (для разработки)
 
