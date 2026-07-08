@@ -79,6 +79,16 @@ uv run svarog init                # интерактивно: путь, моде
 
 `init` без флагов спрашивает каталог agent-home (по умолчанию `./agent-home` внутри проекта), имя модели, `base_url` endpoint и API-ключ. Он создаёт skills, memory (Flow A), policies, `.gitignore` для секретов; если agent-home лежит внутри проекта — добавляет его в `.gitignore` проекта (данные агента и секреты не попадут во внешний репозиторий). Введённый ключ **не** записывается в `svarog.yaml` — он сохраняется в SecretStore, а в конфиг попадает только имя (`api_key_ref`).
 
+Конфиг (`svarog.yaml`) создаётся **внутри** agent-home, а `svarog` ищет его в текущей директории. Поэтому после `init` перейдите в agent-home и уже оттуда запускайте команды:
+
+```bash
+uv run svarog init      # создаст ./agent-home
+cd agent-home           # svarog.yaml лежит здесь
+uv run svarog chat      # чат запускается из каталога с конфигом
+```
+
+`uv run` найдёт `pyproject.toml` в родительском каталоге проекта, так что `--project` указывать не нужно.
+
 Без интерактива всё задаётся флагами:
 
 ```bash
