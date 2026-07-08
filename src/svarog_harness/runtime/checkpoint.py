@@ -19,19 +19,24 @@ class LoopState:
 
     workspace: Path
     messages: list[ChatMessage]
-    iterations: int = 0
+    task: str = ""
+    iterations: int = 0  # всего за run (стоп-кран max_iterations)
     tokens_used: int = 0
     cost_usd: float = 0.0
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
+    # Итераций с последнего refuel; при пороге контекст сбрасывается (§6.10).
+    iterations_since_refuel: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace),
             "messages": [_message_to_dict(m) for m in self.messages],
+            "task": self.task,
             "iterations": self.iterations,
             "tokens_used": self.tokens_used,
             "cost_usd": self.cost_usd,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
+            "iterations_since_refuel": self.iterations_since_refuel,
         }
 
     @classmethod
@@ -39,10 +44,12 @@ class LoopState:
         return cls(
             workspace=Path(raw["workspace"]),
             messages=[_message_from_dict(m) for m in raw["messages"]],
+            task=raw.get("task", ""),
             iterations=raw["iterations"],
             tokens_used=raw["tokens_used"],
             cost_usd=raw["cost_usd"],
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
+            iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
         )
 
 

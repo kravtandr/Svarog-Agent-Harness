@@ -13,10 +13,12 @@ from svarog_harness.storage.models import (
     Approval,
     ApprovalStatus,
     Checkpoint,
+    MemoryChange,
     Message,
     Run,
     RunState,
     Session,
+    SkillLoad,
     ToolCall,
     ToolCallStatus,
     utcnow,
@@ -149,6 +151,27 @@ class TraceRecorder:
         approval.decided_at = utcnow()
         approval.decided_by = decided_by
         approval.reason = reason
+        await self._db.commit()
+
+    async def enqueue_memory_change(self, run: Run, change: dict[str, Any]) -> MemoryChange:
+        """Поставить MemoryChangeRequest в очередь single writer'а (ADR-0004)."""
+        row = MemoryChange(change=change, source_run_id=run.id)
+        self._db.add(row)
+        await self._db.commit()
+        return row
+
+    async def log_skill_load(
+        self, run: Run, *, skill_name: str, skill_version: str | None, source: str = "full"
+    ) -> None:
+        """Факт загрузки скилла — сырьё для Skill Curator (ADR-0009, §18.1)."""
+        self._db.add(
+            SkillLoad(
+                run_id=run.id,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                source=source,
+            )
+        )
         await self._db.commit()
 
     async def update_progress(

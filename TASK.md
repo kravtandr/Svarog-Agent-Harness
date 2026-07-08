@@ -1105,6 +1105,10 @@ skills:
 storage:
   db_path: ~/.svarog/svarog.db   # SQLite по умолчанию (ADR-0007)
 
+memory:
+  path: ./memory                 # memory-репозиторий Flow A (ADR-0004); не задан — память выключена
+  context_limit_bytes: 16000     # лимит memory-entrypoint в контексте (§6.7)
+
 policies:
   # неотключаемый critical-набор (см. 3.6) требует approval всегда
   # и в конфигурации не перечисляется

@@ -6,6 +6,7 @@ approvals list/approve/deny, version.
 """
 
 import asyncio
+import contextlib
 import json
 import sys
 from collections.abc import Awaitable, Callable
@@ -19,17 +20,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.gitflow import (
+    GitError,
+    GitRepo,
+    SecretScanBlockedError,
+    WorkspaceFlow,
+    WorkspacePrep,
+)
 from svarog_harness.llm.openai_compatible import ApiKeyError, default_provider
+from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError, load_policy_rules
+from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, SandboxError, create_environment
+from svarog_harness.scaffold import scaffold_agent_home
+from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, RunState
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
+from svarog_harness.tools.memory_tools import RememberTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
+from svarog_harness.tools.skill_tools import ReadSkillTool
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -52,6 +66,8 @@ traces_app = typer.Typer(help="Просмотр traces выполненных ru
 app.add_typer(traces_app, name="traces")
 approvals_app = typer.Typer(help="Approval-запросы: список и решения.", no_args_is_help=True)
 app.add_typer(approvals_app, name="approvals")
+skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
+app.add_typer(skills_app, name="skills")
 console = Console()
 
 
@@ -64,6 +80,37 @@ def main() -> None:
 def version() -> None:
     """Показать версию svarog-harness."""
     console.print(f"svarog-harness {__version__}")
+
+
+@app.command()
+def init(
+    path: Annotated[
+        Path | None, typer.Argument(help="Каталог agent-home (по умолчанию текущий)")
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Перезаписать существующие файлы")] = False,
+) -> None:
+    """Создать agent-home: skills, memory (Flow A), policies, .gitignore (§8)."""
+    target = (path or Path.cwd()).resolve()
+    result = scaffold_agent_home(target, force=force)
+    for created in result.created:
+        console.print(f"[green]+[/green] {created.relative_to(target)}")
+    for skipped in result.skipped:
+        console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
+
+    async def init_memory_repo() -> None:
+        repo = GitRepo(target / "memory")
+        if not await repo.is_repo():
+            await repo.init()
+            await repo.ensure_identity()
+            await repo.add_all()
+            with contextlib.suppress(GitError):
+                await repo.commit("svarog init: memory repo")
+
+    asyncio.run(init_memory_repo())
+    console.print(
+        f"\n[bold]agent-home готов:[/bold] {target}\n"
+        f'[dim]отредактируйте svarog.yaml (endpoint модели) и запустите `svarog run "…"`[/dim]'
+    )
 
 
 def _load_config_or_exit(project_dir: Path | None = None) -> SvarogConfig:
@@ -90,14 +137,36 @@ def _resolve_autonomy(
 
 
 def _build_registry(
-    workspace: Path, environment: ExecutionEnvironment, command_timeout_sec: float
+    workspace: Path,
+    environment: ExecutionEnvironment,
+    command_timeout_sec: float,
+    skills: list[Skill],
+    skill_load_sink: list[tuple[str, str | None]],
+    *,
+    memory_enabled: bool,
+    memory_sink: list[dict[str, object]],
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in file_tools(workspace):
         registry.register(tool)
     registry.register(BashTool(environment, command_timeout_sec))
     registry.register(RequestApprovalTool())
+    if skills:
+        registry.register(
+            ReadSkillTool(
+                skills, on_load=lambda name, version: skill_load_sink.append((name, version))
+            )
+        )
+    if memory_enabled:
+        registry.register(RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict())))
     return registry
+
+
+def _memory_dir(cfg: SvarogConfig) -> Path | None:
+    """Каталог memory-репозитория (Flow A), если память включена в конфиге."""
+    if cfg.memory.path is None:
+        return None
+    return cfg.memory.path.expanduser().resolve()
 
 
 def _skills_dirs(cfg: SvarogConfig, workspace: Path) -> list[Path]:
@@ -155,14 +224,40 @@ def _build_loop(
         rules=load_policy_rules(workspace),
         skills_dirs=_skills_dirs(cfg, workspace),
     )
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    for skill_error in scan.errors:
+        console.print(
+            f"[yellow]skill пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]"
+        )
+    memory_dir = _memory_dir(cfg)
+    memory_text = (
+        read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+        if memory_dir is not None
+        else ""
+    )
+    skill_load_sink: list[tuple[str, str | None]] = []
+    memory_sink: list[dict[str, object]] = []
     return AgentLoop(
         default_provider(cfg.models),
-        _build_registry(workspace, environment, cfg.sandbox.timeout_sec),
+        _build_registry(
+            workspace,
+            environment,
+            cfg.sandbox.timeout_sec,
+            scan.skills,
+            skill_load_sink,
+            memory_enabled=memory_dir is not None,
+            memory_sink=memory_sink,
+        ),
         recorder,
         cfg.runtime,
         policy,
         workspace,
         model_name=cfg.models.providers[cfg.models.default].model,
+        skill_cards=skill_cards(scan.skills),
+        memory=memory_text,
+        skill_load_sink=skill_load_sink,
+        memory_sink=memory_sink,
+        workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -176,6 +271,17 @@ def _build_loop(
 async def _run_task(
     cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
 ) -> RunOutcome:
+    # Flow C: подготовить workspace (pull + task branch) до старта sandbox,
+    # чтобы контейнер видел рабочую ветку (ADR-0003).
+    flow = WorkspaceFlow(GitRepo(workspace), cfg.git)
+    prep = await flow.start(task)
+    if prep.is_git and prep.branch:
+        console.print(
+            f"[dim]workspace: ветка {prep.branch}{' (после pull)' if prep.pulled else ''}[/dim]"
+        )
+    if prep.note:
+        console.print(f"[yellow]{prep.note}[/yellow]")
+
     environment = create_environment(
         cfg.sandbox, workspace, skills_dir=_first_existing_skills_dir(cfg, workspace)
     )
@@ -186,11 +292,50 @@ async def _run_task(
             recorder = TraceRecorder(db)
             await _recover_and_warn(recorder)
             loop = _build_loop(cfg, workspace, recorder, environment, autonomy)
-            return await loop.run(task, autonomy)
+            outcome = await loop.run(task, autonomy)
+            await _drain_memory(cfg, db)
+            await _autocommit_workspace(cfg, flow, prep, task, outcome)
+            return outcome
 
         return await _with_db(cfg, action)
     finally:
         await environment.cleanup()
+
+
+async def _autocommit_workspace(
+    cfg: SvarogConfig,
+    flow: WorkspaceFlow,
+    prep: WorkspacePrep,
+    task: str,
+    outcome: RunOutcome,
+) -> None:
+    """Flow C: закоммитить изменения workspace на task-ветке после run."""
+    if not (prep.is_git and cfg.git.auto_commit and outcome.state is RunState.COMPLETED):
+        return
+    try:
+        sha = await flow.commit_step(f"svarog: {task[:72]}", run_id=outcome.run_id)
+    except SecretScanBlockedError as exc:
+        console.print(f"[red]коммит workspace заблокирован secret scan:[/red]\n{exc}")
+        return
+    if sha is None:
+        return
+    branch = prep.branch or "HEAD"
+    console.print(f"[dim]workspace закоммичен ({sha}) на {branch}[/dim]")
+    if cfg.git.require_approval_for_push:
+        console.print(f"[dim]push вручную: svarog push {branch}[/dim]")
+
+
+async def _drain_memory(cfg: SvarogConfig, db: AsyncSession) -> None:
+    """Применить очередь заявок памяти single writer'ом после run (ADR-0004)."""
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None or not memory_dir.is_dir():
+        return
+    writer = MemoryWriter(db, memory_dir)
+    for row in await writer.drain():
+        if row.error:
+            console.print(f"[yellow]память: заявка отклонена — {row.error}[/yellow]")
+        elif row.commit_sha:
+            console.print(f"[dim]память обновлена ({row.commit_sha})[/dim]")
 
 
 async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
@@ -451,3 +596,114 @@ def approvals_deny(
 ) -> None:
     """Отклонить действие; агент получит причину отказа при resume."""
     _decide_approval_command(approval_id, approved=False, reason=reason)
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """Показать доступные скиллы и их карточки."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    if not scan.skills and not scan.errors:
+        console.print("скиллов не найдено (проверьте skills.paths в svarog.yaml)")
+        return
+    for skill in scan.skills:
+        console.print(skill.card())
+    for skill_error in scan.errors:
+        console.print(f"[yellow]пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]")
+
+
+@skills_app.command("check")
+def skills_check() -> None:
+    """Проверить валидность SKILL.md всех скиллов; exit code 1 при ошибках."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    scan = scan_skills(_skills_dirs(cfg, workspace))
+    for skill in scan.skills:
+        console.print(f"[green]ok[/green] {skill.name} (v{skill.metadata.version})")
+    for skill_error in scan.errors:
+        console.print(f"[red]ошибка[/red] {skill_error.path}: {skill_error.reason}")
+    if scan.errors:
+        raise typer.Exit(code=1)
+    console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")
+
+
+memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    """Показать память, как она попадёт в контекст."""
+    cfg = _load_config_or_exit()
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None:
+        console.print("память не настроена (задайте memory.path в svarog.yaml)")
+        return
+    text = read_memory(memory_dir, limit_bytes=cfg.memory.context_limit_bytes)
+    console.print(text or "память пуста")
+
+
+@memory_app.command("flush")
+def memory_flush() -> None:
+    """Применить очередь заявок памяти single writer'ом (обычно вызывается после run)."""
+    cfg = _load_config_or_exit()
+    memory_dir = _memory_dir(cfg)
+    if memory_dir is None or not memory_dir.is_dir():
+        console.print("память не настроена или каталог отсутствует")
+        raise typer.Exit(code=1)
+
+    async def action(db: AsyncSession) -> int:
+        writer = MemoryWriter(db, memory_dir)
+        rows = await writer.drain()
+        for row in rows:
+            if row.error:
+                console.print(f"[yellow]отклонено: {row.error}[/yellow]")
+            elif row.commit_sha:
+                console.print(f"[green]{row.commit_sha}[/green] применено")
+        return len(rows)
+
+    count = asyncio.run(_with_db(cfg, action))
+    console.print(f"обработано заявок: {count}")
+
+
+@app.command()
+def push(
+    branch: Annotated[
+        str | None, typer.Argument(help="Ветка для push (по умолчанию текущая)")
+    ] = None,
+    remote: Annotated[str, typer.Option("--remote", help="Remote")] = "origin",
+) -> None:
+    """Протолкнуть task-ветку в remote (Flow C). Protected ветки требуют approval."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    repo = GitRepo(workspace)
+    flow = WorkspaceFlow(repo, cfg.git)
+
+    async def do_push() -> str:
+        if not await repo.is_repo():
+            raise GitError("текущий каталог не является git-репозиторием")
+        target = branch or await repo.current_branch()
+        # Policy: push в protected ветку — critical-набор, approval в любом режиме (§3.6).
+        policy = PolicyEngine(
+            autonomy=cfg.runtime.autonomy, policies=cfg.policies, workspace=workspace
+        )
+        decision = policy.evaluate_action("git.push", {"branch": target})
+        if decision.action is PolicyAction.REQUIRE_APPROVAL:
+            raise GitError(
+                f"push в '{target}' требует approval ({decision.reason}); "
+                f"protected ветки нельзя пушить командой push напрямую"
+            )
+        findings = await flow.push_precheck(target)
+        if findings:
+            raise GitError(
+                f"secret scan перед push нашёл {len(findings)} секрет(ов) — push отменён"
+            )
+        return await flow.push(target, remote=remote)
+
+    try:
+        result = asyncio.run(do_push())
+    except GitError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]push выполнен[/green]\n{result}")

@@ -106,6 +106,13 @@ class StorageConfig(StrictModel):
     db_path: Path = Path("~/.svarog/svarog.db")
 
 
+class MemoryConfig(StrictModel):
+    # Каталог memory-репозитория (Flow A, ADR-0003/0004); None — память выключена.
+    path: Path | None = None
+    # Лимит memory-entrypoint в контексте (§6.7), чтобы не раздувать промпт.
+    context_limit_bytes: int = Field(default=16_000, gt=0)
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -137,6 +144,7 @@ class SvarogConfig(BaseSettings):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     @classmethod
     def settings_customise_sources(
