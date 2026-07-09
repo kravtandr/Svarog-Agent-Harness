@@ -26,12 +26,26 @@ _SYSTEM_PROMPT = """\
 Workspace: {workspace}
 """
 
+_MEMORY_GUIDE = """\
+Долговременная память — каталог memory/; пути в tool remember указываются \
+относительно него. Раскладка:
+- user/profile.md — факты о пользователе: предпочтения, расписание, привычки;
+- projects/<имя-проекта>.md — отдельный файл на каждый проект или место работы;
+- decisions/<тема>.md — принятые решения и договорённости.
+Правила записи (remember):
+- в существующий файл дописывай через append или обновляй секцию через replace_section;
+- create перезаписывает файл целиком — используй только для новых файлов;
+- не сваливай всё в один файл: новый проект — новый файл в projects/.
+"""
+
 
 def _system_prompt(workspace: Path, *, skill_cards: str, memory: str) -> str:
     system = _SYSTEM_PROMPT.format(workspace=workspace)
     if memory:
         # Память — доверенный контекст агента (в отличие от файлов workspace).
-        system = f"{system}\n# Память агента\n{memory}\n"
+        system = (
+            f"{system}\n# Память агента\n{_MEMORY_GUIDE}\nТекущее содержимое памяти:\n{memory}\n"
+        )
     if skill_cards:
         system = f"{system}\n# {skill_cards}\n"
     return system

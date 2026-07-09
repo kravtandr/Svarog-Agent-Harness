@@ -260,3 +260,37 @@ async def test_provider_exception_fails_run(db: AsyncSession, tmp_path: Path) ->
     assert "сервер недоступен" in outcome.error
     run = (await db.execute(select(Run))).scalar_one()
     assert run.state is RunState.FAILED
+
+
+def _leaked_final(text: str) -> CompletionResult:
+    """«Финальный» ответ, в котором провайдер заподозрил протёкший tool call."""
+    return CompletionResult(
+        content=text, usage=Usage(10, 5), finish_reason="stop", leak_suspected=True
+    )
+
+
+async def test_leak_suspected_answer_is_nudged_not_completed(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    leaked = "commentary to=functions.remember json{'file':} final Запомнил."
+    provider = ScriptedProvider([_leaked_final(leaked), _final("Готово")])
+    outcome = await _loop(provider, db, tmp_path).run("запомни факт", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "Готово"
+    assert outcome.iterations == 2
+    # Вторая итерация получила корректирующее сообщение вместо завершения run.
+    nudge = provider.seen_messages[1][-1]
+    assert nudge.role == "user"
+    assert "НЕ был исполнен" in nudge.content
+
+
+async def test_leak_nudges_are_capped(db: AsyncSession, tmp_path: Path) -> None:
+    leaked = "to=functions.remember json{broken"
+    provider = ScriptedProvider([_leaked_final(leaked)] * 3)
+    outcome = await _loop(provider, db, tmp_path).run("запомни факт", AutonomyMode.YOLO)
+
+    # После двух повторов loop сдаётся и принимает ответ как финальный.
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == leaked
+    assert outcome.iterations == 3

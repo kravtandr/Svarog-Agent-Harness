@@ -26,6 +26,8 @@ class LoopState:
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
     # Итераций с последнего refuel; при пороге контекст сбрасывается (§6.10).
     iterations_since_refuel: int = 0
+    # Сколько раз модели возвращали протёкший текстом tool call на повтор.
+    leak_nudges: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class LoopState:
             "cost_usd": self.cost_usd,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
             "iterations_since_refuel": self.iterations_since_refuel,
+            "leak_nudges": self.leak_nudges,
         }
 
     @classmethod
@@ -50,6 +53,7 @@ class LoopState:
             cost_usd=raw["cost_usd"],
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
+            leak_nudges=raw.get("leak_nudges", 0),
         )
 
 

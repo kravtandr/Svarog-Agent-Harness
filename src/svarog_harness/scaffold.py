@@ -72,6 +72,7 @@ policies:
     - production
 """
 
+
 _SECURITY_POLICY = """\
 # Пользовательские policy-правила (§6.6). Могут только ужесточать поведение:
 # decision — deny | require_approval | notify (allow запрещён схемой).

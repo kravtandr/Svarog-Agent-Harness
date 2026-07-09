@@ -81,6 +81,10 @@ class CompletionResult:
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
     finish_reason: str | None = None
+    # Провайдер заподозрил в content невыполненный tool call (протёкший
+    # текстом), который не удалось извлечь fallback'ом — loop не должен
+    # принимать такой ответ за финальный.
+    leak_suspected: bool = False
 
 
 class ModelProvider(ABC):

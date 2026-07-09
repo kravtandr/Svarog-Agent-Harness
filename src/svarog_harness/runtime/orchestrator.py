@@ -136,8 +136,11 @@ class TaskRunner:
         # archived-скиллы (Curator слой 1, §18.1) не попадают в карточки и read_skill.
         active_skills = [s for s in scan.skills if s.name not in excluded_skills]
         mem_dir = memory_dir(cfg)
+        # Placeholder при пустых файлах: guidance по структуре памяти в системном
+        # промпте должен присутствовать всегда, когда память включена.
         memory_text = (
             read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes)
+            or "(память пока пуста)"
             if mem_dir is not None
             else ""
         )

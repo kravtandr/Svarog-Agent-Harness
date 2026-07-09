@@ -11,6 +11,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from svarog_harness.config.schema import ModelsConfig, ProviderConfig
+from svarog_harness.llm.harmony_leak import extract_leaked_tool_calls, leak_suspected
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -181,9 +182,22 @@ class OpenAICompatibleProvider(ModelProvider):
                         acc.arguments += tc.function.arguments
 
         content = "".join(content_parts)
+        tool_calls = tuple(calls[i].to_request() for i in sorted(calls))
+        suspected = False
+        if not tool_calls and content and leak_suspected(content):
+            # Сервер не распарсил Harmony-вызов и отдал его текстом — извлекаем
+            # сами; content при успехе отбрасываем (это внутренние каналы модели,
+            # а не ответ пользователю). Текст уже ушёл в on_text_delta — терпимо.
+            leaked = extract_leaked_tool_calls(content)
+            if leaked:
+                tool_calls = leaked
+                content = ""
+            else:
+                suspected = True
         if usage is None:
             prompt_text = "".join(m.content for m in messages)
-            completion_text = content + "".join(a.arguments for a in calls.values())
+            # Оценка по сырому выводу модели — до отбрасывания протёкшего content.
+            completion_text = "".join(content_parts) + "".join(a.arguments for a in calls.values())
             usage = Usage(
                 prompt_tokens=_estimate_tokens(prompt_text),
                 completion_tokens=_estimate_tokens(completion_text),
@@ -195,8 +209,9 @@ class OpenAICompatibleProvider(ModelProvider):
 
         return CompletionResult(
             content=content,
-            tool_calls=tuple(calls[i].to_request() for i in sorted(calls)),
+            tool_calls=tool_calls,
             usage=usage,
             cost_usd=cost_usd,
             finish_reason=finish_reason,
+            leak_suspected=suspected,
         )

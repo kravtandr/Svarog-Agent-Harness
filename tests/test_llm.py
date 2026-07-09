@@ -107,6 +107,50 @@ async def test_assembles_tool_calls_from_deltas() -> None:
     assert client.kwargs["tools"][0]["function"]["name"] == "read_file"
 
 
+async def test_recovers_tool_call_leaked_into_content() -> None:
+    # Harmony-leak: сервер отдал вызов инструмента текстом, tool_calls пуст.
+    leaked = (
+        "analysis...assistantcommentary to=functions.remember json"
+        '{"file": "user/profile.md", "operation": "append", "content": "x"}'
+        "assistantfinalЗапомнил."
+    )
+    provider, _ = _provider(
+        [_chunk(content=leaked[:40]), _chunk(content=leaked[40:], finish_reason="stop")]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="запомни")], [])
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "remember"
+    assert result.tool_calls[0].parse_arguments()["operation"] == "append"
+    # Протёкшие каналы — не ответ пользователю.
+    assert result.content == ""
+    assert result.leak_suspected is False
+
+
+async def test_flags_unparseable_leak_as_suspected() -> None:
+    leaked = "commentary to=functions.remember json{'file': 'user/profile.md'}final Запомнил."
+    provider, _ = _provider([_chunk(content=leaked, finish_reason="stop")])
+    result = await provider.complete([ChatMessage(role="user", content="запомни")], [])
+    assert result.tool_calls == ()
+    assert result.leak_suspected is True
+    assert result.content == leaked
+
+
+async def test_structured_tool_calls_skip_leak_fallback() -> None:
+    provider, _ = _provider(
+        [
+            _chunk(
+                content="to=functions.remember упоминание в тексте",
+                tool_calls=[_tc_delta(0, call_id="c1", name="remember", arguments="{}")],
+            ),
+            _chunk(finish_reason="tool_calls"),
+        ]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="go")], [])
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "c1"
+    assert result.leak_suspected is False
+
+
 async def test_estimates_tokens_when_usage_missing() -> None:
     provider, _ = _provider([_chunk(content="x" * 40, finish_reason="stop")])
     result = await provider.complete([ChatMessage(role="user", content="y" * 400)], [])

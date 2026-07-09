@@ -27,6 +27,17 @@ from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.trace.recorder import TraceRecorder
 
+# Сколько раз возвращать модели протёкший текстом tool call на повтор,
+# прежде чем сдаться и принять ответ как финальный.
+_MAX_LEAK_NUDGES = 2
+
+_LEAK_NUDGE = (
+    "Твой предыдущий ответ содержал попытку вызвать инструмент обычным текстом "
+    "(например, 'to=functions.<имя> {...}'). Такой вызов НЕ был исполнен: "
+    "никакие изменения не применены и ничего не сохранено. Не сообщай о "
+    "выполнении действия — повтори вызов через штатный механизм tool calls."
+)
+
 
 @dataclass(frozen=True)
 class RunOutcome:
@@ -173,6 +184,15 @@ class AgentLoop:
                 )
 
                 if not result.tool_calls:
+                    # Провайдер заподозрил невыполненный tool call в тексте —
+                    # не принимать «финальный» ответ (модель может ложно
+                    # отчитаться об успехе), а вернуть вызов на повтор.
+                    if result.leak_suspected and state.leak_nudges < _MAX_LEAK_NUDGES:
+                        state.leak_nudges += 1
+                        state.messages.append(ChatMessage(role="user", content=_LEAK_NUDGE))
+                        await self._recorder.add_message(run, "user", {"content": _LEAK_NUDGE})
+                        await self._save_checkpoint(run, state)
+                        continue
                     await self._recorder.finish_run(run, RunState.COMPLETED)
                     return self._outcome(run, RunState.COMPLETED, state, result.content)
 
