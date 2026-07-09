@@ -17,6 +17,7 @@ from svarog_harness.secrets import (
     default_secret_store,
     injected_env,
     redact,
+    selected_values,
 )
 
 _FAKE = "s3cr3t-value-12345"
@@ -113,6 +114,13 @@ def test_injected_env_only_requested(tmp_path: Path) -> None:
     store.set("OTHER", "не-нужен")
     env = injected_env(store, ["GH_TOKEN"])
     assert env == {"GH_TOKEN": _FAKE}
+
+
+def test_selected_values_includes_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", _FAKE)
+    store = default_secret_store(None)
+    assert store.values() == frozenset()
+    assert selected_values(store, ["GH_TOKEN", "MISSING"]) == frozenset({_FAKE})
 
 
 def test_docker_run_args_include_injected_env(tmp_path: Path) -> None:

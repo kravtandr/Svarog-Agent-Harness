@@ -16,6 +16,7 @@ leak_suspected, чтобы ответ не был принят как финал
 import json
 import re
 import uuid
+from typing import Any
 
 from svarog_harness.llm.provider import ToolCallRequest
 
@@ -115,7 +116,7 @@ def _extract_mistral(content: str) -> list[tuple[int, str, str]]:
     return calls
 
 
-def _call_entry(obj: dict | None) -> tuple[str, str] | None:
+def _call_entry(obj: dict[str, Any] | None) -> tuple[str, str] | None:
     """Превратить {"name": ..., "arguments": ...} в (имя, аргументы-json)."""
     if obj is None or not isinstance(obj.get("name"), str):
         return None
@@ -130,7 +131,7 @@ def _call_entry(obj: dict | None) -> tuple[str, str] | None:
     return None
 
 
-def _load_object(raw: str) -> dict | None:
+def _load_object(raw: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:

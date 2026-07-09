@@ -70,6 +70,9 @@ policies:
   protected_branches:
     - main
     - production
+
+gateway:
+  token_ref: null          # задайте имя секрета для serve --host 0.0.0.0
 """
 
 

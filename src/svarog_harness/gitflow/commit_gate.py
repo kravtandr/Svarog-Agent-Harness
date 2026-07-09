@@ -25,6 +25,20 @@ async def scan_staged(
     return scan_files(files, known_values=known_values)
 
 
+async def scan_ref(
+    repo: GitRepo, ref: str, *, known_values: frozenset[str] = frozenset()
+) -> list[SecretFinding]:
+    """Просканировать содержимое git ref перед push."""
+    _, out, _ = await repo._git("ls-tree", "-r", "--name-only", ref)
+    files: dict[str, str] = {}
+    for path in out.splitlines():
+        if not path:
+            continue
+        _, content, _ = await repo._git("show", f"{ref}:{path}", check=False)
+        files[path] = content
+    return scan_files(files, known_values=known_values)
+
+
 async def commit_guarded(
     repo: GitRepo,
     message: str,

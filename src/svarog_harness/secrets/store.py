@@ -102,3 +102,9 @@ def injected_env(store: SecretStore, names: list[str]) -> dict[str, str]:
         if value:
             env[name] = value
     return env
+
+
+def selected_values(store: SecretStore, names: list[str]) -> frozenset[str]:
+    """Значения явно названных секретов, включая env fallback."""
+    values = {store.get(name) for name in names}
+    return frozenset(value for value in values if value)

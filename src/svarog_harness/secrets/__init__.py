@@ -20,6 +20,7 @@ from svarog_harness.secrets.store import (
     LayeredSecretStore,
     SecretStore,
     injected_env,
+    selected_values,
 )
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "redact",
     "scan_files",
     "scan_text",
+    "selected_values",
     "shannon_entropy",
 ]
 

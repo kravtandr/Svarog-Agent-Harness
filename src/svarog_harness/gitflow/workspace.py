@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 
 from svarog_harness.config.schema import GitConfig
-from svarog_harness.gitflow.commit_gate import commit_guarded, scan_staged
+from svarog_harness.gitflow.commit_gate import commit_guarded, scan_ref
 from svarog_harness.gitflow.repo import GitError, GitRepo
 from svarog_harness.secrets import SecretFinding
 
@@ -78,7 +78,7 @@ class WorkspaceFlow:
         self, branch: str, *, known_values: frozenset[str] = frozenset()
     ) -> list[SecretFinding]:
         """Повторный secret scan содержимого ветки перед push (вторая линия)."""
-        return await scan_staged(self._repo, known_values=known_values)
+        return await scan_ref(self._repo, branch, known_values=known_values)
 
     async def push(self, branch: str, *, remote: str = "origin") -> str:
         """Протолкнуть ветку в remote (host-компонент, ADR-0002/0006)."""

@@ -3,6 +3,7 @@
 from svarog_harness.gitflow.commit_gate import (
     SecretScanBlockedError,
     commit_guarded,
+    scan_ref,
     scan_staged,
 )
 from svarog_harness.gitflow.repo import GitError, GitRepo
@@ -19,6 +20,7 @@ __all__ = [
     "WorkspaceFlow",
     "WorkspacePrep",
     "commit_guarded",
+    "scan_ref",
     "scan_staged",
     "task_branch_name",
 ]

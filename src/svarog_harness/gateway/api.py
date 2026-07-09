@@ -5,7 +5,10 @@ GatewayService, сериализует ответ. Approval асинхронны
 фиксирует его и запускает возобновление run'а в фоне (ADR-0005).
 """
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from collections.abc import Callable
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from svarog_harness.gateway.models import (
     ApprovalDecisionRequest,
@@ -20,23 +23,38 @@ from svarog_harness.gateway.service import GatewayService
 from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
 
 
-def create_app(service: GatewayService) -> FastAPI:
+def _authorized(authorization: str | None, token: str | None) -> bool:
+    if token is None:
+        return True
+    return authorization == f"Bearer {token}"
+
+
+def _auth_dependency(token: str | None) -> Callable[[str | None], None]:
+    def check(authorization: Annotated[str | None, Header()] = None) -> None:
+        if not _authorized(authorization, token):
+            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+
+    return check
+
+
+def create_app(service: GatewayService, *, bearer_token: str | None = None) -> FastAPI:
     app = FastAPI(title="Svarog Gateway", version="0.1.0")
+    auth = [Depends(_auth_dependency(bearer_token))] if bearer_token is not None else []
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "workspace": str(service.workspace)}
 
-    @app.post("/runs", response_model=RunRef, status_code=201)
+    @app.post("/runs", response_model=RunRef, status_code=201, dependencies=auth)
     async def create_run(req: CreateRunRequest) -> RunRef:
         run_id = await service.create_run(req.task, req.autonomy)
         return RunRef(run_id=run_id, state="running")
 
-    @app.get("/runs", response_model=list[RunSummary])
+    @app.get("/runs", response_model=list[RunSummary], dependencies=auth)
     async def list_runs(limit: int = 20) -> list[RunSummary]:
         return await service.list_runs(limit=limit)
 
-    @app.get("/runs/{run_id}", response_model=RunDetail)
+    @app.get("/runs/{run_id}", response_model=RunDetail, dependencies=auth)
     async def get_run(run_id: str) -> RunDetail:
         try:
             return await service.get_run(run_id)
@@ -45,6 +63,13 @@ def create_app(service: GatewayService) -> FastAPI:
 
     @app.websocket("/runs/{run_id}/events")
     async def run_events(websocket: WebSocket, run_id: str) -> None:
+        query_token = websocket.query_params.get("token")
+        authorization = websocket.headers.get("authorization")
+        if bearer_token is not None and not (
+            _authorized(authorization, bearer_token) or query_token == bearer_token
+        ):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
         await websocket.accept()
         try:
             async for event in service.stream(run_id):
@@ -54,15 +79,15 @@ def create_app(service: GatewayService) -> FastAPI:
         # Стрим завершился (run_finished в истории/живой) — закрываем соединение.
         await websocket.close()
 
-    @app.get("/skills", response_model=list[SkillCard])
+    @app.get("/skills", response_model=list[SkillCard], dependencies=auth)
     async def list_skills() -> list[SkillCard]:
         return service.list_skills()
 
-    @app.get("/approvals", response_model=list[ApprovalView])
+    @app.get("/approvals", response_model=list[ApprovalView], dependencies=auth)
     async def list_approvals() -> list[ApprovalView]:
         return await service.list_pending_approvals()
 
-    @app.post("/approvals/{approval_id}", response_model=RunRef)
+    @app.post("/approvals/{approval_id}", response_model=RunRef, dependencies=auth)
     async def decide_approval(approval_id: str, req: ApprovalDecisionRequest) -> RunRef:
         try:
             run_id = await service.decide_approval(

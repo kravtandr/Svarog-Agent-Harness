@@ -1,5 +1,6 @@
 """Тесты CLI: svarog run и svarog traces list/show на временной БД."""
 
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -108,6 +109,65 @@ def test_run_with_tool_call_touches_workspace(
     result = runner.invoke(cli_main.app, ["run", "создай файл", "--workspace", str(workspace)])
     assert result.exit_code == 0, result.output
     assert (workspace / "out.txt").read_text(encoding="utf-8") == "готово"
+
+
+def test_verifier_failure_blocks_success_and_autocommit(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    (workspace / "README.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=workspace, check=True, capture_output=True)
+
+    with (workspace / "svarog.yaml").open("a", encoding="utf-8") as config:
+        config.write(
+            "verifier:\n"
+            "  checks:\n"
+            "    - name: must-fail\n"
+            "      command: test -f definitely-missing.txt\n"
+        )
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="write_file",
+                        arguments_json='{"path": "out.txt", "content": "готово"}',
+                    ),
+                ),
+                usage=Usage(10, 5),
+            ),
+            CompletionResult(content="Файл создан", usage=Usage(10, 5), finish_reason="stop"),
+        ],
+    )
+
+    result = runner.invoke(cli_main.app, ["run", "создай файл", "--workspace", str(workspace)])
+    assert result.exit_code == 4, result.output
+    assert "verifier" in result.output
+    assert (workspace / "out.txt").read_text(encoding="utf-8") == "готово"
+    committed_files = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "out.txt" not in committed_files
 
 
 def test_run_iteration_limit_suspends_with_exit_code_3(

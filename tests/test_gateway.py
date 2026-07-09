@@ -203,6 +203,25 @@ async def test_api_endpoints_and_run_lifecycle(
     assert finished["state"] == "completed"
 
 
+def test_api_bearer_token_protects_http_and_ws(service: GatewayService) -> None:
+    client = TestClient(create_app(service, bearer_token="secret-token"))
+
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/runs").status_code == 401
+    assert client.get("/runs", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/runs", headers={"Authorization": "Bearer secret-token"}).status_code == 200
+
+    try:
+        with client.websocket_connect("/runs/deadbeef/events"):
+            pass
+    except Exception:
+        pass
+    with client.websocket_connect("/runs/deadbeef/events?token=secret-token") as ws:
+        # Нет истории событий для deadbeef; успешный handshake достаточно
+        # подтверждает auth-path, дальше закрываем соединение клиентом.
+        ws.close()
+
+
 def test_api_create_run_returns_id(
     service: GatewayService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -25,7 +25,7 @@ from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import ExecutionEnvironment, create_environment
-from svarog_harness.secrets import SecretStore, default_secret_store, injected_env
+from svarog_harness.secrets import SecretStore, default_secret_store, injected_env, selected_values
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.skills.curator import CuratorStore
 from svarog_harness.skills.proposal import SkillProposalRequest
@@ -102,6 +102,27 @@ class TaskRunner:
             env=injected_env(self._store, self._cfg.secrets.inject),  # только явно выданные (§12)
         )
 
+    def known_secret_values(self) -> frozenset[str]:
+        """Все значения секретов, которые этот runner явно умеет разрешить.
+
+        FileSecretStore перечислим, а env fallback нет. Поэтому добавляем значения
+        всех refs, явно названных в конфигурации, чтобы redaction и secret scan
+        покрывали env-backed секреты.
+        """
+        refs = list(self._cfg.secrets.inject)
+        refs.extend(
+            provider.api_key_ref
+            for provider in self._cfg.models.providers.values()
+            if provider.api_key_ref is not None
+        )
+        for server in self._cfg.mcp.servers.values():
+            refs.extend(server.env_refs)
+        if self._cfg.gateway.token_ref is not None:
+            refs.append(self._cfg.gateway.token_ref)
+        if self._cfg.telegram.token_ref is not None:
+            refs.append(self._cfg.telegram.token_ref)
+        return self._store.values() | selected_values(self._store, refs)
+
     async def recover(self, recorder: TraceRecorder, hooks: RunHooks) -> None:
         """Recovery незавершённых runs при старте (ADR-0005)."""
         for run in await recorder.recover_interrupted_runs():
@@ -168,7 +189,7 @@ class TaskRunner:
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
             workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
-            secret_values=store.values(),
+            secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
             on_notify=hooks.on_notify,
@@ -246,7 +267,13 @@ class TaskRunner:
                 outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
-                await self.verify(environment, recorder, outcome, hooks)
+                failed_checks = await self.verify(environment, recorder, outcome, hooks)
+                if failed_checks:
+                    error = f"verifier: {failed_checks} проверок не прошли"
+                    run = await recorder.get_run(outcome.run_id)
+                    if run is not None:
+                        await recorder.finish_run(run, RunState.FAILED, error=error)
+                    return replace(outcome, state=RunState.FAILED, error=error)
                 await self._autocommit(flow, prep, task, outcome, hooks)
                 return outcome
 
@@ -290,7 +317,13 @@ class TaskRunner:
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)
                 await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
-                await runner.verify(environment, recorder, outcome, hooks)
+                failed_checks = await runner.verify(environment, recorder, outcome, hooks)
+                if failed_checks:
+                    error = f"verifier: {failed_checks} проверок не прошли"
+                    refreshed = await recorder.get_run(outcome.run_id)
+                    if refreshed is not None:
+                        await recorder.finish_run(refreshed, RunState.FAILED, error=error)
+                    return replace(outcome, state=RunState.FAILED, error=error)
                 return outcome
             finally:
                 await environment.cleanup()
@@ -304,22 +337,22 @@ class TaskRunner:
         recorder: TraceRecorder,
         outcome: RunOutcome,
         hooks: RunHooks,
-    ) -> None:
+    ) -> int:
         """Детерминированный verifier после completed-run (§6.11); пишет CheckResult."""
         if outcome.state is not RunState.COMPLETED:
-            return
+            return 0
         run = await recorder.get_run(outcome.run_id)
         if run is None:
-            return
+            return 0
         cfg = self._cfg
         scan = scan_skills(skills_dirs(cfg, self._workspace))
         loaded = await recorder.loaded_skill_names(run)
         checks = [*cfg.verifier.checks, *skill_checks(scan.skills, loaded)]
         if not checks and not cfg.verifier.secret_scan:
-            return
+            return 0
         verifier = Verifier(environment, self._workspace)
         outcomes = await verifier.run(
-            checks, secret_scan=cfg.verifier.secret_scan, known_values=self._store.values()
+            checks, secret_scan=cfg.verifier.secret_scan, known_values=self.known_secret_values()
         )
         failed = [o for o in outcomes if not o.passed]
         for check in outcomes:
@@ -330,6 +363,7 @@ class TaskRunner:
                 hooks.on_check(check)
         if failed and hooks.on_verify_failed is not None:
             hooks.on_verify_failed(len(failed))
+        return len(failed)
 
     async def drain_memory(self, db: AsyncSession, hooks: RunHooks) -> None:
         """Применить очередь заявок памяти single writer'ом после run (ADR-0004)."""
@@ -339,7 +373,7 @@ class TaskRunner:
         writer = MemoryWriter(db, mem_dir)
         # known_values обязательны: без них secret scan не поймает реальные
         # значения секретов, пересказанные агентом в remember (ADR-0006).
-        for row in await writer.drain(known_values=self._store.values()):
+        for row in await writer.drain(known_values=self.known_secret_values()):
             if hooks.on_memory is not None:
                 hooks.on_memory(row.commit_sha, row.error)
 
@@ -359,7 +393,7 @@ class TaskRunner:
         manager = SkillProposalManager(db, skills_dir)
         for request in sink:
             row = await manager.persist(
-                replace(request, source_run_id=run_id), known_values=self._store.values()
+                replace(request, source_run_id=run_id), known_values=self.known_secret_values()
             )
             if hooks.on_proposal is not None:
                 hooks.on_proposal(row)

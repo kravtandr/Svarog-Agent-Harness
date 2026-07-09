@@ -83,6 +83,24 @@ async def test_commit_step_blocks_on_secret(tmp_path: Path) -> None:
         await flow.commit_step("svarog: деплой")
 
 
+async def test_push_precheck_scans_committed_branch_when_staged_is_clean(tmp_path: Path) -> None:
+    repo = await _init_repo(tmp_path / "ws")
+    await _seed_commit(repo)
+    flow = WorkspaceFlow(repo, GitConfig())
+    prep = await flow.start("секрет уже в коммите")
+    assert prep.branch is not None
+
+    # Обходим commit_guarded намеренно: pre-push scan должен быть второй линией
+    # защиты и ловить секреты в уже созданном коммите, когда staged area пустой.
+    (repo.path / "leaked.txt").write_text("KEY=AKIAIOSFODNN7EXAMPLE\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("unsafe direct commit")
+    assert not await repo.has_staged_changes()
+
+    findings = await flow.push_precheck(prep.branch)
+    assert [f.rule for f in findings] == ["aws-access-key-id"]
+
+
 async def test_push_to_local_bare_remote(tmp_path: Path) -> None:
     """Push против локального bare-репозитория — без сети."""
     bare = tmp_path / "remote.git"

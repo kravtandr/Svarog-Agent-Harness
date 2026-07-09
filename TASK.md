@@ -1121,6 +1121,11 @@ verifier:
     - name: lint
       command: ruff check .
 
+gateway:
+  # Bearer-token для REST/WebSocket gateway. Обязателен при serve --host не на loopback.
+  # Значение хранится в SecretStore, не в svarog.yaml.
+  token_ref: null
+
 policies:
   # неотключаемый critical-набор (см. 3.6) требует approval всегда
   # и в конфигурации не перечисляется

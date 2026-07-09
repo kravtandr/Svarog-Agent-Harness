@@ -177,6 +177,12 @@ class TelegramConfig(StrictModel):
     poll_timeout_sec: int = Field(default=30, ge=0)
 
 
+class GatewayConfig(StrictModel):
+    # Bearer-token для REST/WebSocket gateway. Значение хранится в SecretStore;
+    # без токена CLI разрешает serve только на loopback-адресах.
+    token_ref: str | None = None
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -212,6 +218,7 @@ class SvarogConfig(BaseSettings):
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 

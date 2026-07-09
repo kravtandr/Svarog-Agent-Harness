@@ -37,7 +37,12 @@ from svarog_harness.scaffold import (
     DEFAULT_MODEL,
     scaffold_agent_home,
 )
-from svarog_harness.secrets import FileSecretStore, default_secret_store
+from svarog_harness.secrets import (
+    FileSecretStore,
+    SecretStore,
+    default_secret_store,
+    selected_values,
+)
 from svarog_harness.skills import scan_skills
 from svarog_harness.skills.curator import (
     CurationReport,
@@ -243,6 +248,26 @@ async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaita
             return await action(db)
     finally:
         await engine.dispose()
+
+
+def _known_secret_values(cfg: SvarogConfig, store: SecretStore) -> frozenset[str]:
+    refs = list(cfg.secrets.inject)
+    refs.extend(
+        provider.api_key_ref
+        for provider in cfg.models.providers.values()
+        if provider.api_key_ref is not None
+    )
+    for server in cfg.mcp.servers.values():
+        refs.extend(server.env_refs)
+    if cfg.gateway.token_ref is not None:
+        refs.append(cfg.gateway.token_ref)
+    if cfg.telegram.token_ref is not None:
+        refs.append(cfg.telegram.token_ref)
+    return store.values() | selected_values(store, refs)
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in {"127.0.0.1", "::1", "localhost"}
 
 
 def _console_hooks() -> RunHooks:
@@ -604,6 +629,8 @@ def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
         console.print(f"[red]{outcome.state.value}[/red] | {stats}")
         if outcome.error:
             console.print(f"[red]{outcome.error}[/red]")
+        if outcome.error and outcome.error.startswith("verifier:"):
+            raise typer.Exit(code=4)
         raise typer.Exit(code=2)
 
 
@@ -926,7 +953,7 @@ async def _propose_description_improvements(
                 files=files,
                 note=f"curator: улучшить описание — {finding.detail}",
             )
-            proposal = await manager.persist(request, known_values=store.values())
+            proposal = await manager.persist(request, known_values=_known_secret_values(cfg, store))
             console.print(
                 f"[cyan]proposal[/cyan] {name}: обновить описание "
                 f"[dim]({proposal.status.value}, {proposal.id[:8]})[/dim]"
@@ -989,7 +1016,7 @@ def memory_flush() -> None:
 
     async def action(db: AsyncSession) -> int:
         writer = MemoryWriter(db, mem_dir)
-        rows = await writer.drain(known_values=store.values())
+        rows = await writer.drain(known_values=_known_secret_values(cfg, store))
         for row in rows:
             if row.error:
                 console.print(f"[yellow]отклонено: {row.error}[/yellow]")
@@ -1013,6 +1040,7 @@ def push(
     workspace = Path.cwd().resolve()
     repo = GitRepo(workspace)
     flow = WorkspaceFlow(repo, cfg.git)
+    store = default_secret_store(cfg.secrets.path)
 
     async def do_push() -> str:
         if not await repo.is_repo():
@@ -1028,7 +1056,7 @@ def push(
                 f"push в '{target}' требует approval ({decision.reason}); "
                 f"protected ветки нельзя пушить командой push напрямую"
             )
-        findings = await flow.push_precheck(target)
+        findings = await flow.push_precheck(target, known_values=_known_secret_values(cfg, store))
         if findings:
             raise GitError(
                 f"secret scan перед push нашёл {len(findings)} секрет(ов) — push отменён"
@@ -1058,6 +1086,22 @@ def serve(
         console.print(f"[red]workspace не существует:[/red] {workspace}")
         raise typer.Exit(code=1)
     cfg = _load_config_or_exit(project_dir=workspace)
+    token_ref = cfg.gateway.token_ref
+    token: str | None = None
+    if token_ref is None and not _is_loopback_host(host):
+        console.print(
+            "[red]gateway.token_ref обязателен для сетевого bind[/red] "
+            "(используйте 127.0.0.1 или настройте bearer-token в SecretStore)"
+        )
+        raise typer.Exit(code=1)
+    if token_ref is not None:
+        token = default_secret_store(cfg.secrets.path).get(token_ref)
+        if not token:
+            console.print(
+                f"[red]секрет '{token_ref}' не найден[/red] в SecretStore/окружении; "
+                f"svarog secrets set {token_ref}"
+            )
+            raise typer.Exit(code=1)
     try:
         import uvicorn
 
@@ -1069,7 +1113,7 @@ def serve(
             "uv pip install 'svarog-harness[server]'"
         )
         raise typer.Exit(code=1) from None
-    api = create_app(GatewayService(cfg, workspace))
+    api = create_app(GatewayService(cfg, workspace), bearer_token=token)
     console.print(
         f"[green]Svarog gateway[/green] http://{host}:{port} | workspace: {workspace}\n"
         f"[dim]POST /runs · GET /runs/{{id}} · WS /runs/{{id}}/events · "
