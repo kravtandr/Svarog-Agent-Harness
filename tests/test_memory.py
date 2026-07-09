@@ -14,6 +14,7 @@ from svarog_harness.memory.reader import read_memory
 from svarog_harness.memory.writer import MemoryWriter
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import MemoryChange, MemoryChangeStatus
+from svarog_harness.tools.memory_tools import RememberTool
 from svarog_harness.trace.recorder import TraceRecorder
 
 
@@ -215,3 +216,109 @@ async def test_writer_second_drain_noop(db: AsyncSession, tmp_path: Path) -> Non
         .all()
     )
     assert remaining == []
+
+
+# --- RememberTool: валидация заявки в момент вызова ---
+
+
+def _remember_tool(tmp_path: Path) -> tuple["RememberTool", list[MemoryChangeRequest]]:
+    sink: list[MemoryChangeRequest] = []
+    return RememberTool(on_enqueue=sink.append, memory_dir=tmp_path), sink
+
+
+async def test_remember_rejects_create_over_existing_file(tmp_path: Path) -> None:
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user" / "profile.md").write_text("# Профиль\n", encoding="utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call({"file": "user/profile.md", "operation": "create", "content": "x"})
+    assert not result.ok
+    assert result.error is not None and "уже существует" in result.error
+    assert sink == []
+
+
+async def test_remember_rejects_replace_of_missing_section(tmp_path: Path) -> None:
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user" / "profile.md").write_text("# Профиль\n\n## Дейлики\n- 13:00\n", "utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {
+            "file": "user/profile.md",
+            "operation": "replace_section",
+            "section": "Нет",
+            "content": "x",
+        }
+    )
+    assert not result.ok
+    assert result.error is not None and "не найдена" in result.error
+    assert sink == []
+
+
+async def test_remember_rejects_escaping_path(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call({"file": "../outside.md", "operation": "append", "content": "x"})
+    assert not result.ok
+    assert sink == []
+
+
+async def test_remember_accepts_valid_operations(tmp_path: Path) -> None:
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user" / "profile.md").write_text("# Профиль\n\n## Дейлики\nстарое\n", "utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    for args in (
+        {"file": "user/profile.md", "operation": "append", "content": "новое\n"},
+        {
+            "file": "user/profile.md",
+            "operation": "replace_section",
+            "section": "Дейлики",
+            "content": "обновлено\n",
+        },
+        {"file": "projects/animateyou.md", "operation": "create", "content": "# AnimateYou\n"},
+    ):
+        result = await tool.call(args)
+        assert result.ok, result.error
+    assert len(sink) == 3
+
+
+async def test_remember_allows_chain_create_then_replace(tmp_path: Path) -> None:
+    # Очередь применяется после run: replace_section по файлу, который создаст
+    # предыдущая заявка этого же run, не должен ложно падать.
+    tool, sink = _remember_tool(tmp_path)
+    created = await tool.call(
+        {"file": "projects/new.md", "operation": "create", "content": "# New\n\n## Статус\nok\n"}
+    )
+    assert created.ok
+    replaced = await tool.call(
+        {
+            "file": "projects/new.md",
+            "operation": "replace_section",
+            "section": "Статус",
+            "content": "x",
+        }
+    )
+    assert replaced.ok, replaced.error
+    assert len(sink) == 2
+
+
+# --- read_memory: приоритет user/ при усечении ---
+
+
+def test_read_memory_priority_order(tmp_path: Path) -> None:
+    (tmp_path / "user").mkdir()
+    (tmp_path / "decisions").mkdir()
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "decisions" / "adr.md").write_text("решение", encoding="utf-8")
+    (tmp_path / "projects" / "app.md").write_text("проект", encoding="utf-8")
+    (tmp_path / "user" / "profile.md").write_text("профиль", encoding="utf-8")
+    text = read_memory(tmp_path)
+    assert text.index("user/profile.md") < text.index("projects/app.md")
+    assert text.index("projects/app.md") < text.index("decisions/adr.md")
+
+
+def test_read_memory_truncation_drops_least_important_first(tmp_path: Path) -> None:
+    (tmp_path / "user").mkdir()
+    (tmp_path / "decisions").mkdir()
+    (tmp_path / "user" / "profile.md").write_text("важный профиль", encoding="utf-8")
+    (tmp_path / "decisions" / "adr.md").write_text("x" * 5000, encoding="utf-8")
+    text = read_memory(tmp_path, limit_bytes=200)
+    assert "важный профиль" in text
+    assert "память усечена" in text

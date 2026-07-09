@@ -16,7 +16,12 @@ from typing import Any
 
 from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
 from svarog_harness.gitflow.workspace import WorkspaceFlow
-from svarog_harness.llm.provider import ChatMessage, ModelProvider, ToolCallRequest
+from svarog_harness.llm.provider import (
+    ChatMessage,
+    CompletionResult,
+    ModelProvider,
+    ToolCallRequest,
+)
 from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
@@ -27,9 +32,9 @@ from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.trace.recorder import TraceRecorder
 
-# Сколько раз возвращать модели протёкший текстом tool call на повтор,
-# прежде чем сдаться и принять ответ как финальный.
-_MAX_LEAK_NUDGES = 2
+# Сколько раз возвращать модели дефектный «финальный» ответ на повтор
+# (протёкший tool call, обрезка, пустой ответ), прежде чем сдаться.
+_MAX_NUDGES = 2
 
 _LEAK_NUDGE = (
     "Твой предыдущий ответ содержал попытку вызвать инструмент обычным текстом "
@@ -37,6 +42,28 @@ _LEAK_NUDGE = (
     "никакие изменения не применены и ничего не сохранено. Не сообщай о "
     "выполнении действия — повтори вызов через штатный механизм tool calls."
 )
+
+_TRUNCATION_NUDGE = (
+    "Твой ответ был обрезан по лимиту токенов и не был принят как финальный. "
+    "Сформулируй финальный ответ заново и компактнее."
+)
+
+_EMPTY_NUDGE = (
+    "Ты вернул пустой ответ без вызова tools — он не был принят как финальный. "
+    "Если задача выполнена, кратко опиши результат текстом; если нет — "
+    "продолжи работу через tools."
+)
+
+
+def _rejection_nudge(result: CompletionResult) -> str | None:
+    """Причина не принимать ход без tool calls как финальный ответ (или None)."""
+    if result.leak_suspected:
+        return _LEAK_NUDGE
+    if result.finish_reason == "length":
+        return _TRUNCATION_NUDGE
+    if not result.content.strip():
+        return _EMPTY_NUDGE
+    return None
 
 
 @dataclass(frozen=True)
@@ -184,13 +211,14 @@ class AgentLoop:
                 )
 
                 if not result.tool_calls:
-                    # Провайдер заподозрил невыполненный tool call в тексте —
-                    # не принимать «финальный» ответ (модель может ложно
-                    # отчитаться об успехе), а вернуть вызов на повтор.
-                    if result.leak_suspected and state.leak_nudges < _MAX_LEAK_NUDGES:
-                        state.leak_nudges += 1
-                        state.messages.append(ChatMessage(role="user", content=_LEAK_NUDGE))
-                        await self._recorder.add_message(run, "user", {"content": _LEAK_NUDGE})
+                    # Дефектный «финальный» ответ (протёкший tool call, обрезка
+                    # по токенам, пустота) не принимается — модель получает
+                    # корректирующее сообщение и пробует ещё раз.
+                    nudge = _rejection_nudge(result)
+                    if nudge is not None and state.nudges < _MAX_NUDGES:
+                        state.nudges += 1
+                        state.messages.append(ChatMessage(role="user", content=nudge))
+                        await self._recorder.add_message(run, "user", {"content": nudge})
                         await self._save_checkpoint(run, state)
                         continue
                     await self._recorder.finish_run(run, RunState.COMPLETED)

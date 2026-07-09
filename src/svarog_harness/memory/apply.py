@@ -13,7 +13,8 @@ class MemoryApplyError(Exception):
     """Заявку нельзя применить (плохой путь, нет секции и т. п.)."""
 
 
-def _resolve(memory_dir: Path, raw: str) -> Path:
+def resolve_memory_path(memory_dir: Path, raw: str) -> Path:
+    """Разрешить относительный путь заявки внутри memory-jail (или MemoryApplyError)."""
     if not raw or raw.startswith("/") or Path(raw).is_absolute():
         raise MemoryApplyError(f"путь памяти должен быть относительным: '{raw}'")
     target = (memory_dir / raw).resolve()
@@ -23,6 +24,20 @@ def _resolve(memory_dir: Path, raw: str) -> Path:
     return target
 
 
+def _find_header(lines: list[str], section: str) -> tuple[int, int] | None:
+    """Найти строку заголовка секции: (индекс, уровень) или None."""
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") and stripped.lstrip("#").strip() == section:
+            return idx, len(stripped) - len(stripped.lstrip("#"))
+    return None
+
+
+def has_section(text: str, section: str) -> bool:
+    """Есть ли в markdown-тексте секция с таким заголовком (любого уровня)."""
+    return _find_header(text.splitlines(), section) is not None
+
+
 def _replace_section(text: str, section: str, new_body: str) -> str:
     """Заменить тело markdown-секции (по заголовку любого уровня) на new_body.
 
@@ -30,16 +45,10 @@ def _replace_section(text: str, section: str, new_body: str) -> str:
     уровня или конца файла. Нет секции → MemoryApplyError.
     """
     lines = text.splitlines()
-    header_idx = None
-    header_level = 0
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("#") and stripped.lstrip("#").strip() == section:
-            header_idx = idx
-            header_level = len(stripped) - len(stripped.lstrip("#"))
-            break
-    if header_idx is None:
+    header = _find_header(lines, section)
+    if header is None:
         raise MemoryApplyError(f"секция '{section}' не найдена в файле")
+    header_idx, header_level = header
 
     end_idx = len(lines)
     for idx in range(header_idx + 1, len(lines)):
@@ -57,7 +66,7 @@ def _replace_section(text: str, section: str, new_body: str) -> str:
 
 def apply_change(memory_dir: Path, request: MemoryChangeRequest) -> None:
     """Применить одну заявку к файлам memory (без git-коммита)."""
-    target = _resolve(memory_dir, request.file)
+    target = resolve_memory_path(memory_dir, request.file)
 
     if request.operation is MemoryOperation.DELETE:
         target.unlink(missing_ok=True)

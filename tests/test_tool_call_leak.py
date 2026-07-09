@@ -1,6 +1,6 @@
-"""Тесты fallback-парсера протёкших tool call'ов (Harmony-формат)."""
+"""Тесты fallback-парсера протёкших tool call'ов (Harmony, Hermes/Qwen, Mistral)."""
 
-from svarog_harness.llm.harmony_leak import extract_leaked_tool_calls, leak_suspected
+from svarog_harness.llm.tool_call_leak import extract_leaked_tool_calls, leak_suspected
 
 # Реальный случай: сервер отдал Harmony-каналы обычным текстом.
 _LEAKED = (
@@ -27,7 +27,9 @@ def test_extracts_multiple_calls() -> None:
     text = 'to=functions.read_file json{"path": "a.txt"} мусор to=functions.list_dir {"path": "."}'
     calls = extract_leaked_tool_calls(text)
     assert [c.name for c in calls] == ["read_file", "list_dir"]
-    assert [c.id for c in calls] == ["leaked-1", "leaked-2"]
+    # id уникальны: approval сопоставляется по call_id в рамках run.
+    assert all(c.id.startswith("leaked-") for c in calls)
+    assert len({c.id for c in calls}) == 2
 
 
 def test_handles_nested_braces_and_strings() -> None:
@@ -61,3 +63,40 @@ def test_plain_text_not_suspected() -> None:
     text = "Обычный финальный ответ без каких-либо вызовов."
     assert not leak_suspected(text)
     assert extract_leaked_tool_calls(text) == ()
+
+
+def test_extracts_hermes_qwen_dialect() -> None:
+    text = (
+        "Сейчас прочитаю файл.\n<tool_call>\n"
+        '{"name": "read_file", "arguments": {"path": "a.txt"}}\n'
+        "</tool_call>"
+    )
+    calls = extract_leaked_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "read_file"
+    assert calls[0].parse_arguments() == {"path": "a.txt"}
+    assert leak_suspected(text)
+
+
+def test_hermes_arguments_as_string() -> None:
+    text = '<tool_call>{"name": "list_dir", "arguments": "{\\"path\\": \\".\\"}"}</tool_call>'
+    calls = extract_leaked_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].parse_arguments() == {"path": "."}
+
+
+def test_extracts_mistral_dialect() -> None:
+    text = (
+        '[TOOL_CALLS][{"name": "read_file", "arguments": {"path": "a.txt"}}, '
+        '{"name": "list_dir", "arguments": {"path": "."}}]'
+    )
+    calls = extract_leaked_tool_calls(text)
+    assert [c.name for c in calls] == ["read_file", "list_dir"]
+    assert calls[1].parse_arguments() == {"path": "."}
+    assert leak_suspected(text)
+
+
+def test_broken_hermes_stays_suspected() -> None:
+    text = '<tool_call>{"name": "read_file", "arguments": {broken</tool_call>'
+    assert extract_leaked_tool_calls(text) == ()
+    assert leak_suspected(text)

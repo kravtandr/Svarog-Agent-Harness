@@ -985,9 +985,11 @@ def memory_flush() -> None:
         console.print("память не настроена или каталог отсутствует")
         raise typer.Exit(code=1)
 
+    store = default_secret_store(cfg.secrets.path)
+
     async def action(db: AsyncSession) -> int:
         writer = MemoryWriter(db, mem_dir)
-        rows = await writer.drain()
+        rows = await writer.drain(known_values=store.values())
         for row in rows:
             if row.error:
                 console.print(f"[yellow]отклонено: {row.error}[/yellow]")

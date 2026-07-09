@@ -5,13 +5,13 @@ vLLM, llama.cpp, LiteLLM, OpenRouter, сам OpenAI. Всегда использ
 streaming; retries и timeouts делегированы openai SDK.
 """
 
+import uuid
 from collections.abc import Callable
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from svarog_harness.config.schema import ModelsConfig, ProviderConfig
-from svarog_harness.llm.harmony_leak import extract_leaked_tool_calls, leak_suspected
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -20,6 +20,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
+from svarog_harness.llm.tool_call_leak import extract_leaked_tool_calls, leak_suspected
 from svarog_harness.secrets import EnvSecretStore, SecretStore
 
 
@@ -110,7 +111,10 @@ class _ToolCallAccumulator:
         self.arguments = ""
 
     def to_request(self) -> ToolCallRequest:
-        return ToolCallRequest(id=self.id, name=self.name, arguments_json=self.arguments)
+        # Сервер мог не прислать id (legacy function_call и небрежные реализации);
+        # approval сопоставляется по call_id, поэтому id обязан быть уникальным.
+        call_id = self.id or f"call-{uuid.uuid4().hex[:8]}"
+        return ToolCallRequest(id=call_id, name=self.name, arguments_json=self.arguments)
 
 
 class OpenAICompatibleProvider(ModelProvider):
@@ -180,6 +184,16 @@ class OpenAICompatibleProvider(ModelProvider):
                         acc.name = tc.function.name
                     if tc.function.arguments:
                         acc.arguments += tc.function.arguments
+            # Legacy-поле function_call: старые серверы шлют вызов через него,
+            # игнорировать его — молча потерять вызов (индекс -1 не пересекается
+            # с tool_calls, у которых index >= 0).
+            legacy = getattr(delta, "function_call", None)
+            if legacy is not None:
+                acc = calls.setdefault(-1, _ToolCallAccumulator())
+                if getattr(legacy, "name", None):
+                    acc.name = legacy.name
+                if getattr(legacy, "arguments", None):
+                    acc.arguments += legacy.arguments
 
         content = "".join(content_parts)
         tool_calls = tuple(calls[i].to_request() for i in sorted(calls))

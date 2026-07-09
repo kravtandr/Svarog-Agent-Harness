@@ -294,3 +294,29 @@ async def test_leak_nudges_are_capped(db: AsyncSession, tmp_path: Path) -> None:
     assert outcome.state is RunState.COMPLETED
     assert outcome.final_answer == leaked
     assert outcome.iterations == 3
+
+
+async def test_truncated_answer_is_nudged(db: AsyncSession, tmp_path: Path) -> None:
+    truncated = CompletionResult(
+        content="Ответ обрывается на полусло", usage=Usage(10, 5), finish_reason="length"
+    )
+    provider = ScriptedProvider([truncated, _final("Полный ответ")])
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "Полный ответ"
+    nudge = provider.seen_messages[1][-1]
+    assert nudge.role == "user"
+    assert "обрезан" in nudge.content
+
+
+async def test_empty_answer_is_nudged(db: AsyncSession, tmp_path: Path) -> None:
+    empty = CompletionResult(content="", usage=Usage(10, 5), finish_reason="stop")
+    provider = ScriptedProvider([empty, _final("Готово")])
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "Готово"
+    nudge = provider.seen_messages[1][-1]
+    assert nudge.role == "user"
+    assert "пустой ответ" in nudge.content
