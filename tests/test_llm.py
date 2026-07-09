@@ -210,3 +210,39 @@ def test_resolve_api_key_missing_ref_fails(monkeypatch: pytest.MonkeyPatch) -> N
 def test_resolve_api_key_defaults_to_stub() -> None:
     cfg = ProviderConfig(base_url="u", model="m")
     assert resolve_api_key(cfg) == "not-needed"
+
+
+async def test_legacy_function_call_is_not_lost() -> None:
+    # Старые серверы шлют вызов через deprecated-поле delta.function_call.
+    fc1 = SimpleNamespace(name="read_file", arguments='{"pa')
+    fc2 = SimpleNamespace(name=None, arguments='th": "a.txt"}')
+    provider, _ = _provider(
+        [
+            _chunk_with_function_call(fc1),
+            _chunk_with_function_call(fc2, finish_reason="function_call"),
+        ]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="go")], [])
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call.name == "read_file"
+    assert call.parse_arguments() == {"path": "a.txt"}
+    # id сервер не прислал — провайдер генерирует уникальный сам.
+    assert call.id
+
+
+def _chunk_with_function_call(fc: Any, *, finish_reason: str | None = None) -> Any:
+    chunk = _chunk(finish_reason=finish_reason)
+    chunk.choices[0].delta.function_call = fc
+    return chunk
+
+
+async def test_generates_id_when_server_omits_it() -> None:
+    provider, _ = _provider(
+        [
+            _chunk(tool_calls=[_tc_delta(0, name="read_file", arguments='{"path": "a.txt"}')]),
+            _chunk(finish_reason="tool_calls"),
+        ]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="go")], [])
+    assert result.tool_calls[0].id.startswith("call-")

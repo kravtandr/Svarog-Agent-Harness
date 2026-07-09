@@ -152,7 +152,7 @@ class TaskRunner:
             skill_load_sink,
             memory_sink,
             proposal_sink,
-            memory_enabled=mem_dir is not None,
+            mem_dir=mem_dir,
             mcp_tools=mcp_tools,
         )
         return AgentLoop(
@@ -183,7 +183,7 @@ class TaskRunner:
         memory_sink: list[dict[str, object]],
         proposal_sink: list[SkillProposalRequest] | None,
         *,
-        memory_enabled: bool,
+        mem_dir: Path | None,
         mcp_tools: list[MCPTool] | None = None,
     ) -> ToolRegistry:
         registry = ToolRegistry()
@@ -201,9 +201,14 @@ class TaskRunner:
                     skills, on_load=lambda name, version: skill_load_sink.append((name, version))
                 )
             )
-        if memory_enabled:
+        if mem_dir is not None:
+            # memory_dir передаётся для валидации заявки в момент вызова: само
+            # применение происходит после run, когда модель уже отчиталась.
             registry.register(
-                RememberTool(on_enqueue=lambda req: memory_sink.append(req.to_dict()))
+                RememberTool(
+                    on_enqueue=lambda req: memory_sink.append(req.to_dict()),
+                    memory_dir=mem_dir,
+                )
             )
         if proposal_sink is not None:
             # Skill governance (Flow B, §18): агент предлагает скиллы через proposal,
@@ -332,7 +337,9 @@ class TaskRunner:
         if mem_dir is None or not mem_dir.is_dir():
             return
         writer = MemoryWriter(db, mem_dir)
-        for row in await writer.drain():
+        # known_values обязательны: без них secret scan не поймает реальные
+        # значения секретов, пересказанные агентом в remember (ADR-0006).
+        for row in await writer.drain(known_values=self._store.values()):
             if hooks.on_memory is not None:
                 hooks.on_memory(row.commit_sha, row.error)
 
