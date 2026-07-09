@@ -399,6 +399,22 @@ def chat(
         raise typer.Exit(code=1) from None
 
 
+def _read_user_line(prompt: str) -> str:
+    """Прочитать строку ввода, декодируя её целиком в UTF-8.
+
+    `console.input`/`input()` в рабочем потоке (asyncio.to_thread) читают stdin
+    без readline и по чанкам — на границе буфера многобайтовый символ (кириллица)
+    рвётся, что даёт UnicodeDecodeError. Читаем сырые байты строки из буфера stdin
+    и декодируем разом (errors="replace" на всякий случай). EOF → EOFError.
+    """
+    console.print(prompt, end="")
+    console.file.flush()
+    raw = sys.stdin.buffer.readline()
+    if not raw:
+        raise EOFError
+    return raw.decode("utf-8", errors="replace")
+
+
 async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
@@ -416,7 +432,7 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
             while True:
                 try:
                     task = (
-                        await asyncio.to_thread(console.input, "\n[bold cyan]› [/bold cyan]")
+                        await asyncio.to_thread(_read_user_line, "\n[bold cyan]› [/bold cyan]")
                     ).strip()
                 except (EOFError, KeyboardInterrupt):
                     break

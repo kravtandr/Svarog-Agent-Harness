@@ -1,5 +1,7 @@
 """Тесты chat (#22, §10.1): общая session, диалог между сообщениями."""
 
+import io
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from svarog_harness.cli import main as cli_main
 from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
 from svarog_harness.llm.provider import (
     ChatMessage,
@@ -97,3 +100,21 @@ async def test_runs_share_session_and_carry_history(db: AsyncSession, tmp_path: 
     contents = [m.content for m in second_request]
     assert any("меня зовут Аня" in c for c in contents)
     assert any("Привет, я Свар" in c for c in contents)
+
+
+class _FakeStdin:
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)
+
+
+def test_read_user_line_decodes_cyrillic(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ввод с кириллицей не должен падать UnicodeDecodeError (баг чтения по чанкам).
+    text = "привет, создай скилл для парсинга\n"
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(text.encode("utf-8")))
+    assert cli_main._read_user_line("› ") == text
+
+
+def test_read_user_line_eof_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(b""))
+    with pytest.raises(EOFError):
+        cli_main._read_user_line("› ")
