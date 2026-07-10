@@ -34,6 +34,7 @@ from svarog_harness.sandbox.local import LocalEnvironment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
+from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.trace.recorder import TraceRecorder
@@ -78,11 +79,17 @@ class EvalHarness:
     autonomy: AutonomyMode = AutonomyMode.YOLO
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     policies: PoliciesConfig = field(default_factory=PoliciesConfig)
+    plan_update_sink: list[dict[str, object]] = field(default_factory=list)
 
     def _registry(self, env: LocalEnvironment) -> ToolRegistry:
         registry = ToolRegistry()
         for tool in file_tools(self.workspace):
             registry.register(tool)
+        registry.register(
+            UpdatePlanTool(
+                lambda items, note: self.plan_update_sink.append({"items": items, "note": note})
+            )
+        )
         registry.register(BashTool(env))
         registry.register(RequestApprovalTool())
         return registry
@@ -96,6 +103,7 @@ class EvalHarness:
             PolicyEngine(autonomy=self.autonomy, policies=self.policies, workspace=self.workspace),
             self.workspace,
             model_name="scripted",
+            plan_update_sink=self.plan_update_sink,
             workspace_flow=WorkspaceFlow(GitRepo(self.workspace), GitConfig()),
         )
 

@@ -119,6 +119,16 @@ async def test_criterion_refuel_long_task(tmp_path: Path) -> None:
         runtime=RuntimeConfig(max_iterations=6, refuel_after_iterations=1),
     )
     outcome = await harness.run("длинная задача")
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None and "refuel" in outcome.error
+    assert (harness.workspace / "task_state.md").exists()
+    assert "# Task state" in (harness.workspace / "task_state.md").read_text(encoding="utf-8")
+
+    for _ in range(5):
+        outcome = await harness.resume(outcome.run_id)
+        if outcome.state is RunState.COMPLETED:
+            break
+
     assert outcome.state is RunState.COMPLETED
     assert (harness.workspace / "task_state.md").exists()
     assert "# Task state" in (harness.workspace / "task_state.md").read_text(encoding="utf-8")
