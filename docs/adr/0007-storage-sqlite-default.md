@@ -16,7 +16,7 @@
 |---|---|---|
 | `Database` | SQLite (SQLAlchemy 2.0 async) | Postgres |
 | `QueueBackend` | таблица SQLite (переживает рестарт) | Redis |
-| `LockBackend` | in-process asyncio locks | Redis |
+| `LockBackend` | файловый advisory-lock (`fcntl.flock`, `FileLockBackend`) — сериализует memory-writer между процессами на одной машине | Redis (multi-machine) |
 | `EventStream` (streaming событий) | in-process pub/sub | Redis pub/sub |
 | `VectorBackend` | выключен (retrieval по памяти — grep/структура файлов) | Qdrant (рекомендуемый), интерфейс допускает другие |
 
@@ -26,5 +26,5 @@
 
 * `svarog init` работает на чистой машине с Python и Docker (Docker нужен только для sandbox; local trusted mode работает вообще без него).
 * Семантический retrieval — деградирует изящно: без vector DB память ищется по структуре и grep, что для персонального объема памяти достаточно.
-* Один процесс — ограничение MVP; переход на multi-process (gateway + workers) не меняет код компонентов, только конфигурацию backends.
+* Один процесс — ограничение MVP; переход на multi-process (gateway + workers) не меняет код компонентов, только конфигурацию backends. Memory-writer уже сериализован межпроцессным `FileLockBackend` (ADR-0004), поэтому параллельные интерфейсы на одной машине не конфликтуют на git-репозитории памяти без Redis.
 * SQLAlchemy как ORM-слой дает SQLite→Postgres без переписывания.

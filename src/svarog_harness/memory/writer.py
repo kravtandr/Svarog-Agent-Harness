@@ -15,16 +15,30 @@ from svarog_harness.gitflow.commit_gate import SecretScanBlockedError, commit_gu
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.memory.apply import MemoryApplyError, apply_change
 from svarog_harness.memory.change import MemoryChangeRequest
+from svarog_harness.storage.locks import LockBackend
 from svarog_harness.storage.models import MemoryChange, MemoryChangeStatus, utcnow
+
+# Максимальное ожидание writer-лока: если другой процесс дольше держит очередь
+# памяти, наши заявки останутся PENDING и применятся следующим drain (память
+# eventual, ADR-0004). drain обычно занимает миллисекунды — 30с с запасом.
+_DRAIN_LOCK_TIMEOUT = 30.0
 
 
 class MemoryWriter:
-    """Применяет и коммитит очередь заявок памяти для одного memory-репозитория."""
+    """Применяет и коммитит очередь заявок памяти для одного memory-репозитория.
 
-    def __init__(self, db: AsyncSession, memory_dir: Path) -> None:
+    `lock` (ADR-0007) сериализует `drain()` между процессами: несколько
+    интерфейсов не должны одновременно коммитить в один memory-репо (ADR-0004).
+    None — без блокировки (single-process тесты и утилиты).
+    """
+
+    def __init__(
+        self, db: AsyncSession, memory_dir: Path, *, lock: LockBackend | None = None
+    ) -> None:
         self._db = db
         self._memory_dir = memory_dir
         self._repo = GitRepo(memory_dir)
+        self._lock = lock
 
     async def enqueue(self, request: MemoryChangeRequest) -> MemoryChange:
         row = MemoryChange(
@@ -36,6 +50,20 @@ class MemoryWriter:
         return row
 
     async def drain(self, *, known_values: frozenset[str] = frozenset()) -> list[MemoryChange]:
+        """Применить все pending-заявки под writer-локом; вернуть обработанные.
+
+        Если лок занят другим процессом — вернуть пустой список, не тронув
+        очередь (заявки применит следующий drain).
+        """
+        if self._lock is None:
+            return await self._drain(known_values=known_values)
+        key = f"memory-writer:{self._memory_dir.resolve()}"
+        async with self._lock.guard(key, timeout=_DRAIN_LOCK_TIMEOUT) as acquired:
+            if not acquired:
+                return []
+            return await self._drain(known_values=known_values)
+
+    async def _drain(self, *, known_values: frozenset[str]) -> list[MemoryChange]:
         """Применить все pending-заявки по порядку; вернуть обработанные строки.
 
         Каждая заявка: применить к файлам → stage → secret scan → commit с
