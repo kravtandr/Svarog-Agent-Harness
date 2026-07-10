@@ -186,6 +186,20 @@ class GitRepo:
     async def delete_branch(self, name: str) -> None:
         await self._git("branch", "-D", name)
 
+    async def add_worktree(self, path: Path, branch: str) -> None:
+        """Создать worktree с новой веткой от текущего HEAD (ADR-0015 фаза 3).
+
+        Физическая изоляция дочернего run'а: отдельное рабочее дерево вне
+        родительского, своя ветка — работы parent и child не пересекаются.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await self._git("worktree", "add", "-b", branch, str(path))
+
+    async def remove_worktree(self, path: Path) -> None:
+        """Убрать worktree (ветка и её коммиты остаются); чистка stale-записей."""
+        await self._git("worktree", "remove", str(path))
+        await self._git("worktree", "prune")
+
     async def merge_no_ff(self, ref: str, *, message: str) -> str:
         """Влить ветку в текущую отдельным merge-коммитом; вернуть короткий SHA."""
         await self._git("merge", "--no-ff", ref, "-m", message)
