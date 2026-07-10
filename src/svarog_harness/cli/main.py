@@ -1164,9 +1164,7 @@ def tenant_list() -> None:
 @tenant_app.command("add-principal")
 def tenant_add_principal(
     tenant_id: Annotated[str, typer.Argument(help="Идентификатор тенанта")],
-    principal: Annotated[
-        str, typer.Argument(help="Principal, напр. telegram:123456789")
-    ],
+    principal: Annotated[str, typer.Argument(help="Principal, напр. telegram:123456789")],
 ) -> None:
     """Привязать principal (telegram:<id> / gateway:<token>) к тенанту."""
     from svarog_harness.config.paths import registry_path

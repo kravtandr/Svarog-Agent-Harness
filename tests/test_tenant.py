@@ -50,9 +50,7 @@ def _base_cfg(tmp_path: Path, extra: str = "") -> SvarogConfig:
 def test_resolve_puts_owned_paths_under_home(tmp_path: Path) -> None:
     base = _base_cfg(tmp_path, "memory:\n  path: ~/.svarog/memory\n")
     home = tmp_path / "tenants" / "alice"
-    resolved = resolve_tenant_config(
-        base, tenant_id="alice", home=home, role=TenantRole.STANDARD
-    )
+    resolved = resolve_tenant_config(base, tenant_id="alice", home=home, role=TenantRole.STANDARD)
     home_r = home.resolve()
     assert resolved.cfg.storage.db_path == home_r / "svarog.db"
     assert resolved.cfg.secrets.path == home_r / "secrets.json"

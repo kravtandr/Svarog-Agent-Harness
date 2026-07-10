@@ -30,6 +30,7 @@ async def run_usage_totals(db: AsyncSession) -> tuple[int, float, int]:
     tokens = await db.scalar(select(func.coalesce(func.sum(Run.tokens_used), 0)))
     return int(active or 0), float(cost or 0.0), int(tokens or 0)
 
+
 __all__ = [
     "RunNotFoundError",
     "fetch_run",

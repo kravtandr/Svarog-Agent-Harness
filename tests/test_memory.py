@@ -403,9 +403,7 @@ async def test_remember_update_field_accepted(tmp_path: Path) -> None:
 async def test_remember_update_field_requires_field(tmp_path: Path) -> None:
     (tmp_path / "p.md").write_text("---\nstatus: active\n---\n", encoding="utf-8")
     tool, sink = _remember_tool(tmp_path)
-    result = await tool.call(
-        {"file": "p.md", "operation": "update_field", "content": "paused"}
-    )
+    result = await tool.call({"file": "p.md", "operation": "update_field", "content": "paused"})
     assert not result.ok
     assert result.error is not None and "field" in result.error
     assert sink == []

@@ -111,9 +111,7 @@ def preview_content(memory_dir: Path, request: MemoryChangeRequest) -> str:
         request.operation in (MemoryOperation.REPLACE_SECTION, MemoryOperation.UPDATE_FIELD)
         and not target.exists()
     ):
-        raise MemoryApplyError(
-            f"файл '{request.file}' не существует для {request.operation.value}"
-        )
+        raise MemoryApplyError(f"файл '{request.file}' не существует для {request.operation.value}")
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
     return _new_content(existing, request)
 
@@ -136,9 +134,7 @@ def apply_change(
         request.operation in (MemoryOperation.REPLACE_SECTION, MemoryOperation.UPDATE_FIELD)
         and not target.exists()
     ):
-        raise MemoryApplyError(
-            f"файл '{request.file}' не существует для {request.operation.value}"
-        )
+        raise MemoryApplyError(f"файл '{request.file}' не существует для {request.operation.value}")
 
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
     content = _new_content(existing, request)

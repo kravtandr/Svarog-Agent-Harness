@@ -142,9 +142,7 @@ def create_app(
         return RunRef(run_id=run_id, state="running")
 
     @app.post("/approvals/{approval_id}/answer", response_model=RunRef)
-    async def answer_question(
-        approval_id: str, req: AnswerRequest, service: ServiceDep
-    ) -> RunRef:
+    async def answer_question(approval_id: str, req: AnswerRequest, service: ServiceDep) -> RunRef:
         try:
             run_id = await service.answer_question(approval_id, answer=req.answer)
         except ApprovalNotFoundError as exc:

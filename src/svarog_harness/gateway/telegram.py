@@ -217,9 +217,7 @@ class TelegramBot:
         await service.resume_run(run_id)
         await self._stream_to_chat(service, chat_id, run_id)
 
-    async def _stream_to_chat(
-        self, service: GatewayService, chat_id: int, run_id: str
-    ) -> None:
+    async def _stream_to_chat(self, service: GatewayService, chat_id: int, run_id: str) -> None:
         """Проиграть события run'а в чат до его завершения/приостановки."""
         tools: list[str] = []
         async for event in service.stream(run_id):

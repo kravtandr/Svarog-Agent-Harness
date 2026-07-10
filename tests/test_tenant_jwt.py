@@ -88,9 +88,7 @@ def test_resolver_role_comes_from_registry_not_claim(tmp_path: Path) -> None:
     hub = _hub(tmp_path)
     resolver = JwtResolver(hub, _SECRET)
     # claim пытается объявить superuser — резолвер обязан взять роль из реестра.
-    forged = encode_hs256(
-        {"sub": "alice", "role": "superuser", "exp": time.time() + 60}, _SECRET
-    )
+    forged = encode_hs256({"sub": "alice", "role": "superuser", "exp": time.time() + 60}, _SECRET)
     svc = resolver.authenticate(f"Bearer {forged}")
     assert svc is not None
     assert svc.cfg.sandbox.type == "docker"  # standard, а не local-trusted

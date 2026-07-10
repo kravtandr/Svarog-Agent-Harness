@@ -134,9 +134,7 @@ class TenantRegistry:
                 raise TenantRegistryError(f"нет тенанта '{tenant_id}'")
             owner = data["index"].get(principal)
             if owner is not None and owner != tenant_id:
-                raise PrincipalConflictError(
-                    f"principal '{principal}' уже привязан к '{owner}'"
-                )
+                raise PrincipalConflictError(f"principal '{principal}' уже привязан к '{owner}'")
             data["index"][principal] = tenant_id
             principals = data["tenants"][tenant_id]["principals"]
             if principal not in principals:
