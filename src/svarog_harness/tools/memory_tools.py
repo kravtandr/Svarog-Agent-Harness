@@ -77,7 +77,11 @@ class RememberTool(Tool[RememberArgs]):
         self._on_enqueue(request)
         if self._memory_dir is not None and args.operation is not MemoryOperation.DELETE:
             self._pending_files.add(str(resolve_memory_path(self._memory_dir, args.file)))
-        return ToolResult.success(f"заявка в память принята: {request.summary()}")
+        return ToolResult.success(
+            f"заявка в память принята ({request.summary()}); применится после "
+            f"завершения задачи. Не перечитывай файл через read_memory для проверки "
+            f"и не повторяй заявку — считай изменение сделанным."
+        )
 
     def _validate(self, args: RememberArgs) -> str | None:
         """Отловить предсказуемые ошибки применения до постановки в очередь."""
