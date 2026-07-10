@@ -172,9 +172,12 @@ async def test_writer_applies_and_commits_sequentially(db: AsyncSession, tmp_pat
     assert "любит Python" in text
     assert "и краткость" in text
 
-    # Каждая заявка — отдельный коммит с trailer Run-Id.
+    # Каждая заявка — отдельный коммит с trailer Run-Id; сверху reindex-коммит
+    # (ADR-0011, автоген index.md/log.md) без Run-Id.
     repo = GitRepo(memory_dir)
-    _, log, _ = await repo._git("log", "--format=%B", "-n", "2")
+    _, head, _ = await repo._git("log", "--format=%s", "-n", "1")
+    assert head.strip() == "memory: reindex"
+    _, log, _ = await repo._git("log", "--format=%B", "-n", "3")
     assert f"Run-Id: {run2}" in log
     assert f"Run-Id: {run1}" in log
 

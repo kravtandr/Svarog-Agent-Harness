@@ -41,11 +41,25 @@ def first_body_paragraph(body: str, limit: int = 200) -> str:
     return ""
 
 
+class _NoAliasDumper(yaml.SafeDumper):
+    """Без YAML-anchor/alias: одинаковые значения (напр. created==updated —
+    один и тот же date-объект) должны выводиться дважды, а не как *id."""
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def render(frontmatter: dict[str, Any], body: str) -> str:
     """Собрать документ из frontmatter-mapping и тела.
 
     Порядок ключей сохраняется (sort_keys=False). Тело подставляется как есть,
     поэтому пустая строка после `---`, если была у автора, сохраняется.
     """
-    dumped = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
+    dumped = yaml.dump(
+        frontmatter,
+        Dumper=_NoAliasDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    ).strip()
     return f"---\n{dumped}\n---\n{body}"

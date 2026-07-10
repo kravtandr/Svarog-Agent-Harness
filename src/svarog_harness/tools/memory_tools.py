@@ -13,8 +13,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from svarog_harness.memory.apply import MemoryApplyError, has_section, resolve_memory_path
+from svarog_harness.memory.apply import (
+    MemoryApplyError,
+    has_section,
+    preview_content,
+    resolve_memory_path,
+)
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
+from svarog_harness.memory.project_page import project_slug_from_path, validate_project_page
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 
 # loop подписывается, чтобы поставить заявку в очередь.
@@ -97,4 +103,26 @@ class RememberTool(Tool[RememberArgs]):
                 # Файл, поставленный в очередь этим же run'ом, ещё не применён —
                 # для него проверку пропускаем (оптимистично).
                 return f"файл '{args.file}' не существует для replace_section"
+
+        slug = project_slug_from_path(args.file)
+        if slug is not None and args.operation is not MemoryOperation.DELETE:
+            # Контракт страницы проекта (ADR-0011): frontmatter должен быть
+            # валиден в прогнозируемом содержимом. Заявку, поставленную в
+            # очередь этим же run'ом и ещё не применённую (нет на диске),
+            # пропускаем — она провалидируется своей заявкой.
+            if str(target) in self._pending_files and not target.exists():
+                return None
+            try:
+                prospective = preview_content(
+                    self._memory_dir,
+                    MemoryChangeRequest(
+                        file=args.file,
+                        operation=args.operation,
+                        content=args.content,
+                        section=args.section,
+                    ),
+                )
+            except MemoryApplyError as exc:
+                return str(exc)
+            return validate_project_page(prospective, expected_slug=slug)
         return None

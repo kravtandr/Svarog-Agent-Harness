@@ -4,9 +4,11 @@
 replace_section требует стабильных markdown-якорей — заголовков секций.
 """
 
+from datetime import date
 from pathlib import Path
 
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
+from svarog_harness.memory.project_page import project_slug_from_path, stamp_dates
 
 
 class MemoryApplyError(Exception):
@@ -64,32 +66,55 @@ def _replace_section(text: str, section: str, new_body: str) -> str:
     return "\n".join(rebuilt).rstrip("\n") + "\n"
 
 
-def apply_change(memory_dir: Path, request: MemoryChangeRequest) -> None:
-    """Применить одну заявку к файлам memory (без git-коммита)."""
+def _new_content(existing: str, request: MemoryChangeRequest) -> str:
+    """Содержимое файла после применения create/append/replace_section (чистое)."""
+    if request.operation is MemoryOperation.CREATE:
+        return request.content
+    if request.operation is MemoryOperation.APPEND:
+        base = existing
+        if base and not base.endswith("\n"):
+            base += "\n"
+        return base + request.content
+    if request.operation is MemoryOperation.REPLACE_SECTION:
+        return _replace_section(existing, request.section, request.content)
+    raise MemoryApplyError(f"неприменимая операция для расчёта содержимого: {request.operation}")
+
+
+def preview_content(memory_dir: Path, request: MemoryChangeRequest) -> str:
+    """Прогнозируемое содержимое файла после применения — для ранней валидации.
+
+    Без записи на диск и без штамповки дат. DELETE → пустая строка.
+    """
+    target = resolve_memory_path(memory_dir, request.file)
+    if request.operation is MemoryOperation.DELETE:
+        return ""
+    if request.operation is MemoryOperation.REPLACE_SECTION and not target.exists():
+        raise MemoryApplyError(f"файл '{request.file}' не существует для replace_section")
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    return _new_content(existing, request)
+
+
+def apply_change(
+    memory_dir: Path, request: MemoryChangeRequest, *, today: date | None = None
+) -> None:
+    """Применить одну заявку к файлам memory (без git-коммита).
+
+    Для страниц проекта (`projects/<slug>/overview.md`) даты created/updated
+    ведёт код: `stamp_dates` проставляется при записи (ADR-0011).
+    """
     target = resolve_memory_path(memory_dir, request.file)
 
     if request.operation is MemoryOperation.DELETE:
         target.unlink(missing_ok=True)
         return
 
-    if request.operation is MemoryOperation.CREATE:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(request.content, encoding="utf-8")
-        return
+    if request.operation is MemoryOperation.REPLACE_SECTION and not target.exists():
+        raise MemoryApplyError(f"файл '{request.file}' не существует для replace_section")
 
-    if request.operation is MemoryOperation.APPEND:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        existing = target.read_text(encoding="utf-8") if target.exists() else ""
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
-        target.write_text(existing + request.content, encoding="utf-8")
-        return
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    content = _new_content(existing, request)
+    if project_slug_from_path(request.file) is not None:
+        content = stamp_dates(content, today=today or date.today())
 
-    if request.operation is MemoryOperation.REPLACE_SECTION:
-        if not target.exists():
-            raise MemoryApplyError(f"файл '{request.file}' не существует для replace_section")
-        text = target.read_text(encoding="utf-8")
-        target.write_text(
-            _replace_section(text, request.section, request.content), encoding="utf-8"
-        )
-        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")

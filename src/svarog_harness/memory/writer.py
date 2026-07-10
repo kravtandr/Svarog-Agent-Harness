@@ -6,6 +6,8 @@
 Secret scan обязателен перед каждым коммитом (ADR-0006).
 """
 
+import contextlib
+from datetime import date
 from pathlib import Path
 
 from sqlalchemy import select
@@ -15,6 +17,7 @@ from svarog_harness.gitflow.commit_gate import SecretScanBlockedError, commit_gu
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.memory.apply import MemoryApplyError, apply_change
 from svarog_harness.memory.change import MemoryChangeRequest
+from svarog_harness.memory.wiki import append_log, log_entry, regenerate_index
 from svarog_harness.storage.locks import LockBackend
 from svarog_harness.storage.models import MemoryChange, MemoryChangeStatus, utcnow
 
@@ -81,12 +84,36 @@ class MemoryWriter:
 
         await self._repo.ensure_identity()
         processed: list[MemoryChange] = []
+        entries: list[str] = []
         for row in pending:
-            await self._apply_one(row, known_values=known_values)
+            entry = await self._apply_one(row, known_values=known_values)
+            if entry is not None:
+                entries.append(entry)
             processed.append(row)
+        await self._reindex(entries, known_values=known_values)
         return processed
 
-    async def _apply_one(self, row: MemoryChange, *, known_values: frozenset[str]) -> None:
+    async def _reindex(self, entries: list[str], *, known_values: frozenset[str]) -> None:
+        """Автоген index.md/log.md после применённых заявок (ADR-0011).
+
+        Отдельный коммit `memory: reindex`; идемпотентен — если состояние не
+        изменилось, staged-изменений нет и коммита не будет.
+        """
+        append_log(self._memory_dir, entries)
+        regenerate_index(self._memory_dir)
+        await self._repo.add_all()
+        if not await self._repo.has_staged_changes():
+            return
+        # Автоген собран из уже проверенного контента, поэтому secret-блок здесь
+        # крайне маловероятен; но даже он не должен ронять весь drain — оставляем
+        # как есть, следующий drain повторит reindex-коммит.
+        with contextlib.suppress(SecretScanBlockedError):
+            await commit_guarded(self._repo, "memory: reindex", known_values=known_values)
+
+    async def _apply_one(
+        self, row: MemoryChange, *, known_values: frozenset[str]
+    ) -> str | None:
+        """Применить заявку; вернуть строку журнала (или None, если не применено)."""
         request = MemoryChangeRequest.from_dict(row.change, source_run_id=row.source_run_id)
         try:
             apply_change(self._memory_dir, request)
@@ -96,7 +123,7 @@ class MemoryWriter:
                 row.status = MemoryChangeStatus.APPLIED
                 row.applied_at = utcnow()
                 await self._db.commit()
-                return
+                return None
             trailers = {"Run-Id": row.source_run_id} if row.source_run_id else None
             sha = await commit_guarded(
                 self._repo,
@@ -107,7 +134,15 @@ class MemoryWriter:
             row.status = MemoryChangeStatus.APPLIED
             row.applied_at = utcnow()
             row.commit_sha = sha
+            await self._db.commit()
+            return log_entry(
+                operation=request.operation.value,
+                path=request.file,
+                run_id=row.source_run_id,
+                when=date.today(),
+            )
         except (MemoryApplyError, SecretScanBlockedError, OSError) as exc:
             row.status = MemoryChangeStatus.FAILED
             row.error = str(exc)
-        await self._db.commit()
+            await self._db.commit()
+            return None
