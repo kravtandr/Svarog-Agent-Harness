@@ -42,6 +42,7 @@ svarog/
       registry.py           # ToolRegistry
       file_tools.py         # read/write/edit/list/search
       shell.py              # bash
+      plan_tools.py         # update_plan (run-local план для сложных задач)
       skill_tools.py        # read_skill, create_skill_proposal
       memory_tools.py       # remember
       approval.py           # request_approval

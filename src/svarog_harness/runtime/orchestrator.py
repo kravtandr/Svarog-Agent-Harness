@@ -36,6 +36,7 @@ from svarog_harness.storage.models import Run, RunState, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
+from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
@@ -171,11 +172,13 @@ class TaskRunner:
         )
         skill_load_sink: list[tuple[str, str | None]] = []
         memory_sink: list[dict[str, object]] = []
+        plan_update_sink: list[dict[str, object]] = []
         registry = self._build_registry(
             environment,
             active_skills,
             skill_load_sink,
             memory_sink,
+            plan_update_sink,
             proposal_sink,
             mem_dir=mem_dir,
             mcp_tools=mcp_tools,
@@ -192,6 +195,7 @@ class TaskRunner:
             memory=memory_text,
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
+            plan_update_sink=plan_update_sink,
             workspace_flow=WorkspaceFlow(GitRepo(workspace), cfg.git),
             secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
@@ -206,6 +210,7 @@ class TaskRunner:
         skills: list[Skill],
         skill_load_sink: list[tuple[str, str | None]],
         memory_sink: list[dict[str, object]],
+        plan_update_sink: list[dict[str, object]],
         proposal_sink: list[SkillProposalRequest] | None,
         *,
         mem_dir: Path | None,
@@ -214,6 +219,13 @@ class TaskRunner:
         registry = ToolRegistry()
         for tool in file_tools(self._workspace):
             registry.register(tool)
+        registry.register(
+            UpdatePlanTool(
+                on_update=lambda items, note: plan_update_sink.append(
+                    {"items": items, "note": note}
+                )
+            )
+        )
         registry.register(BashTool(environment, self._cfg.sandbox.timeout_sec))
         registry.register(RequestApprovalTool())
         registry.register(AskUserTool())

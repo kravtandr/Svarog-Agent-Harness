@@ -458,6 +458,7 @@ list_dir
 search_files
 bash
 git
+update_plan
 read_skill
 create_skill_proposal
 run_checks
@@ -1615,7 +1616,7 @@ Svarog — open-source harness platform for building skill-based, self-hosted AI
 
 * CLI: `init`, `run`, `chat`, `skills list`, `traces list`, approval в терминале;
 * agent loop с checkpoint/resume (state machine из раздела 11);
-* tools: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_files`, `bash`, `git`, `read_skill`, `ask_user`, `request_approval`;
+* tools: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_files`, `bash`, `git`, `update_plan`, `read_skill`, `ask_user`, `request_approval`;
 * Docker sandbox: network off, non-root, CPU/RAM limits, timeout;
 * skill loader: сканирование, skill cards, on-demand загрузка `SKILL.md`;
 * Policy Engine: allow/notify/deny/require_approval + execution constraints + режимы автономии (`yolo` по умолчанию);

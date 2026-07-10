@@ -31,9 +31,11 @@ def test_scaffold_gitignore_covers_secrets(tmp_path: Path) -> None:
     scaffold_agent_home(tmp_path)
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in gitignore
+    assert ".svarog/" in gitignore
     assert "*.pem" in gitignore
     # denylist и .gitignore согласованы.
     assert is_secret_path(".env")
+    assert is_secret_path(".svarog/svarog.db")
 
 
 def test_scaffold_config_is_loadable(tmp_path: Path) -> None:
@@ -41,6 +43,7 @@ def test_scaffold_config_is_loadable(tmp_path: Path) -> None:
     cfg = load_config(project_dir=tmp_path, user_config_path=tmp_path / "no-user.yaml")
     assert cfg.models.default == "local"
     assert cfg.memory.path is not None
+    assert cfg.storage.db_path == Path(".svarog/svarog.db")
 
 
 def test_scaffold_example_skill_is_valid(tmp_path: Path) -> None:

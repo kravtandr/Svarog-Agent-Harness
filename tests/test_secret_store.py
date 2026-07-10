@@ -21,6 +21,7 @@ from svarog_harness.secrets import (
 )
 
 _FAKE = "s3cr3t-value-12345"
+_FAKE_PATTERN_SECRET = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFGHijklmnop"
 
 
 def test_file_store_roundtrip(tmp_path: Path) -> None:
@@ -103,6 +104,12 @@ def test_redact_longest_first() -> None:
 
 def test_redact_empty_noop() -> None:
     assert redact("чистый текст", frozenset()) == "чистый текст"
+
+
+def test_redact_secret_patterns_without_known_values() -> None:
+    result = redact(f"token={_FAKE_PATTERN_SECRET}", frozenset())
+    assert _FAKE_PATTERN_SECRET not in result
+    assert "[REDACTED]" in result
 
 
 # --- инжекция в окружение sandbox ---
@@ -218,3 +225,237 @@ async def test_loop_redacts_secret_in_tool_output(tmp_path: Path) -> None:
     tool_msg = provider.seen[-1][-1]
     assert _FAKE not in tool_msg.content
     assert "[REDACTED]" in tool_msg.content
+
+
+async def test_loop_redacts_pattern_secret_in_trace(tmp_path: Path) -> None:
+    """Секретоподобные значения из prompt/tool args не пишутся в trace."""
+    from collections.abc import Callable
+
+    from sqlalchemy import select
+
+    from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
+    from svarog_harness.llm.provider import (
+        ChatMessage,
+        CompletionResult,
+        ModelProvider,
+        ToolCallRequest,
+        ToolDefinition,
+        Usage,
+    )
+    from svarog_harness.policy.engine import PolicyEngine
+    from svarog_harness.runtime.loop import AgentLoop
+    from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+    from svarog_harness.storage.models import Message, Run, ToolCall
+    from svarog_harness.tools.file_tools import file_tools
+    from svarog_harness.tools.registry import ToolRegistry
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    class ScriptedProvider(ModelProvider):
+        async def complete(
+            self,
+            messages: list[ChatMessage],
+            tools: list[ToolDefinition],
+            *,
+            on_text_delta: "Callable[[str], None] | None" = None,
+        ) -> CompletionResult:
+            if not any(message.role == "tool" for message in messages):
+                return CompletionResult(
+                    content="",
+                    tool_calls=(
+                        ToolCallRequest(
+                            id="c1",
+                            name="write_file",
+                            arguments_json=(
+                                f'{{"path": "secret.txt", "content": "{_FAKE_PATTERN_SECRET}"}}'
+                            ),
+                        ),
+                    ),
+                    usage=Usage(10, 5),
+                )
+            return CompletionResult(content="готово", usage=Usage(10, 5))
+
+    db_path = tmp_path / "db" / "s.sqlite3"
+    init_db(db_path)
+    engine = create_engine(db_path)
+    factory = create_session_factory(engine)
+    registry = ToolRegistry()
+    for tool in file_tools(tmp_path):
+        registry.register(tool)
+
+    async with factory() as session:
+        loop = AgentLoop(
+            ScriptedProvider(),
+            registry,
+            TraceRecorder(session),
+            RuntimeConfig(),
+            PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+            tmp_path,
+            model_name="test",
+        )
+        await loop.run(f"запиши {_FAKE_PATTERN_SECRET}", AutonomyMode.YOLO)
+
+    async with factory() as session:
+        runs = (await session.execute(select(Run))).scalars().all()
+        messages = (await session.execute(select(Message))).scalars().all()
+        tool_calls = (await session.execute(select(ToolCall))).scalars().all()
+    await engine.dispose()
+
+    assert all(_FAKE_PATTERN_SECRET not in run.task for run in runs)
+    assert all(_FAKE_PATTERN_SECRET not in str(message.content) for message in messages)
+    assert all(_FAKE_PATTERN_SECRET not in str(call.arguments) for call in tool_calls)
+
+
+async def test_loop_does_not_duplicate_saved_file_content_in_final_answer(
+    tmp_path: Path,
+) -> None:
+    """Финальный ответ не должен цитировать содержимое, уже сохранённое в файл."""
+    from collections.abc import Callable
+
+    from sqlalchemy import select
+
+    from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
+    from svarog_harness.llm.provider import (
+        ChatMessage,
+        CompletionResult,
+        ModelProvider,
+        ToolCallRequest,
+        ToolDefinition,
+        Usage,
+    )
+    from svarog_harness.policy.engine import PolicyEngine
+    from svarog_harness.runtime.loop import AgentLoop
+    from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+    from svarog_harness.storage.models import Message
+    from svarog_harness.tools.file_tools import file_tools
+    from svarog_harness.tools.registry import ToolRegistry
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    saved = "verifier should fail because configured check is impossible"
+
+    class ScriptedProvider(ModelProvider):
+        async def complete(
+            self,
+            messages: list[ChatMessage],
+            tools: list[ToolDefinition],
+            *,
+            on_text_delta: "Callable[[str], None] | None" = None,
+        ) -> CompletionResult:
+            if not any(message.role == "tool" for message in messages):
+                return CompletionResult(
+                    content="",
+                    tool_calls=(
+                        ToolCallRequest(
+                            id="c1",
+                            name="write_file",
+                            arguments_json=(f'{{"path": "out.txt", "content": "{saved}"}}'),
+                        ),
+                    ),
+                    usage=Usage(10, 5),
+                )
+            return CompletionResult(
+                content=f"Файл создан и содержит строку: {saved}",
+                usage=Usage(10, 5),
+            )
+
+    db_path = tmp_path / "db" / "s.sqlite3"
+    init_db(db_path)
+    engine = create_engine(db_path)
+    factory = create_session_factory(engine)
+    registry = ToolRegistry()
+    for tool in file_tools(tmp_path):
+        registry.register(tool)
+
+    async with factory() as session:
+        outcome = await AgentLoop(
+            ScriptedProvider(),
+            registry,
+            TraceRecorder(session),
+            RuntimeConfig(),
+            PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+            tmp_path,
+            model_name="test",
+        ).run("создай файл", AutonomyMode.YOLO)
+
+    async with factory() as session:
+        messages = (await session.execute(select(Message))).scalars().all()
+    await engine.dispose()
+
+    assert saved not in outcome.final_answer
+    assistant_messages = [m for m in messages if m.role == "assistant"]
+    assert saved not in str(assistant_messages[-1].content)
+    assert "[содержимое сохранено в файле]" in outcome.final_answer
+
+
+async def test_loop_rejects_file_creation_claim_without_tool(tmp_path: Path) -> None:
+    """Если пользователь просит создать файл, голый финальный ответ не принимается."""
+    from collections.abc import Callable
+
+    from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
+    from svarog_harness.llm.provider import (
+        ChatMessage,
+        CompletionResult,
+        ModelProvider,
+        ToolCallRequest,
+        ToolDefinition,
+        Usage,
+    )
+    from svarog_harness.policy.engine import PolicyEngine
+    from svarog_harness.runtime.loop import AgentLoop
+    from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+    from svarog_harness.storage.models import RunState
+    from svarog_harness.tools.file_tools import file_tools
+    from svarog_harness.tools.registry import ToolRegistry
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    class ScriptedProvider(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(
+            self,
+            messages: list[ChatMessage],
+            tools: list[ToolDefinition],
+            *,
+            on_text_delta: "Callable[[str], None] | None" = None,
+        ) -> CompletionResult:
+            self.calls += 1
+            if self.calls == 1:
+                return CompletionResult(content="Файл out.txt создан.", usage=Usage(10, 5))
+            if self.calls == 2:
+                return CompletionResult(
+                    content="",
+                    tool_calls=(
+                        ToolCallRequest(
+                            id="c1",
+                            name="write_file",
+                            arguments_json='{"path": "out.txt", "content": "ok"}',
+                        ),
+                    ),
+                    usage=Usage(10, 5),
+                )
+            return CompletionResult(content="Файл out.txt создан.", usage=Usage(10, 5))
+
+    db_path = tmp_path / "db" / "s.sqlite3"
+    init_db(db_path)
+    engine = create_engine(db_path)
+    factory = create_session_factory(engine)
+    registry = ToolRegistry()
+    for tool in file_tools(tmp_path):
+        registry.register(tool)
+    provider = ScriptedProvider()
+
+    async with factory() as session:
+        outcome = await AgentLoop(
+            provider,
+            registry,
+            TraceRecorder(session),
+            RuntimeConfig(),
+            PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+            tmp_path,
+            model_name="test",
+        ).run("Создай файл out.txt", AutonomyMode.YOLO)
+    await engine.dispose()
+
+    assert outcome.state is RunState.COMPLETED
+    assert provider.calls == 3
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "ok"

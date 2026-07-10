@@ -85,9 +85,7 @@ def _audit_projects(memory_dir: Path, *, stale_after_days: int, today: date) -> 
             age = (today - updated).days
             if age >= stale_after_days:
                 findings.append(
-                    MemoryFinding(
-                        KIND_STALE, rel, f"status active, но обновлялась {age} дн. назад"
-                    )
+                    MemoryFinding(KIND_STALE, rel, f"status active, но обновлялась {age} дн. назад")
                 )
     return findings
 

@@ -26,6 +26,8 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     ".pypirc",
     "credentials.json",
     "service-account*.json",
+    ".svarog/",
+    ".svarog/*",
     ".svarog/secrets*",
 )
 

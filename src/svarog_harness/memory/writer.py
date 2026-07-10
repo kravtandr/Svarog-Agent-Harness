@@ -110,9 +110,7 @@ class MemoryWriter:
         with contextlib.suppress(SecretScanBlockedError):
             await commit_guarded(self._repo, "memory: reindex", known_values=known_values)
 
-    async def _apply_one(
-        self, row: MemoryChange, *, known_values: frozenset[str]
-    ) -> str | None:
+    async def _apply_one(self, row: MemoryChange, *, known_values: frozenset[str]) -> str | None:
         """Применить заявку; вернуть строку журнала (или None, если не применено)."""
         request = MemoryChangeRequest.from_dict(row.change, source_run_id=row.source_run_id)
         try:

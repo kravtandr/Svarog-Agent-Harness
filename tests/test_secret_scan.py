@@ -16,6 +16,7 @@ from svarog_harness.secrets import (
 # Публичный документированный AWS example (не настоящий ключ).
 _FAKE_AWS = "AKIAIOSFODNN7EXAMPLE"
 _FAKE_GH = "ghp_" + "A1b2C3d4" * 5  # 40 символов, синтетический
+_FAKE_OPENAI_PROJECT = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFGHijklmnop"
 _FAKE_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----"
 
 
@@ -29,6 +30,12 @@ def test_detects_aws_key() -> None:
 def test_detects_github_token() -> None:
     findings = scan_text(f"export TOKEN={_FAKE_GH}")
     assert any(f.rule == "github-token" for f in findings)
+
+
+def test_detects_openai_project_key() -> None:
+    findings = scan_text(f"token = {_FAKE_OPENAI_PROJECT}")
+    assert any(f.rule == "openai-key" for f in findings)
+    assert all(_FAKE_OPENAI_PROJECT not in f.excerpt for f in findings)
 
 
 def test_detects_private_key_block() -> None:
@@ -77,6 +84,7 @@ def test_is_secret_path() -> None:
     assert is_secret_path("config/.env.production")
     assert is_secret_path("keys/server.pem")
     assert is_secret_path(".ssh/id_rsa")
+    assert is_secret_path(".svarog/svarog.db")
     assert not is_secret_path("src/app.py")
     assert not is_secret_path(".env.example")  # шаблоны разрешены
 

@@ -23,7 +23,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36,}\b")),
     ("github-pat", re.compile(r"\bgithub_pat_[0-9A-Za-z_]{60,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
-    ("openai-key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("openai-key", re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b")),
     ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     (
         "private-key-block",
@@ -77,6 +77,20 @@ def _redact(value: str) -> str:
     """Показать длину и первые пару символов, скрыв значение."""
     head = value[:2]
     return f"{head}… [вырезано {len(value)} символов]"
+
+
+def redact_secret_patterns(text: str, marker: str = "[REDACTED]") -> str:
+    """Вырезать секреты известных форматов из произвольного текста.
+
+    Это best-effort слой для trace/CLI: в отличие от scan_text, он не требует
+    имени переменной или SecretStore-ссылки, поэтому режет случайно вставленные
+    токены в user/assistant/tool сообщениях до сохранения.
+    """
+    if not text:
+        return text
+    for _, pattern in _PATTERNS:
+        text = pattern.sub(marker, text)
+    return text
 
 
 def scan_text(

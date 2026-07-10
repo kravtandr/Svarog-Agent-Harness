@@ -71,9 +71,7 @@ def _source_files(memory_dir: Path) -> list[str]:
     root = memory_dir / "sources"
     if not root.is_dir():
         return []
-    return sorted(
-        str(p.relative_to(memory_dir)) for p in root.rglob("*") if p.is_file()
-    )
+    return sorted(str(p.relative_to(memory_dir)) for p in root.rglob("*") if p.is_file())
 
 
 def _project_line(page: dict[str, str]) -> str:

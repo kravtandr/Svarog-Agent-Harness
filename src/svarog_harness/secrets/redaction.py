@@ -9,8 +9,13 @@ _MARKER = "[REDACTED]"
 
 
 def redact(text: str, values: frozenset[str]) -> str:
-    """Заменить все вхождения известных значений секретов на маркер."""
-    if not text or not values:
+    """Заменить известные значения и секреты узнаваемых форматов на маркер."""
+    if not text:
+        return text
+    from svarog_harness.secrets.scanner import redact_secret_patterns
+
+    text = redact_secret_patterns(text, _MARKER)
+    if not values:
         return text
     # Длинные значения — первыми, чтобы не оставить хвост от вложенного секрета.
     for value in sorted(values, key=len, reverse=True):

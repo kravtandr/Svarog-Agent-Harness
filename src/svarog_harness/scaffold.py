@@ -71,6 +71,9 @@ policies:
     - main
     - production
 
+storage:
+  db_path: ./.svarog/svarog.db
+
 gateway:
   token_ref: null          # задайте имя секрета для serve --host 0.0.0.0
 """

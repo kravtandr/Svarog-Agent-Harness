@@ -25,7 +25,7 @@
 ## Возможности
 
 * **Интерфейсы**: CLI (`run`, `chat`, `resume`, `traces`, `approvals`, `skills`, `memory`, `secrets`), REST + WebSocket API, Telegram-бот — с асинхронным approval.
-* **Инструменты**: файлы (read/write/edit/list/search в границах workspace), bash в sandbox, `read_skill`, `remember`, `read_memory`, `create_skill_proposal`, `request_approval`, `ask_user` (уточняющий вопрос человеку с таймаутом), плюс внешние инструменты через **MCP**. Git — не tool агента, а привилегированный host-flow вне sandbox (ADR-0002/0003).
+* **Инструменты**: файлы (read/write/edit/list/search в границах workspace), bash в sandbox, `update_plan` (run-local план для сложных задач), `read_skill`, `remember`, `read_memory`, `create_skill_proposal`, `request_approval`, `ask_user` (уточняющий вопрос человеку с таймаутом), плюс внешние инструменты через **MCP**. Git — не tool агента, а привилегированный host-flow вне sandbox (ADR-0002/0003).
 * **Sandbox**: Docker (сеть off, non-root, лимиты CPU/RAM, timeout, mounts по allowlist) или явный `local-trusted`.
 * **Policy Engine**: allow / notify / deny / require_approval с режимами автономии и правилами `policies/*.yaml`; MCP-инструменты по умолчанию требуют approval.
 * **Память — LLM-wiki (ADR-0011)**: страницы проектов с YAML-frontmatter, детерминированный автоген `index.md`/`log.md` в single-writer'е, прогрессивная загрузка (в контекст — только индекс + профиль, остальное по требованию через `read_memory`), lint `svarog memory curate`, неизменяемый raw-слой `sources/`. Запись — только через контролируемую очередь (Flow A).
@@ -88,7 +88,11 @@ cd agent-home           # svarog.yaml лежит здесь
 uv run svarog chat      # чат запускается из каталога с конфигом
 ```
 
-`uv run` найдёт `pyproject.toml` в родительском каталоге проекта, так что `--project` указывать не нужно.
+`uv run` найдёт `pyproject.toml` в родительском каталоге проекта, так что `--project` указывать не нужно, если `agent-home` создан внутри checkout'а Svarog. Если agent-home находится вне репозитория, запускайте CLI с явным проектом:
+
+```bash
+uv --project /path/to/Svarog-Agent-Harness run svarog chat --workspace /path/to/agent-home
+```
 
 Без интерактива всё задаётся флагами:
 
@@ -96,6 +100,8 @@ uv run svarog chat      # чат запускается из каталога с
 uv run svarog init ./agent-home --no-input \
   --model qwen3-coder --base-url http://localhost:8000/v1 --api-key sk-…
 ```
+
+Сгенерированный `svarog.yaml` хранит runtime-состояние в локальном `./.svarog/svarog.db` внутри agent-home. Каталог `.svarog/` добавлен в `.gitignore` и denylist, поэтому traces и служебная SQLite-база не смешиваются между разными agent-home и не должны попадать в Git.
 
 Либо создайте `svarog.yaml` в рабочей директории вручную (полная схема — §13 [TASK.md](TASK.md)):
 

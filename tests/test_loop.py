@@ -19,8 +19,16 @@ from svarog_harness.llm.provider import (
 from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Message, Run, RunState, ToolCall, ToolCallStatus
+from svarog_harness.storage.models import (
+    Checkpoint,
+    Message,
+    Run,
+    RunState,
+    ToolCall,
+    ToolCallStatus,
+)
 from svarog_harness.tools.file_tools import file_tools
+from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.trace.recorder import TraceRecorder
 
@@ -76,6 +84,7 @@ def _loop(
     *,
     cfg: RuntimeConfig | None = None,
     registry: ToolRegistry | None = None,
+    plan_update_sink: list[dict[str, object]] | None = None,
 ) -> AgentLoop:
     if registry is None:
         registry = ToolRegistry()
@@ -89,6 +98,7 @@ def _loop(
         PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=workspace),
         workspace,
         model_name="test-model",
+        plan_update_sink=plan_update_sink,
     )
 
 
@@ -136,6 +146,45 @@ async def test_executes_tool_calls_and_feeds_results_back(db: AsyncSession, tmp_
     assert tool_call.arguments == {"path": "note.txt"}
     assert tool_call.result is not None
     assert "17" in tool_call.result["output"]
+
+
+async def test_update_plan_is_saved_in_checkpoint(db: AsyncSession, tmp_path: Path) -> None:
+    plan_sink: list[dict[str, object]] = []
+    registry = ToolRegistry()
+    registry.register(
+        UpdatePlanTool(lambda items, note: plan_sink.append({"items": items, "note": note}))
+    )
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="p1",
+                    name="update_plan",
+                    arguments_json=(
+                        '{"items": ['
+                        '{"id": "inspect", "text": "изучить состояние", '
+                        '"status": "completed"},'
+                        '{"id": "verify", "text": "проверить результат", '
+                        '"status": "in_progress"}'
+                        '], "note": "план создан"}'
+                    ),
+                )
+            ),
+            _final("готово"),
+        ]
+    )
+    loop = _loop(provider, db, tmp_path, registry=registry, plan_update_sink=plan_sink)
+
+    outcome = await loop.run("сложная задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    checkpoints = (
+        (await db.execute(select(Checkpoint).order_by(Checkpoint.created_at))).scalars().all()
+    )
+    assert checkpoints[-1].state["plan"] == [
+        {"id": "inspect", "text": "изучить состояние", "status": "completed"},
+        {"id": "verify", "text": "проверить результат", "status": "in_progress"},
+    ]
 
 
 async def test_records_full_message_trace(db: AsyncSession, tmp_path: Path) -> None:

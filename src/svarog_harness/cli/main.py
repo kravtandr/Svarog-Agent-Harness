@@ -1102,9 +1102,7 @@ def memory_curate() -> None:
         console.print("memory curator: находок нет — память в порядке")
     else:
         for finding in report.findings:
-            console.print(
-                f"[magenta]{finding.kind}[/magenta] {finding.path}: {finding.detail}"
-            )
+            console.print(f"[magenta]{finding.kind}[/magenta] {finding.path}: {finding.detail}")
     console.print(f"[dim]отчёт: {path}[/dim]")
 
 

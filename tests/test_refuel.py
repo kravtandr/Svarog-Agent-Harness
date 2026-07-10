@@ -40,7 +40,23 @@ def test_build_task_state_has_sections() -> None:
     assert "почини баг" in text
     assert "list_dir" in text
     assert "нашёл важное" in text
+    assert "## Current plan" in text
     assert "Выполнено итераций: 5" in text
+
+
+def test_build_task_state_includes_plan() -> None:
+    text = build_task_state(
+        "почини баг",
+        [],
+        iterations=2,
+        plan=[
+            {"id": "inspect", "text": "изучить код", "status": "completed"},
+            {"id": "fix", "text": "исправить баг", "status": "in_progress"},
+        ],
+    )
+
+    assert "- [completed] inspect: изучить код" in text
+    assert "- [in_progress] fix: исправить баг" in text
 
 
 class ScriptedProvider(ModelProvider):

@@ -16,7 +16,7 @@
 5. **Tool base + registry**: описание tool (schema, risk_level, timeout, sandbox_requirement — §6.5), регистрация, генерация tool definitions для LLM.
 6. **File tools**: read_file, write_file, edit_file, list_dir, search_files; пути только внутри workspace.
 7. **Bash tool (local trusted)**: исполнение с timeout, capture stdout/stderr; sandbox подключается в M2.
-8. **Agent loop v0**: линейный run (без resume) — build context → LLM → tool calls → observe → iterate; стоп по max_iterations/budget; полная запись trace.
+8. **Agent loop v0**: линейный run (без resume) — build context → LLM → tool calls → observe → iterate; run-local `update_plan` для сложных задач; стоп по max_iterations/budget; полная запись trace.
 9. **CLI `run` + `traces list/show`**: запуск задачи из терминала, просмотр trace.
 
 ## M2 — Безопасность и resumability ✅

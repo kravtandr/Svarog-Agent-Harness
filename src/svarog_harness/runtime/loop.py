@@ -10,6 +10,7 @@ Tool calls фиксируются в checkpoint до исполнения (write
 """
 
 import contextlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -68,6 +69,19 @@ _EMPTY_NUDGE = (
     "продолжи работу через tools."
 )
 
+_SAVED_CONTENT_MARKER = "[содержимое сохранено в файле]"
+
+_FILE_ACTION_RE = re.compile(
+    r"(?iu)(?:созда[йть]|сохрани|запиши|create|write|save).{0,80}"
+    r"(?:файл|file|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})"
+)
+
+_MISSING_TOOL_NUDGE = (
+    "Ты сообщил о создании или изменении файла, но в этом run ещё не было "
+    "успешного tool-result. Такой финальный ответ не принят: выполни действие "
+    "через write_file, edit_file или bash, затем отчитайся."
+)
+
 
 def _rejection_nudge(result: CompletionResult) -> str | None:
     """Причина не принимать ход без tool calls как финальный ответ (или None)."""
@@ -78,6 +92,10 @@ def _rejection_nudge(result: CompletionResult) -> str | None:
     if not result.content.strip():
         return _EMPTY_NUDGE
     return None
+
+
+def _task_requires_file_action(task: str) -> bool:
+    return bool(_FILE_ACTION_RE.search(task))
 
 
 @dataclass(frozen=True)
@@ -120,6 +138,7 @@ class AgentLoop:
         memory_sink: list[dict[str, object]] | None = None,
         workspace_flow: WorkspaceFlow | None = None,
         secret_values: frozenset[str] = frozenset(),
+        plan_update_sink: list[dict[str, object]] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
@@ -141,9 +160,12 @@ class AgentLoop:
         self._skill_load_sink = skill_load_sink if skill_load_sink is not None else []
         # remember tool пишет сюда заявки; loop сливает в очередь MemoryChange.
         self._memory_sink = memory_sink if memory_sink is not None else []
+        # update_plan tool пишет сюда полный run-local план; loop переносит его в checkpoint.
+        self._plan_update_sink = plan_update_sink if plan_update_sink is not None else []
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
+        self._saved_file_contents: list[str] = []
         # Интерфейсам (gateway/Telegram) нужен run_id сразу после создания run,
         # чтобы подписаться на его события до завершения (§6.1).
         self._on_run_started = on_run_started
@@ -162,7 +184,10 @@ class AgentLoop:
         предыдущий диалог (§10.1).
         """
         run = await self._recorder.start_run(
-            task=task, autonomy=autonomy.value, model=self._model_name, session_id=session_id
+            task=self._redact_text(task),
+            autonomy=autonomy.value,
+            model=self._model_name,
+            session_id=session_id,
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
@@ -174,7 +199,7 @@ class AgentLoop:
             history=history,
         )
         for message in messages:
-            await self._recorder.add_message(run, message.role, {"content": message.content})
+            await self._record_message(run, message.role, {"content": message.content})
 
         state = LoopState(workspace=self._workspace, messages=messages, task=task)
         # Стартовый checkpoint: run возобновляем с первой секунды жизни.
@@ -198,11 +223,15 @@ class AgentLoop:
             while state.iterations < self._cfg.max_iterations:
                 state.iterations += 1
                 state.iterations_since_refuel += 1
+                stream_callback = None if self._saved_file_contents else self._on_text_delta
                 result = await self._provider.complete(
                     state.messages,
                     self._registry.definitions(),
-                    on_text_delta=self._on_text_delta,
+                    on_text_delta=stream_callback,
                 )
+                result_content = self._sanitize_model_content(result.content)
+                if stream_callback is None and self._on_text_delta is not None and result_content:
+                    self._on_text_delta(result_content)
                 state.tokens_used += result.usage.total_tokens
                 state.cost_usd += result.cost_usd
                 await self._recorder.update_progress(
@@ -213,16 +242,20 @@ class AgentLoop:
                 )
                 state.messages.append(
                     ChatMessage(
-                        role="assistant", content=result.content, tool_calls=result.tool_calls
+                        role="assistant", content=result_content, tool_calls=result.tool_calls
                     )
                 )
-                await self._recorder.add_message(
+                await self._record_message(
                     run,
                     "assistant",
                     {
-                        "content": result.content,
+                        "content": result_content,
                         "tool_calls": [
-                            {"id": c.id, "name": c.name, "arguments": c.arguments_json}
+                            {
+                                "id": c.id,
+                                "name": c.name,
+                                "arguments": self._redact_text(c.arguments_json),
+                            }
                             for c in result.tool_calls
                         ],
                     },
@@ -233,14 +266,20 @@ class AgentLoop:
                     # по токенам, пустота) не принимается — модель получает
                     # корректирующее сообщение и пробует ещё раз.
                     nudge = _rejection_nudge(result)
+                    if (
+                        nudge is None
+                        and not any(message.role == "tool" for message in state.messages)
+                        and _task_requires_file_action(state.task)
+                    ):
+                        nudge = _MISSING_TOOL_NUDGE
                     if nudge is not None and state.nudges < _MAX_NUDGES:
                         state.nudges += 1
                         state.messages.append(ChatMessage(role="user", content=nudge))
-                        await self._recorder.add_message(run, "user", {"content": nudge})
+                        await self._record_message(run, "user", {"content": nudge})
                         await self._save_checkpoint(run, state)
                         continue
                     await self._recorder.finish_run(run, RunState.COMPLETED)
-                    return self._outcome(run, RunState.COMPLETED, state, result.content)
+                    return self._outcome(run, RunState.COMPLETED, state, result_content)
 
                 # Write-ahead: tool calls попадают в checkpoint до исполнения.
                 state.pending_tool_calls = result.tool_calls
@@ -280,11 +319,10 @@ class AgentLoop:
             tool_result = await self._execute_tool(run, call)
             await self._flush_skill_loads(run)
             await self._flush_memory(run)
+            self._flush_plan_updates(state)
             rendered = self._render_tool_result(tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
-            await self._recorder.add_message(
-                run, "tool", {"tool_call_id": call.id, "content": rendered}
-            )
+            await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
             state.pending_tool_calls = state.pending_tool_calls[1:]
             await self._save_checkpoint(run, state)
 
@@ -300,8 +338,26 @@ class AgentLoop:
             change = self._memory_sink.pop(0)
             await self._recorder.enqueue_memory_change(run, change)
 
+    def _flush_plan_updates(self, state: LoopState) -> None:
+        """Применить последний update_plan к checkpoint-состоянию."""
+        while self._plan_update_sink:
+            update = self._plan_update_sink.pop(0)
+            raw_items = update.get("items", [])
+            if isinstance(raw_items, list):
+                state.plan = [
+                    {
+                        "id": str(item.get("id", "")),
+                        "text": str(item.get("text", "")),
+                        "status": str(item.get("status", "")),
+                    }
+                    for item in raw_items
+                    if isinstance(item, dict)
+                ]
+
     async def _save_checkpoint(self, run: Run, state: LoopState) -> None:
-        await self._recorder.save_checkpoint(run, iteration=state.iterations, state=state.to_dict())
+        await self._recorder.save_checkpoint(
+            run, iteration=state.iterations, state=self._redact_json(state.to_dict())
+        )
 
     async def _suspend(self, run: Run, state: LoopState, reason: str) -> RunOutcome:
         """Приостановка (ADR-0005): checkpoint уже сохранен, состояние — suspended."""
@@ -320,7 +376,7 @@ class AgentLoop:
         Total-счётчик итераций не сбрасывается: max_iterations остаётся жёстким
         стоп-краном поверх refuel.
         """
-        task_state = build_task_state(state.task, state.messages, state.iterations)
+        task_state = build_task_state(state.task, state.messages, state.iterations, plan=state.plan)
         (state.workspace / task_state_path()).write_text(task_state, encoding="utf-8")
         if self._workspace_flow is not None:
             # Коммит task_state.md — лучший-эффорт (не git-репозиторий, секрет-скан…).
@@ -353,8 +409,37 @@ class AgentLoop:
         state.refuel_pending = False
         state.iterations_since_refuel = 0
         for message in state.messages:
-            await self._recorder.add_message(run, message.role, {"content": message.content})
+            await self._record_message(run, message.role, {"content": message.content})
         await self._save_checkpoint(run, state)
+
+    def _redact_text(self, text: str) -> str:
+        return redact(text, self._secret_values)
+
+    def _redact_json(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._redact_text(value)
+        if isinstance(value, list):
+            return [self._redact_json(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._redact_json(item) for key, item in value.items()}
+        return value
+
+    def _remember_saved_content(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        if tool_name != "write_file":
+            return
+        content = arguments.get("content")
+        if isinstance(content, str) and content.strip():
+            self._saved_file_contents.append(content.strip())
+
+    def _sanitize_model_content(self, content: str) -> str:
+        content = self._redact_text(content)
+        for saved in sorted(set(self._saved_file_contents), key=len, reverse=True):
+            if len(saved) >= 8 and saved in content:
+                content = content.replace(saved, _SAVED_CONTENT_MARKER)
+        return content
+
+    async def _record_message(self, run: Run, role: str, content: dict[str, Any]) -> None:
+        await self._recorder.add_message(run, role, self._redact_json(content))
 
     async def _consume_approval(
         self,
@@ -379,7 +464,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=arguments,
+            arguments=self._redact_json(arguments),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -437,7 +522,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=arguments,
+            arguments=self._redact_json(arguments),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -475,8 +560,8 @@ class AgentLoop:
             payload: dict[str, Any] = {
                 "call_id": approval.call.id,
                 "tool": approval.call.name,
-                "arguments": approval.arguments,
-                "reason": approval.decision.reason,
+                "arguments": self._redact_json(approval.arguments),
+                "reason": self._redact_text(approval.decision.reason),
             }
             if approval.call.name == ASK_USER_TOOL_NAME:
                 payload["question"] = approval.arguments.get("question", "")
@@ -515,7 +600,10 @@ class AgentLoop:
             arguments = call.parse_arguments()
         except ValueError as exc:
             record = await self._recorder.start_tool_call(
-                run, tool_name=call.name, arguments={"_raw": call.arguments_json}, risk_level=None
+                run,
+                tool_name=call.name,
+                arguments={"_raw": self._redact_text(call.arguments_json)},
+                risk_level=None,
             )
             result = ToolResult.failure(str(exc))
             await self._recorder.finish_tool_call(record, ok=False, output="", error=result.error)
@@ -525,7 +613,7 @@ class AgentLoop:
             tool = self._registry.get(call.name)
         except UnknownToolError as exc:
             record = await self._recorder.start_tool_call(
-                run, tool_name=call.name, arguments=arguments, risk_level=None
+                run, tool_name=call.name, arguments=self._redact_json(arguments), risk_level=None
             )
             result = ToolResult.failure(str(exc))
             await self._recorder.finish_tool_call(record, ok=False, output="", error=result.error)
@@ -536,7 +624,7 @@ class AgentLoop:
             record = await self._recorder.start_tool_call(
                 run,
                 tool_name=call.name,
-                arguments=arguments,
+                arguments=self._redact_json(arguments),
                 risk_level=decision.risk_level.value,
                 policy_decision=decision.action.value,
             )
@@ -556,15 +644,17 @@ class AgentLoop:
             self._on_notify(call.name, decision.reason)
 
         if self._on_tool_call is not None:
-            self._on_tool_call(call.name, dict(arguments))
+            self._on_tool_call(call.name, self._redact_json(dict(arguments)))
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=arguments,
+            arguments=self._redact_json(arguments),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
         result = await tool.call(arguments)
+        if result.ok:
+            self._remember_saved_content(call.name, arguments)
         await self._recorder.finish_tool_call(
             record, ok=result.ok, output=result.output, error=result.error
         )

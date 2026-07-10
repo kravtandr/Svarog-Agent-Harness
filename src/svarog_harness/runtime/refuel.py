@@ -15,7 +15,13 @@ def task_state_path() -> str:
     return _TASK_STATE_FILE
 
 
-def build_task_state(task: str, messages: list[ChatMessage], iterations: int) -> str:
+def build_task_state(
+    task: str,
+    messages: list[ChatMessage],
+    iterations: int,
+    *,
+    plan: list[dict[str, str]] | None = None,
+) -> str:
     """Собрать task_state.md из хода run'а (§20)."""
     tool_calls: list[str] = []
     findings: list[str] = []
@@ -29,6 +35,7 @@ def build_task_state(task: str, messages: list[ChatMessage], iterations: int) ->
     used_tools = _counts(tool_calls)
     tool_lines = [f"- {name}: {count}" for name, count in used_tools] or ["- (нет вызовов)"]
     finding_lines = [f"- {f}" for f in findings[-5:]] or ["- (пока нет заметных выводов)"]
+    plan_lines = _plan_lines(plan or [])
 
     lines = [
         "# Task state",
@@ -45,6 +52,9 @@ def build_task_state(task: str, messages: list[ChatMessage], iterations: int) ->
         "## Important findings",
         *finding_lines,
         "",
+        "## Current plan",
+        *plan_lines,
+        "",
         "## Next recommended action",
         "Продолжить выполнение задачи с учётом уже сделанного выше.",
         "",
@@ -59,3 +69,12 @@ def _counts(names: list[str]) -> list[tuple[str, int]]:
     for name in names:
         counts[name] = counts.get(name, 0) + 1
     return sorted(counts.items())
+
+
+def _plan_lines(plan: list[dict[str, str]]) -> list[str]:
+    if not plan:
+        return ["- (план не использовался)"]
+    return [
+        f"- [{item.get('status', '')}] {item.get('id', '')}: {item.get('text', '')}"
+        for item in plan
+    ]
