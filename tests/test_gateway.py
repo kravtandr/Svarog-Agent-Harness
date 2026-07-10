@@ -73,6 +73,37 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
     monkeypatch.setattr(orchestrator, "default_provider", fake_default_provider)
 
 
+def _ask_turn(question: str = "какой цвет?") -> CompletionResult:
+    return CompletionResult(
+        content="",
+        tool_calls=(
+            ToolCallRequest(
+                id="q1", name="ask_user", arguments_json=f'{{"question": "{question}"}}'
+            ),
+        ),
+        usage=Usage(10, 5),
+        finish_reason="tool_calls",
+    )
+
+
+def _tool_turn() -> CompletionResult:
+    return CompletionResult(
+        content="",
+        tool_calls=(ToolCallRequest(id="t1", name="list_dir", arguments_json="{}"),),
+        usage=Usage(10, 5),
+        finish_reason="tool_calls",
+    )
+
+
+async def _wait_completed(service: GatewayService, run_id: str) -> str:
+    for _ in range(400):
+        detail = await service.get_run(run_id)
+        if detail.state in {"completed", "failed"}:
+            return detail.state
+        await asyncio.sleep(0.01)
+    return (await service.get_run(run_id)).state
+
+
 async def _drain(service: GatewayService, run_id: str) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     async for event in service.stream(run_id):
@@ -233,3 +264,106 @@ def test_api_create_run_returns_id(
     created = client.post("/runs", json={"task": "простая"})
     assert created.status_code == 201
     assert created.json()["run_id"]
+
+
+# --- ask_user через REST (§6.5) ---
+
+
+async def test_service_ask_user_then_answer(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_provider(
+        monkeypatch,
+        [_ask_turn("какой цвет?"), CompletionResult(content="учёл: синий", usage=Usage(10, 5))],
+    )
+    run_id = await service.create_run("спроси меня", None)
+    events = await _drain(service, run_id)
+    assert events[-1]["state"] == "waiting_approval"
+
+    pending = await service.list_pending_approvals()
+    assert pending[0].action_type == "user.question"
+    assert pending[0].payload["question"] == "какой цвет?"
+
+    resumed_run = await service.answer_question(pending[0].approval_id, answer="синий")
+    assert resumed_run == run_id
+    await service.resume_run(run_id)
+    assert await _wait_completed(service, run_id) == "completed"
+    await service.wait_for_background()
+
+    detail = await service.get_run(run_id)
+    assert any("ответ пользователя: синий" in m.get("content", "") for m in detail.messages)
+
+
+async def test_api_answer_endpoint(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_provider(monkeypatch, [_ask_turn(), CompletionResult(content="ок", usage=Usage(10, 5))])
+    run_id = await service.create_run("спроси", None)
+    await _drain(service, run_id)
+    pending = await service.list_pending_approvals()
+
+    client = TestClient(create_app(service))
+    assert client.post("/approvals/deadbeef/answer", json={"answer": "x"}).status_code == 404
+    resp = client.post(f"/approvals/{pending[0].approval_id}/answer", json={"answer": "зелёный"})
+    assert resp.status_code == 200
+    assert resp.json()["run_id"] == run_id
+
+
+# --- супервизор refuel (§6.10) ---
+
+
+def _write_refuel_config(ws: Path, tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        "runtime:\n  max_iterations: 5\n  refuel_after_iterations: 1\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+
+
+async def test_supervisor_resumes_refuel_suspended_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_refuel_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = GatewayService(load_config(project_dir=ws), ws)
+    _patch_provider(
+        monkeypatch,
+        [_tool_turn(), CompletionResult(content="завершено после refuel", usage=Usage(10, 5))],
+    )
+
+    run_id = await service.create_run("длинная задача", None)
+    events = await _drain(service, run_id)
+    assert events[-1]["state"] == "suspended"
+    assert "refuel" in (events[-1].get("error") or "")
+
+    # Супервизор находит refuel-suspended run и сам его поднимает.
+    resumed = await service.supervise_once()
+    assert run_id in resumed
+    assert await _wait_completed(service, run_id) == "completed"
+    await service.wait_for_background()
+
+
+async def test_supervisor_ignores_budget_suspend(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Бюджетная/max-остановка требует человека — супервизор её не трогает.
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "5")
+    service2 = GatewayService(load_config(project_dir=service.workspace), service.workspace)
+    _patch_provider(monkeypatch, [_tool_turn(), _tool_turn()])
+    run_id = await service2.create_run("зациклится", None)
+    events = await _drain(service2, run_id)
+    assert events[-1]["state"] == "suspended"
+    assert "лимит итераций" in (events[-1].get("error") or "")
+
+    assert await service2.supervise_once() == []  # не подхвачен

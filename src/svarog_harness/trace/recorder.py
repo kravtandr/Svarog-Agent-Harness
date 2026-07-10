@@ -284,6 +284,29 @@ class TraceRecorder:
             )
         return run, checkpoint.state
 
+    async def find_refuel_suspended_runs(self, limit: int = 50) -> list[Run]:
+        """Suspended runs, приостановленные refuel (§6.10) — для авто-супервизора.
+
+        Refuel-приостановку отличаем по последнему checkpoint'у (`refuel_pending`),
+        а не по тексту ошибки: budget/max/crash-suspend его не выставляют, поэтому
+        супервизор не трогает остановки, требующие человека.
+        """
+        result = await self._db.execute(
+            select(Run).where(Run.state == RunState.SUSPENDED).order_by(Run.started_at).limit(limit)
+        )
+        refuel_suspended: list[Run] = []
+        for run in result.scalars():
+            checkpoint = await self._db.execute(
+                select(Checkpoint)
+                .where(Checkpoint.run_id == run.id)
+                .order_by(Checkpoint.iteration.desc(), Checkpoint.created_at.desc())
+                .limit(1)
+            )
+            latest = checkpoint.scalar_one_or_none()
+            if latest is not None and latest.state.get("refuel_pending"):
+                refuel_suspended.append(run)
+        return refuel_suspended
+
     async def recover_interrupted_runs(self) -> list[Run]:
         """Runs, оставшиеся в running после падения процесса, → suspended.
 

@@ -5,12 +5,15 @@ GatewayService, сериализует ответ. Approval асинхронны
 фиксирует его и запускает возобновление run'а в фоне (ADR-0005).
 """
 
-from collections.abc import Callable
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from svarog_harness.gateway.models import (
+    AnswerRequest,
     ApprovalDecisionRequest,
     ApprovalView,
     CreateRunRequest,
@@ -38,7 +41,23 @@ def _auth_dependency(token: str | None) -> Callable[[str | None], None]:
 
 
 def create_app(service: GatewayService, *, bearer_token: str | None = None) -> FastAPI:
-    app = FastAPI(title="Svarog Gateway", version="0.1.0")
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Супервизор refuel (§6.10): авто-поднятие refuel-suspended runs, пока
+        # gateway жив. Запускается только при старте приложения (lifespan), а не
+        # при простом создании TestClient без контекст-менеджера.
+        task: asyncio.Task[None] | None = None
+        if service.cfg.supervisor.auto_resume_refuel:
+            task = asyncio.ensure_future(service.run_supervisor())
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    app = FastAPI(title="Svarog Gateway", version="0.1.0", lifespan=lifespan)
     auth = [Depends(_auth_dependency(bearer_token))] if bearer_token is not None else []
 
     @app.get("/healthz")
@@ -96,6 +115,16 @@ def create_app(service: GatewayService, *, bearer_token: str | None = None) -> F
         except ApprovalNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         # Решение принято — возобновляем run в фоне (ADR-0005: approval асинхронный).
+        await service.resume_run(run_id)
+        return RunRef(run_id=run_id, state="running")
+
+    @app.post("/approvals/{approval_id}/answer", response_model=RunRef, dependencies=auth)
+    async def answer_question(approval_id: str, req: AnswerRequest) -> RunRef:
+        try:
+            run_id = await service.answer_question(approval_id, answer=req.answer)
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        # Ответ на ask_user записан — возобновляем run (§6.5, ADR-0005).
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
 

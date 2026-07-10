@@ -1203,18 +1203,34 @@ def telegram(
         TelegramBot,
     )
 
+    service = GatewayService(cfg, workspace)
     bot = TelegramBot(
-        GatewayService(cfg, workspace),
+        service,
         HttpxTelegramTransport(token),
         allowed_users=set(tg.allowed_users),
         poll_timeout=tg.poll_timeout_sec,
     )
+    supervised = cfg.supervisor.auto_resume_refuel
     console.print(
         f"[green]Svarog Telegram bot[/green] | workspace: {workspace} | "
-        f"allowlist: {len(tg.allowed_users)} user(s)\n[dim]Ctrl-C для остановки[/dim]"
+        f"allowlist: {len(tg.allowed_users)} user(s)"
+        + (" | refuel-supervisor on" if supervised else "")
+        + "\n[dim]Ctrl-C для остановки[/dim]"
     )
+
+    async def run_all() -> None:
+        # Бот и супервизор refuel (§6.10) живут параллельно в одном процессе.
+        tasks = [asyncio.ensure_future(bot.run_forever())]
+        if supervised:
+            tasks.append(asyncio.ensure_future(service.run_supervisor()))
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(bot.run_forever())
+        asyncio.run(run_all())
 
 
 mcp_app = typer.Typer(help="MCP-серверы: discovery инструментов (§9).", no_args_is_help=True)

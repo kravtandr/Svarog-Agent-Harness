@@ -89,6 +89,19 @@ def _message(user_id: int, text: str) -> dict[str, Any]:
     return {"message": {"chat": {"id": 100}, "from": {"id": user_id}, "text": text}}
 
 
+def _ask_turn(question: str = "какой цвет?") -> CompletionResult:
+    return CompletionResult(
+        content="",
+        tool_calls=(
+            ToolCallRequest(
+                id="q1", name="ask_user", arguments_json=f'{{"question": "{question}"}}'
+            ),
+        ),
+        usage=Usage(10, 5),
+        finish_reason="tool_calls",
+    )
+
+
 async def test_unauthorized_user_denied(
     service: GatewayService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -171,3 +184,40 @@ async def test_approval_buttons_then_callback_resumes(
     )
     assert tx.answered == ["cb1"]
     assert any("Продолжил после approval" in m["text"] for m in tx.sent)
+
+
+async def test_ask_user_question_then_text_answer(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_provider(
+        monkeypatch,
+        [_ask_turn("какой цвет?"), CompletionResult(content="учёл: синий", usage=Usage(10, 5))],
+    )
+    tx = FakeTransport()
+    bot = TelegramBot(service, tx, allowed_users={42})
+    await bot.handle_update(_message(42, "спроси меня"))
+
+    question_msg = tx.sent[-1]
+    assert "Вопрос" in question_msg["text"]
+    assert "какой цвет?" in question_msg["text"]
+    assert question_msg["reply_markup"] is None  # вопрос — свободный текст, не кнопки
+
+    # Следующее сообщение пользователя — ответ на вопрос.
+    await bot.handle_update(_message(42, "синий"))
+    assert any("учёл: синий" in m["text"] for m in tx.sent)
+
+
+async def test_ask_user_skip_proceeds(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_provider(
+        monkeypatch,
+        [_ask_turn(), CompletionResult(content="продолжил сам", usage=Usage(10, 5))],
+    )
+    tx = FakeTransport()
+    bot = TelegramBot(service, tx, allowed_users={42})
+    await bot.handle_update(_message(42, "спроси"))
+    await bot.handle_update(_message(42, "/skip"))
+
+    assert any("без ответа" in m["text"] for m in tx.sent)
+    assert any("продолжил сам" in m["text"] for m in tx.sent)

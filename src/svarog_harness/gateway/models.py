@@ -60,3 +60,8 @@ class ApprovalView(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     approved: bool
     reason: str | None = None
+
+
+class AnswerRequest(BaseModel):
+    # Ответ человека на вопрос ask_user; пусто — продолжить без ответа (§6.5).
+    answer: str = ""

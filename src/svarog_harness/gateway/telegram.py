@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 
+from svarog_harness.gateway.models import ApprovalView
 from svarog_harness.gateway.service import GatewayService
 
 _API = "https://api.telegram.org"
@@ -87,6 +88,9 @@ class TelegramBot:
         self._tx = transport
         self._allowed = allowed_users
         self._poll_timeout = poll_timeout
+        # Ожидающий ответа вопрос ask_user на чат (§6.5): следующее сообщение
+        # пользователя в этот чат трактуется как ответ.
+        self._pending: dict[int, str] = {}
 
     async def run_forever(self, *, should_stop: Callable[[], bool] | None = None) -> None:
         """Цикл long-polling; should_stop — точка останова (для тестов/сигналов)."""
@@ -111,6 +115,17 @@ class TelegramBot:
             await self._tx.send_message(chat_id, "⛔ Доступ запрещён.")
             return
         if not text:
+            return
+        # Ответ на ожидающий вопрос ask_user приоритетнее новой задачи (§6.5).
+        if chat_id in self._pending:
+            approval_id = self._pending.pop(chat_id)
+            answer = "" if text == "/skip" else text
+            run_id = await self._service.answer_question(approval_id, answer=answer)
+            await self._tx.send_message(
+                chat_id, "✍️ Ответ принят, продолжаю." if answer else "⏭ Продолжаю без ответа."
+            )
+            await self._service.resume_run(run_id)
+            await self._stream_to_chat(chat_id, run_id)
             return
         if text.startswith("/"):
             await self._tx.send_message(
@@ -164,34 +179,49 @@ class TelegramBot:
             answer = str(event.get("final_answer") or "(готово)")
             await self._tx.send_message(chat_id, _clip(answer + used))
         elif state == "waiting_approval":
-            await self._send_approval_request(chat_id, run_id)
+            await self._send_pending_for_run(chat_id, run_id)
         else:
             error = event.get("error") or state
             await self._tx.send_message(chat_id, f"⚠️ Run {state}: {error}")
 
-    async def _send_approval_request(self, chat_id: int, run_id: str) -> None:
+    async def _send_pending_for_run(self, chat_id: int, run_id: str) -> None:
+        """Показать ожидающие approval/вопросы run'а нужным UI (§6.5, §12)."""
         for approval in await self._service.list_pending_approvals():
             if approval.run_id != run_id:
                 continue
-            payload = approval.payload
-            action = payload.get("tool") or approval.action_type
-            args = payload.get("arguments")
-            reason = payload.get("reason", "")
-            # Approval показывает фактическое действие, не пересказ агента (§12).
-            body = f"🔐 Требуется подтверждение\nДействие: {action}"
-            if args:
-                body += f"\nАргументы: {args}"
-            if reason:
-                body += f"\nПричина: {reason}"
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "✅ Одобрить", "callback_data": f"approve:{approval.approval_id}"},
-                        {"text": "🚫 Отклонить", "callback_data": f"deny:{approval.approval_id}"},
-                    ]
+            if approval.action_type == "user.question":
+                await self._send_question(chat_id, approval)
+            else:
+                await self._send_approval(chat_id, approval)
+
+    async def _send_question(self, chat_id: int, approval: ApprovalView) -> None:
+        payload = approval.payload
+        question = payload.get("question") or payload.get("reason") or "нужен ваш ответ"
+        # Следующее сообщение в этот чат станет ответом (§6.5).
+        self._pending[chat_id] = approval.approval_id
+        body = f"❓ Вопрос\n{question}\n\nОтветьте сообщением (или /skip — продолжить без ответа)."
+        await self._tx.send_message(chat_id, _clip(body))
+
+    async def _send_approval(self, chat_id: int, approval: ApprovalView) -> None:
+        payload = approval.payload
+        action = payload.get("tool") or approval.action_type
+        args = payload.get("arguments")
+        reason = payload.get("reason", "")
+        # Approval показывает фактическое действие, не пересказ агента (§12).
+        body = f"🔐 Требуется подтверждение\nДействие: {action}"
+        if args:
+            body += f"\nАргументы: {args}"
+        if reason:
+            body += f"\nПричина: {reason}"
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Одобрить", "callback_data": f"approve:{approval.approval_id}"},
+                    {"text": "🚫 Отклонить", "callback_data": f"deny:{approval.approval_id}"},
                 ]
-            }
-            await self._tx.send_message(chat_id, _clip(body), reply_markup=keyboard)
+            ]
+        }
+        await self._tx.send_message(chat_id, _clip(body), reply_markup=keyboard)
 
     def _authorized(self, user_id: int) -> bool:
         return user_id in self._allowed

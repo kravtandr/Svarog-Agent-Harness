@@ -181,6 +181,22 @@ class GatewayConfig(StrictModel):
     token_ref: str | None = None
 
 
+class SupervisorConfig(StrictModel):
+    """Авто-поднятие refuel-suspended runs в долгоживущих процессах (§6.10).
+
+    Refuel приостанавливает run, освобождая процесс/sandbox (ADR-0005). В
+    режиме serve/telegram супервизор сам поднимает такие run'ы, чтобы
+    автономная задача продолжалась без ручного `svarog resume`. budget/max/
+    approval-остановки НЕ трогает — они требуют человека.
+    """
+
+    auto_resume_refuel: bool = True
+    interval_sec: int = Field(default=10, gt=0)
+    # Предохранитель от петли: max_iterations — естественный потолок числа
+    # refuel-циклов, это верхняя граница авто-resume'ов на один run поверх него.
+    max_auto_resumes: int = Field(default=100, gt=0)
+
+
 class PolicyProfile(StrictModel):
     require_approval: list[str] = Field(default_factory=list)
     notify: list[str] = Field(default_factory=list)
@@ -217,6 +233,7 @@ class SvarogConfig(BaseSettings):
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 

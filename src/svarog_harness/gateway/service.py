@@ -8,6 +8,7 @@ run в фоне. Источник истины по trace — SQLite; событ
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,10 @@ class GatewayService:
         self._runner = TaskRunner(self.cfg, self.workspace)
         # Держим ссылки на фоновые задачи, чтобы их не собрал GC (RUF006).
         self._tasks: set[asyncio.Task[None]] = set()
+        # Супервизор refuel (§6.10): счётчик авто-resume'ов на run (предохранитель)
+        # и множество run'ов с уже запущенным авто-возобновлением (без гонки).
+        self._auto_resumes: dict[str, int] = {}
+        self._inflight: set[str] = set()
 
     # --- запуск и возобновление runs -------------------------------------
 
@@ -154,6 +159,11 @@ class GatewayService:
         """Асинхронный итератор событий run'а (история + живые)."""
         return self.events.stream(run_id)
 
+    async def wait_for_background(self) -> None:
+        """Дождаться завершения фоновых run/resume-задач (graceful shutdown, тесты)."""
+        while self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
     # --- чтение trace -----------------------------------------------------
 
     async def _read[T](self, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
@@ -213,6 +223,66 @@ class GatewayService:
             return approval.run_id
 
         return await self._read(action)
+
+    async def answer_question(self, approval_id: str, *, answer: str) -> str:
+        """Записать текстовый ответ на ask_user; вернуть run_id (§6.5)."""
+
+        async def action(db: AsyncSession) -> str:
+            recorder = TraceRecorder(db)
+            approval = await recorder.find_approval_by_prefix(approval_id)
+            await recorder.answer_question(approval, answer=answer, answered_by="api")
+            return approval.run_id
+
+        return await self._read(action)
+
+    # --- супервизор refuel (§6.10, ADR-0005) ------------------------------
+
+    async def supervise_once(self) -> list[str]:
+        """Один проход: поднять refuel-suspended runs. Возвращает run_id'ы, для
+        которых запущено авто-возобновление (для тестов и наблюдаемости)."""
+        sup = self.cfg.supervisor
+        if not sup.auto_resume_refuel:
+            return []
+
+        async def fetch(db: AsyncSession) -> list[Run]:
+            return await TraceRecorder(db).find_refuel_suspended_runs()
+
+        resumed: list[str] = []
+        for run in await self._read(fetch):
+            if run.id in self._inflight:
+                continue  # авто-resume уже в полёте — не дублируем
+            if self._auto_resumes.get(run.id, 0) >= sup.max_auto_resumes:
+                continue  # предохранитель от петли исчерпан
+            self._auto_resumes[run.id] = self._auto_resumes.get(run.id, 0) + 1
+            self._spawn_supervised_resume(run.id)
+            resumed.append(run.id)
+        return resumed
+
+    def _spawn_supervised_resume(self, run_id: str) -> None:
+        self._inflight.add(run_id)
+        self.events.reset(run_id)
+
+        async def wrapped() -> None:
+            try:
+                await self._resume_bg(run_id)
+            finally:
+                self._inflight.discard(run_id)
+
+        self._spawn(wrapped())
+
+    async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
+        """Периодически поднимать refuel-suspended runs (§6.10).
+
+        Живёт в долгоживущих процессах (serve/telegram); останавливается по
+        should_stop или отмене задачи (lifespan/сигнал). Ошибка прохода не рвёт
+        цикл. Естественный потолок числа возобновлений — max_iterations run'а,
+        поверх него — supervisor.max_auto_resumes.
+        """
+        interval = self.cfg.supervisor.interval_sec
+        while should_stop is None or not should_stop():
+            with contextlib.suppress(Exception):
+                await self.supervise_once()
+            await asyncio.sleep(interval)
 
     def list_skills(self) -> list[SkillCard]:
         scan = scan_skills(skills_dirs(self.cfg, self.workspace))

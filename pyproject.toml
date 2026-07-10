@@ -115,3 +115,10 @@ ignore_errors = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # Фоновый поток соединения aiosqlite может доубираться после закрытия
+    # per-test event loop pytest-asyncio (тесты gateway с фоновыми run/resume).
+    # Артефакт teardown'а тестовой среды, а не рантайма — в serve/telegram loop
+    # живёт постоянно. Фильтр узкий: только эта нить-исключение.
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
