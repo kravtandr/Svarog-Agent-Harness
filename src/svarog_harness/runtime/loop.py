@@ -132,6 +132,7 @@ class AgentLoop:
         workspace: Path,
         *,
         model_name: str,
+        config_hash: str | None = None,
         skill_cards: str = "",
         memory: str = "",
         skill_load_sink: list[tuple[str, str | None]] | None = None,
@@ -151,6 +152,7 @@ class AgentLoop:
         self._policy = policy
         self._workspace = workspace
         self._model_name = model_name
+        self._config_hash = config_hash
         self._skill_cards = skill_cards
         self._memory = memory
         self._workspace_flow = workspace_flow
@@ -188,6 +190,8 @@ class AgentLoop:
             autonomy=autonomy.value,
             model=self._model_name,
             session_id=session_id,
+            config_hash=self._config_hash,
+            workspace=str(self._workspace),
         )
         if self._on_run_started is not None:
             self._on_run_started(run)

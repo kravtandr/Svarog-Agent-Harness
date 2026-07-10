@@ -98,6 +98,44 @@ def test_validate_missing_skill_md() -> None:
     assert errors == ["proposal должен содержать SKILL.md"]
 
 
+# --- 0.1 (ADR-0015): path-traversal в proposal → произвольная запись на хост --
+
+
+def test_validate_rejects_traversal_in_file_key() -> None:
+    errors = validate_proposal(
+        _request(files={"SKILL.md": _VALID_SKILL, "../../../.ssh/authorized_keys": "ssh-rsa ..."})
+    )
+    assert any("выходит за пределы каталога" in e for e in errors)
+
+
+def test_validate_rejects_absolute_file_key() -> None:
+    errors = validate_proposal(
+        _request(files={"SKILL.md": _VALID_SKILL, "/etc/cron.d/evil": "* * * * * root id"})
+    )
+    assert any("выходит за пределы каталога" in e for e in errors)
+
+
+@pytest.mark.parametrize("bad_name", ["../..", "../evil", ".hidden", "a/b", "evil/../.."])
+def test_validate_rejects_traversal_in_skill_name(bad_name: str) -> None:
+    errors = validate_proposal(_request(skill_name=bad_name))
+    assert any("недопустимое имя скилла" in e for e in errors)
+
+
+async def test_persist_traversal_does_not_escape_repo(db: AsyncSession, tmp_path: Path) -> None:
+    """Reproducer: ключ files с `..` не пишет за пределы skills-репозитория."""
+    skills_dir = tmp_path / "skills"
+    await _init_skills_repo(skills_dir)
+    outside = tmp_path / "victim.txt"
+    manager = SkillProposalManager(db, skills_dir)
+    proposal = await manager.persist(
+        _request(files={"SKILL.md": _VALID_SKILL, "../../victim.txt": "pwned"})
+    )
+    # Заявка отклонена валидацией, ветка не создана, файл вне репо не появился.
+    assert proposal.status is SkillProposalStatus.FAILED
+    assert not outside.exists()
+    assert not (tmp_path / "victim.txt").exists()
+
+
 # --- менеджер: persist / merge / reject ---
 
 

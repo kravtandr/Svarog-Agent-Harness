@@ -105,14 +105,14 @@ async def test_relative_escape_rejected(workspace: Path, path: str) -> None:
         result = await tool.call(args)
         assert not result.ok
         assert result.error is not None
-        assert "за пределы workspace" in result.error
+        assert "за пределы" in result.error
 
 
 async def test_absolute_path_rejected(workspace: Path) -> None:
     result = await ReadFileTool(workspace).call({"path": str(workspace / "README.md")})
     assert not result.ok
     assert result.error is not None
-    assert "абсолютные пути запрещены" in result.error
+    assert "абсолютный путь запрещён" in result.error
 
 
 async def test_symlink_escape_rejected(
@@ -124,9 +124,49 @@ async def test_symlink_escape_rejected(
     result = await ReadFileTool(workspace).call({"path": "link.txt"})
     assert not result.ok
     assert result.error is not None
-    assert "за пределы workspace" in result.error
+    assert "за пределы" in result.error
 
 
 def test_file_tools_factory(workspace: Path) -> None:
     names = {tool.name for tool in file_tools(workspace)}
     assert names == {"read_file", "write_file", "edit_file", "list_dir", "search_files"}
+
+
+# --- 0.2 (ADR-0015): запрет записи в управляющее дерево .git/.svarog ----------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [".git/hooks/pre-commit", ".git/config", ".svarog/svarog.db", ".svarog/tool-results/x.txt"],
+)
+async def test_write_into_control_tree_rejected(workspace: Path, path: str) -> None:
+    (workspace / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
+    result = await WriteFileTool(workspace).call({"path": path, "content": "#!/bin/sh\nid\n"})
+    assert not result.ok
+    assert result.error is not None
+    assert "управляющий каталог" in result.error
+    # host-git hook НЕ посажен: запись отвергнута до касания диска.
+    assert not (workspace / path).exists()
+
+
+async def test_edit_into_control_tree_rejected(workspace: Path) -> None:
+    hook = workspace / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    result = await EditFileTool(workspace).call(
+        {"path": ".git/hooks/pre-commit", "old_string": "true", "new_string": "id"}
+    )
+    assert not result.ok
+    assert result.error is not None
+    assert "управляющий каталог" in result.error
+    assert "true" in hook.read_text(encoding="utf-8")  # не изменён
+
+
+async def test_read_from_control_tree_allowed(workspace: Path) -> None:
+    """Чтение из .svarog не запрещено — spill-файлы (1.2) достаются read_file."""
+    spill = workspace / ".svarog" / "tool-results" / "run" / "call.txt"
+    spill.parent.mkdir(parents=True, exist_ok=True)
+    spill.write_text("полный вывод", encoding="utf-8")
+    result = await ReadFileTool(workspace).call({"path": ".svarog/tool-results/run/call.txt"})
+    assert result.ok
+    assert "полный вывод" in result.output

@@ -54,8 +54,12 @@ async def test_provision_creates_home_and_token(tmp_path: Path) -> None:
     assert result.home == home
     for sub in ("memory", "skills", "workspaces", "policies"):
         assert (home / sub).is_dir()
-    assert (home / "memory" / ".git").is_dir()
-    assert (home / "skills" / ".git").is_dir()
+    # separate-git-dir (ADR-0015 §0.2): в дереве репозитория — файл-указатель
+    # `.git`, объекты git вынесены в `<home>/.gitdirs/<repo>` вне дерева.
+    assert (home / "memory" / ".git").is_file()
+    assert (home / "skills" / ".git").is_file()
+    assert (home / ".gitdirs" / "memory").is_dir()
+    assert (home / ".gitdirs" / "skills").is_dir()
     assert (home / "svarog.db").is_file()
     # secrets.json 0600 с токеном
     secrets_file = home / "secrets.json"

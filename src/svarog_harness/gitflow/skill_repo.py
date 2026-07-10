@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from svarog_harness.gitflow.commit_gate import commit_guarded
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.paths import safe_join
 from svarog_harness.skills.proposal import SkillProposalRequest
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -50,8 +51,12 @@ class SkillRepoFlow:
         branch = proposal_branch_name(request.skill_name)
         await self._repo.create_branch(branch)
         try:
+            # Defense-in-depth (ADR-0015 §0.1): валидатор и writer не доверяют
+            # друг другу — safe_join повторно запирает и skill_name, и ключ files
+            # внутри repo. Отказ = исключение, proposal не материализуется.
+            skill_root = safe_join(self._repo.path, request.skill_name)
             for rel, content in request.files.items():
-                target = self._repo.path / request.skill_name / rel
+                target = safe_join(skill_root, rel)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
             await self._repo.add_all()

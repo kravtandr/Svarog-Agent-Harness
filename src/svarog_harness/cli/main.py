@@ -19,9 +19,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
-from svarog_harness.config.paths import memory_dir, skills_dirs
+from svarog_harness.config.paths import WorkspaceLayoutError, memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SecretsConfig, SvarogConfig
-from svarog_harness.gitflow import GitError, GitRepo, WorkspaceFlow, WorkspacePrep
+from svarog_harness.gitflow import (
+    GitError,
+    GitRepo,
+    WorkspaceFlow,
+    WorkspacePrep,
+    separate_gitdir_for,
+)
 from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
@@ -30,7 +36,7 @@ from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.loop import RunOutcome
-from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+from svarog_harness.runtime.orchestrator import ConfigDriftError, RunHooks, TaskRunner
 from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import (
     DEFAULT_API_KEY_REF,
@@ -67,7 +73,7 @@ from svarog_harness.trace.lookup import (
     RunNotFoundError,
     RunNotResumableError,
 )
-from svarog_harness.trace.recorder import TraceRecorder
+from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import (
     fetch_run,
     fetch_runs,
@@ -195,7 +201,9 @@ def init(
     async def init_git_subrepo(path: Path, message: str) -> None:
         repo = GitRepo(path)
         if not await repo.is_repo():
-            await repo.init()
+            # separate-git-dir по умолчанию (ADR-0015 §0.2): объекты git —
+            # вне дерева репозитория, недостижимы из-под агента.
+            await repo.init(separate_git_dir=separate_gitdir_for(path))
             await repo.ensure_identity()
             await repo.add_all()
             with contextlib.suppress(GitError):
@@ -383,6 +391,12 @@ def run(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    except WorkspaceLayoutError as exc:
+        console.print(f"[red]ошибка раскладки workspace:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except WorkspaceBusyError as exc:
+        console.print(f"[red]workspace занят:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     except PolicyRulesError as exc:
         console.print(f"[red]ошибка policy-правил:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -521,6 +535,12 @@ def resume(
     cfg = _load_config_or_exit()
     try:
         outcome = asyncio.run(_resume_task(cfg, run_id))
+    except ConfigDriftError as exc:
+        console.print(f"[red]resume отклонён (изменился security-конфиг):[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except WorkspaceBusyError as exc:
+        console.print(f"[red]workspace занят:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     except (RunNotFoundError, RunNotResumableError, ConfigError, PolicyRulesError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None

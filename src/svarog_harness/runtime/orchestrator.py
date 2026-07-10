@@ -16,10 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.paths import (
+    assert_workspace_isolated,
     clamp_by_role,
     first_existing_skills_dir,
     memory_dir,
     skills_dirs,
+    workspace_layout_violations,
 )
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gitflow import GitRepo, SecretScanBlockedError, WorkspaceFlow, WorkspacePrep
@@ -28,6 +30,7 @@ from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
+from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import (
     ExecutionEnvironment,
@@ -77,6 +80,29 @@ class RunHooks:
     on_commit_blocked: Callable[[str], None] | None = None
     on_memory: Callable[[str | None, str | None], None] | None = None
     on_proposal: Callable[[SkillProposal], None] | None = None
+
+
+class ConfigDriftError(Exception):
+    """Security-конфиг run'а изменился между стартом и resume (ADR-0015 §0.4)."""
+
+
+def _assert_config_unchanged(run: Run, cfg: SvarogConfig, workspace: Path) -> None:
+    """Fail-closed при расхождении текущего конфига со снимком старта run'а.
+
+    Снимок отсутствует (run стартовал до §0.4) — пропускаем: нечего сверять,
+    но и не выдумываем расхождение. Иначе сверяем хеши: несовпадение отклоняет
+    resume, чтобы run не продолжился под подменённым провайдером/MCP/policy.
+    """
+    stored = (run.meta or {}).get(CONFIG_HASH_META_KEY)
+    if stored is None:
+        return
+    current = config_digest(cfg, workspace)
+    if current != stored:
+        raise ConfigDriftError(
+            f"security-конфиг run {run.id[:8]} изменился с момента старта "
+            f"(провайдер/MCP/policy/secrets-refs): resume отклонён (fail-closed, §0.4). "
+            f"Верните исходный конфиг workspace'а или запустите новый run"
+        )
 
 
 async def _close_backends(backends: list[MCPBackend]) -> None:
@@ -142,6 +168,19 @@ class TaskRunner:
             raise SandboxError(
                 "docker/podman недоступен, а sandbox.type=docker (fail-closed): "
                 "запуск отклонён без отката на local-trusted (ADR-0013)"
+            )
+
+    def _warn_layout_tradeoff(self, hooks: RunHooks) -> None:
+        """Local-trusted: пересечение workspace с control-plane не блокирует run
+        (документированный trade-off §0.3/§17), но громко предупреждаем."""
+        if self._cfg.sandbox.type != "local-trusted" or hooks.on_notify is None:
+            return
+        violations = workspace_layout_violations(self._cfg, self._workspace)
+        if violations:
+            hooks.on_notify(
+                "workspace.layout",
+                "control-plane внутри workspace (local-trusted trade-off, §0.3): "
+                + "; ".join(violations),
             )
 
     def build_environment(self) -> ExecutionEnvironment:
@@ -238,6 +277,7 @@ class TaskRunner:
             policy,
             workspace,
             model_name=cfg.models.providers[cfg.models.default].model,
+            config_hash=config_digest(cfg, workspace),  # снимок security-конфига (§0.4)
             skill_cards=skill_cards(active_skills),
             memory=memory_text,
             skill_load_sink=skill_load_sink,
@@ -306,6 +346,8 @@ class TaskRunner:
     async def run_once(self, task: str, autonomy: AutonomyMode, *, hooks: RunHooks) -> RunOutcome:
         """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit."""
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
+        assert_workspace_isolated(self._cfg, self._workspace)  # раскладка (ADR-0015 §0.3)
+        self._warn_layout_tradeoff(hooks)
         flow = WorkspaceFlow(GitRepo(self._workspace), self._cfg.git)
         prep = await flow.start(task)
         if hooks.on_workspace_prep is not None:
@@ -320,6 +362,9 @@ class TaskRunner:
             async def action(db: AsyncSession) -> RunOutcome:
                 recorder = TraceRecorder(db)
                 await self.recover(recorder, hooks)
+                # Per-workspace lease (ADR-0015 §0.5): второй параллельный run на
+                # том же рабочем дереве отклоняется, пока первый жив (heartbeat).
+                await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
                 loop = self.build_loop(
@@ -370,6 +415,14 @@ class TaskRunner:
             # говорит local-trusted. Для superuser (CLI-resume) — no-op.
             runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
             runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
+            assert_workspace_isolated(runner._cfg, workspace)  # раскладка (ADR-0015 §0.3)
+            # Trust gate (ADR-0015 §0.4): security-конфиг заморожен снимком на
+            # старте. Расхождение с текущим yaml → fail-closed: resume отклонён,
+            # а не тихо исполнен под подменённым провайдером/MCP/policy.
+            _assert_config_unchanged(run, runner._cfg, workspace)
+            # Per-workspace lease (ADR-0015 §0.5): не поднимать resume, если на том
+            # же workspace уже крутится другой живой run.
+            await recorder.acquire_workspace_lease(str(workspace))
             backends = await connect_mcp_servers(runner._cfg.mcp, runner._host_store)
             environment = runner.build_environment()
             await environment.start()

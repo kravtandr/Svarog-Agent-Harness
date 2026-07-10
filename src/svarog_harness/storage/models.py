@@ -144,6 +144,11 @@ class Run(TimestampedBase):
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
+    # Per-workspace lease (ADR-0015 §0.5): рабочее дерево run'а + heartbeat.
+    # Живой run бьётся heartbeat'ом; gateway отказывает во втором run'е на том
+    # же workspace, а recovery приостанавливает только протухшие RUNNING.
+    workspace: Mapped[str | None] = mapped_column(String(1024), index=True)
+    heartbeat_at: Mapped[datetime | None]
     meta: Mapped[dict[str, Any]] = mapped_column(default=dict)
 
     session: Mapped[Session] = relationship(back_populates="runs")

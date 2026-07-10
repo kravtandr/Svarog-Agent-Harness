@@ -12,11 +12,14 @@ from svarog_harness.config.loader import load_config
 from svarog_harness.config.paths import (
     ResolvedTenant,
     TenantConfinementError,
+    WorkspaceLayoutError,
     assert_confined,
+    assert_workspace_isolated,
     clamp_by_role,
     resolve_local_tenant,
     resolve_tenant_config,
     tenant_home,
+    workspace_layout_violations,
 )
 from svarog_harness.config.schema import SvarogConfig, TenantRole
 from svarog_harness.runtime.orchestrator import TaskRunner
@@ -86,6 +89,42 @@ def test_mount_scope_owned_paths_are_outside_workspace(tmp_path: Path) -> None:
     for sensitive in (r.cfg.storage.db_path, r.cfg.secrets.path, r.cfg.memory.path):
         assert sensitive is not None
         assert not sensitive.is_relative_to(ws)
+
+
+# --- 0.3 (ADR-0015): раскладка workspace vs control-plane ---------------------
+
+
+def test_resolved_tenant_layout_passes_isolation(tmp_path: Path) -> None:
+    base = _base_cfg(tmp_path, "memory:\n  path: ~/.svarog/memory\n")
+    r = resolve_tenant_config(
+        base, tenant_id="a", home=tmp_path / "t" / "a", role=TenantRole.STANDARD
+    )
+    # docker-раскладка тенанта disjoint — check не падает.
+    assert workspace_layout_violations(r.cfg, r.workspace) == []
+    assert_workspace_isolated(r.cfg, r.workspace)
+
+
+def test_docker_control_plane_inside_workspace_rejected(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    base = _base_cfg(
+        tmp_path,
+        "sandbox:\n  type: docker\n"
+        f"memory:\n  path: {ws / 'memory'}\n"
+        f"storage:\n  db_path: {ws / '.state' / 'svarog.db'}\n",
+    )
+    with pytest.raises(WorkspaceLayoutError):
+        assert_workspace_isolated(base, ws)
+
+
+def test_local_trusted_overlap_is_documented_tradeoff(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    base = _base_cfg(
+        tmp_path,
+        f"sandbox:\n  type: local-trusted\nmemory:\n  path: {ws / 'memory'}\n",
+    )
+    # Пересечение есть, но в local-trusted оно принято как trade-off — не падаем.
+    assert workspace_layout_violations(base, ws)
+    assert_workspace_isolated(base, ws)
 
 
 # --- кламп роли ---------------------------------------------------------------
