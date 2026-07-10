@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -24,6 +24,7 @@ from svarog_harness.config.schema import SvarogConfig
 from svarog_harness.gateway.service import GatewayService
 from svarog_harness.tenant import TenantRegistry
 from svarog_harness.tenant.models import TenantContext
+from svarog_harness.tenant.quota import check_quota, effective_quota
 
 _BEARER_PREFIX = "Bearer "
 
@@ -100,8 +101,20 @@ class TenantHub:
                 on_run_created=lambda run_id: self.registry.record_run(run_id, tenant_id),
                 role=ctx.role,
             )
+            svc.quota_guard = self._quota_guard_for(tenant_id, svc)
             self._services[ctx.tenant_id] = svc
         return svc
+
+    def _quota_guard_for(
+        self, tenant_id: str, svc: GatewayService
+    ) -> Callable[[], Awaitable[None]]:
+        async def guard() -> None:
+            quota = effective_quota(
+                self.base_cfg.tenancy.default_quota, self.registry.get(tenant_id)
+            )
+            check_quota(await svc.usage(), quota)  # QuotaExceeded
+
+        return guard
 
     def _service_by_id(self, tenant_id: str) -> GatewayService | None:
         rec = self.registry.get(tenant_id)

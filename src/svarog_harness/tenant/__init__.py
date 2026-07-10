@@ -12,6 +12,12 @@ from svarog_harness.tenant.provision import (
     provision_tenant,
     rotate_token,
 )
+from svarog_harness.tenant.quota import (
+    QuotaExceededError,
+    QuotaUsage,
+    check_quota,
+    effective_quota,
+)
 from svarog_harness.tenant.registry import (
     PrincipalConflictError,
     TenantExistsError,
@@ -23,12 +29,16 @@ __all__ = [
     "GATEWAY_TOKEN_REF",
     "PrincipalConflictError",
     "ProvisionResult",
+    "QuotaExceededError",
+    "QuotaUsage",
     "TenantContext",
     "TenantExistsError",
     "TenantRecord",
     "TenantRegistry",
     "TenantRegistryError",
+    "check_quota",
     "current_token",
+    "effective_quota",
     "provision_tenant",
     "rotate_token",
 ]

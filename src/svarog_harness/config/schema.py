@@ -225,6 +225,17 @@ class PoliciesConfig(StrictModel):
     profiles: dict[str, PolicyProfile] = Field(default_factory=dict)
 
 
+class QuotaConfig(StrictModel):
+    """Лимиты тенанта (ADR-0014, Фаза 3). 0 в любом поле — без лимита."""
+
+    # Максимум одновременных (не завершённых) run'ов тенанта.
+    max_concurrent_runs: int = Field(default=0, ge=0)
+    # Кумулятивный бюджет стоимости по всем run'ам тенанта (USD).
+    max_total_cost_usd: float = Field(default=0.0, ge=0)
+    # Кумулятивный токен-бюджет по всем run'ам тенанта.
+    max_total_tokens: int = Field(default=0, ge=0)
+
+
 class TenancyConfig(StrictModel):
     """Мультитенантность (ADR-0012/0014); по умолчанию выключена.
 
@@ -237,12 +248,16 @@ class TenancyConfig(StrictModel):
     home_root: Path = Path("./agent-home/tenants")
     # Роль по умолчанию для новорегистрируемого тенанта (регистрация всегда standard).
     default_role: TenantRole = TenantRole.STANDARD
-    # Ручной провижн или first-touch авто-создание (first_touch — Фаза 3).
+    # Ручной провижн или first-touch авто-создание нового пользователя (Фаза 3).
     provisioning: Literal["manual", "first_touch"] = "manual"
     # ro-слой общих скиллов под tenant-скиллами (ADR-0012 §5); лежит вне home тенанта.
     shared_skills: list[Path] = Field(default_factory=list)
     # Имя неявного тенанта при enabled=false.
     default_tenant: str = "local"
+    # Дефолтные квоты тенанта; переопределяются per-tenant в реестре (Фаза 3).
+    default_quota: QuotaConfig = Field(default_factory=QuotaConfig)
+    # Имя секрета с ключом подписи JWT (auth-бэкенд «jwt»); None — только bearer.
+    jwt_secret_ref: str | None = None
 
 
 class SvarogConfig(BaseSettings):

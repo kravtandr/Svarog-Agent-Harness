@@ -24,6 +24,7 @@ from svarog_harness.gateway.models import (
     SkillCard,
 )
 from svarog_harness.gateway.service import GatewayService
+from svarog_harness.tenant.quota import QuotaExceededError
 from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
 
 
@@ -81,7 +82,10 @@ def create_app(
 
     @app.post("/runs", response_model=RunRef, status_code=201)
     async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:
-        run_id = await service.create_run(req.task, req.autonomy)
+        try:
+            run_id = await service.create_run(req.task, req.autonomy)
+        except QuotaExceededError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     @app.get("/runs", response_model=list[RunSummary])

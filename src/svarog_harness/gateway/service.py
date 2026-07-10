@@ -30,9 +30,10 @@ from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
 from svarog_harness.storage.models import Run
+from svarog_harness.tenant.quota import QuotaUsage
 from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
 from svarog_harness.trace.recorder import TraceRecorder
-from svarog_harness.trace.viewer import fetch_run, fetch_runs
+from svarog_harness.trace.viewer import fetch_run, fetch_runs, run_usage_totals
 from svarog_harness.verifier import CheckOutcome
 
 
@@ -52,6 +53,9 @@ class GatewayService:
     on_run_created: Callable[[str], None] | None = None
     # Роль тенанта (ADR-0013): фиксируется в runner'е и держит кламп на resume.
     role: TenantRole = TenantRole.SUPERUSER
+    # Проверка квоты перед стартом run'а — TenantHub вешает сюда лимиты тенанта
+    # (ADR-0014, Фаза 3); бросает QuotaExceededError. None — без квот.
+    quota_guard: Callable[[], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
@@ -64,8 +68,19 @@ class GatewayService:
 
     # --- запуск и возобновление runs -------------------------------------
 
+    async def usage(self) -> QuotaUsage:
+        """Снимок использования по БД тенанта (для квот, ADR-0014 Фаза 3)."""
+
+        async def action(db: AsyncSession) -> QuotaUsage:
+            active, cost, tokens = await run_usage_totals(db)
+            return QuotaUsage(active_runs=active, total_cost_usd=cost, total_tokens=tokens)
+
+        return await self._read(action)
+
     async def create_run(self, task: str, autonomy: AutonomyMode | None) -> str:
         """Запустить run в фоне; вернуть run_id, как только он создан."""
+        if self.quota_guard is not None:
+            await self.quota_guard()  # QuotaExceededError → 429 на транспорте
         mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(self._run_bg(task, mode, started))

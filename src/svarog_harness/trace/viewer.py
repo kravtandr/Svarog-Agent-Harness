@@ -6,11 +6,29 @@ from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.storage.models import CheckResult, Message, Run, ToolCall
+from svarog_harness.storage.models import CheckResult, Message, Run, RunState, ToolCall
 from svarog_harness.trace.lookup import RunNotFoundError, find_run_by_prefix
+
+# Незавершённые состояния run'а — «занимают слот» для квоты одновременных (ADR-0014).
+_ACTIVE_RUN_STATES = (
+    RunState.PENDING,
+    RunState.RUNNING,
+    RunState.WAITING_APPROVAL,
+    RunState.SUSPENDED,
+)
+
+
+async def run_usage_totals(db: AsyncSession) -> tuple[int, float, int]:
+    """(активные run'ы, суммарная стоимость USD, суммарные токены) по всей БД тенанта."""
+    active = await db.scalar(
+        select(func.count()).select_from(Run).where(Run.state.in_(_ACTIVE_RUN_STATES))
+    )
+    cost = await db.scalar(select(func.coalesce(func.sum(Run.cost_usd), 0.0)))
+    tokens = await db.scalar(select(func.coalesce(func.sum(Run.tokens_used), 0)))
+    return int(active or 0), float(cost or 0.0), int(tokens or 0)
 
 __all__ = [
     "RunNotFoundError",
@@ -18,6 +36,7 @@ __all__ = [
     "fetch_runs",
     "render_run",
     "render_runs_table",
+    "run_usage_totals",
 ]
 
 _STATE_STYLES = {
