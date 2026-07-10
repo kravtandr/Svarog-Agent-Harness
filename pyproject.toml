@@ -121,4 +121,8 @@ filterwarnings = [
     # Артефакт teardown'а тестовой среды, а не рантайма — в serve/telegram loop
     # живёт постоянно. Фильтр узкий: только эта нить-исключение.
     "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+    # starlette>=1.3 в TestClient предпочитает пакет httpx2 и предупреждает при
+    # обычном httpx. Задевает только тесты (fastapi.testclient); рантайм gateway
+    # на uvicorn не использует TestClient. Фильтр узкий — по тексту сообщения.
+    "ignore:Using `httpx` with `starlette.testclient`",
 ]

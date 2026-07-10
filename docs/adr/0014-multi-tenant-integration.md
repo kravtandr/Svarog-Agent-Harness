@@ -2,7 +2,7 @@
 
 ## Статус
 
-Предложено
+Принято (Фазы 1–3 реализованы в ветке `feat/multi-tenancy`)
 
 ## Контекст
 
@@ -179,14 +179,31 @@ tenancy:
 * **Env-leak**: standard-ref не резолвится в хостовую env; `provider.api_key_ref`
   берётся из глобального стора, а не из tenant-стора.
 
-## Фазы реализации
+## Фазы реализации (статус)
 
-* **Фаза 1** — `tenant/registry.py`, `resolve_tenant_config`/`clamp_by_role`,
-  `assert_confined`, дефолтный `local`-тенант, инварианты-тесты. Без правки роутов.
-* **Фаза 2** — `TenantHub`, per-tenant auth (bearer), Telegram-резолвинг,
-  `svarog tenant …`, run-index и resume-роутинг, fail-closed гард.
-* **Фаза 3** — квоты/cost-cap per-tenant, first-touch provisioning, JWT-бэкенд
-  auth за тем же `TenantContext`.
+* **Фаза 1 — ✅ выполнено.** `config/paths.py`
+  (`resolve_tenant_config`/`clamp_by_role`/`assert_confined`/`resolve_local_tenant`/
+  `tenant_home`/`registry_path`), `tenant/` (`registry.py` — JSON+flock,
+  `models.py`), `SecretsConfig.env_fallback`, `TenancyConfig`, дефолтный
+  `local`-тенант. Ядро не тронуто; инварианты-тесты (`tests/test_tenant.py`).
+* **Фаза 2 — ✅ выполнено.** `gateway/hub.py` (`TenantHub` + `SingleTenantResolver`
+  за протоколом `GatewayResolver`), per-tenant bearer-auth в `gateway/api.py`,
+  Telegram-резолвинг (`TelegramBot.from_hub`), `tenant/provision.py` +
+  `svarog tenant create|list|add-principal|token`, `run_index` (колбэк
+  `on_run_created`) + resume-роутинг + per-tenant refuel-супервизор,
+  fail-closed гард (`TaskRunner.assert_sandbox_available`), role re-clamp на
+  resume, serve-wiring. Тесты: `test_tenant_gateway.py`, `test_tenant_provision.py`.
+* **Фаза 3 — ✅ выполнено.** Квоты (`tenant/quota.py`, `QuotaConfig`,
+  enforcement на `create_run` → HTTP 429), JWT-бэкенд (`gateway/jwt_auth.py`,
+  stdlib HS256, роль из реестра), first-touch provisioning (Telegram).
+  Тесты: `test_tenant_quota.py`, `test_tenant_jwt.py`.
+* **Находки ревизии — ✅ закрыты.** #2 два секрет-скоупа
+  (`TaskRunner._host_store` для provider/MCP/gateway host-side vs `_store`
+  для sandbox-инъекции); #8 MCP выключен для standard клампом.
+
+**Осталось (пост-MVP, вне этого ADR):** per-tenant config-layering (opt-in MCP
+для standard, per-tenant `svarog.yaml`-оверрайды); ротация `run_index`;
+shared-Postgres scale-бэкенд с колонкой `tenant_id`.
 
 ## Последствия
 
@@ -196,12 +213,13 @@ tenancy:
   per-tenant `db_path` → single-writer (ADR-0004) действует на репо тенанта
   (строго сильнее). Цена: N тенантов = N idle writer-задач и N secret-файлов.
 * **Натяжение с ADR-0007**: «multi-process без правки кода, только backends»
-  держится для per-tenant SQLite, но переход на shared-Postgres (Фаза 3)
+  держится для per-tenant SQLite, но переход на shared-Postgres (пост-MVP)
   требует колонки `tenant_id` — это **схемное** изменение, не только конфиг.
-  Принято осознанно как часть Фазы 3.
+  Принято осознанно как scale-путь за пределами этого ADR.
 * Глобальный LLM-ключ упрощает биллинг, но не даёт per-tenant разделения
-  расходов у провайдера — учитывается в квотах Фазы 3.
-* Per-tenant токены требуют ручной ротации — приемлемо для MVP, JWT в Фазе 3.
+  расходов у провайдера — учтено в квотах (Фаза 3): бюджеты cost/tokens на тенанта.
+* Per-tenant bearer-токены требуют ручной ротации (`svarog tenant token --rotate`);
+  JWT-бэкенд (Фаза 3) даёт stateless-токены с TTL за тем же `GatewayResolver`.
 * Control-plane реестр и `run_index` — общий writer поверх тенантов (под
   `LockBackend`-гардом): неизбежная для мультитенанта разделяемая точка, но
   маленькая и низкочастотная.
