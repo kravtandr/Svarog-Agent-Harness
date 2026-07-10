@@ -81,7 +81,11 @@ class TaskRunner:
     def __init__(self, cfg: SvarogConfig, workspace: Path) -> None:
         self._cfg = cfg
         self._workspace = workspace
-        self._store: SecretStore = default_secret_store(cfg.secrets.path)
+        # env_fallback уважает кламп роли (ADR-0014): у standard-тенанта он
+        # выключен, чтобы tenant-ref не проваливался в хостовый os.environ.
+        self._store: SecretStore = default_secret_store(
+            cfg.secrets.path, env_fallback=cfg.secrets.env_fallback
+        )
         # Межпроцессная сериализация memory-writer (ADR-0004/0007).
         self._lock: LockBackend = default_lock_backend(cfg.storage.db_path)
 

@@ -20,6 +20,19 @@ class AutonomyMode(StrEnum):
     YOLO = "yolo"
 
 
+class TenantRole(StrEnum):
+    """Уровень привилегий тенанта (ADR-0013); фиксируется при старте run.
+
+    Роль определяет НЕ данные, а исполнение: superuser может работать на хосте
+    (`local-trusted`), standard принудительно заперт в docker-sandbox без
+    доступа к хосту и чужим файлам. Резолвится из аутентифицированного
+    principal'а, изнутри run не эскалируется (как autonomy).
+    """
+
+    SUPERUSER = "superuser"
+    STANDARD = "standard"
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +128,10 @@ class SecretsConfig(StrictModel):
     # Файл секретов {имя: значение}, права 0600, вне репозитория (ADR-0006).
     # None — только env-fallback.
     path: Path | None = Path("~/.svarog/secrets.json")
+    # env-fallback (LayeredSecretStore: файл → env). Кламп роли `standard`
+    # выключает его, чтобы tenant-ref не проваливался в хостовый os.environ
+    # (ADR-0014, фикс env-leak). Для superuser/однотенантного режима — как раньше.
+    env_fallback: bool = True
     # Имена секретов, явно выдаваемых в окружение sandbox (§12, «только явно выданные»).
     inject: list[str] = Field(default_factory=list)
 
@@ -208,6 +225,26 @@ class PoliciesConfig(StrictModel):
     profiles: dict[str, PolicyProfile] = Field(default_factory=dict)
 
 
+class TenancyConfig(StrictModel):
+    """Мультитенантность (ADR-0012/0014); по умолчанию выключена.
+
+    enabled=false → один неявный tenant `default_tenant` (superuser) с home =
+    текущий agent-home, пути base не переписываются — поведение как сейчас.
+    """
+
+    enabled: bool = False
+    # Корень домов тенантов; home каждого — home_root/<id>/ (ADR-0012).
+    home_root: Path = Path("./agent-home/tenants")
+    # Роль по умолчанию для новорегистрируемого тенанта (регистрация всегда standard).
+    default_role: TenantRole = TenantRole.STANDARD
+    # Ручной провижн или first-touch авто-создание (first_touch — Фаза 3).
+    provisioning: Literal["manual", "first_touch"] = "manual"
+    # ro-слой общих скиллов под tenant-скиллами (ADR-0012 §5); лежит вне home тенанта.
+    shared_skills: list[Path] = Field(default_factory=list)
+    # Имя неявного тенанта при enabled=false.
+    default_tenant: str = "local"
+
+
 class SvarogConfig(BaseSettings):
     """Корень конфигурации: merge user- и project-уровней + env-переменные.
 
@@ -236,6 +273,7 @@ class SvarogConfig(BaseSettings):
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
 
     @classmethod
     def settings_customise_sources(

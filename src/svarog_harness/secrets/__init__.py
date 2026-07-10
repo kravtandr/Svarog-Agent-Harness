@@ -41,12 +41,18 @@ __all__ = [
 ]
 
 
-def default_secret_store(path: "Path | None") -> SecretStore:
-    """Store из файла (если путь задан) + env-fallback (ADR-0006)."""
+def default_secret_store(path: "Path | None", *, env_fallback: bool = True) -> SecretStore:
+    """Store из файла (если путь задан) + опциональный env-fallback (ADR-0006).
+
+    `env_fallback=False` (кламп роли `standard`, ADR-0014) убирает
+    `EnvSecretStore`, чтобы `get(ref)` не проваливался в хостовый `os.environ` —
+    иначе tenant-ref, совпавший с именем хостовой переменной, утёк бы в sandbox.
+    """
     from svarog_harness.secrets.store import EnvSecretStore, FileSecretStore, LayeredSecretStore
 
     stores: list[SecretStore] = []
     if path is not None:
         stores.append(FileSecretStore(path.expanduser()))
-    stores.append(EnvSecretStore())
+    if env_fallback:
+        stores.append(EnvSecretStore())
     return LayeredSecretStore(stores)
