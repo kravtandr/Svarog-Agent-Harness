@@ -80,6 +80,20 @@ class Tool[ArgsT: BaseModel](ABC):
     # Параметризованный тип нельзя объявить ClassVar — задается в подклассах на уровне класса.
     args_model: type[ArgsT]
 
+    def is_read_only(self, args: ArgsT) -> bool:
+        """Ось исполнения (ADR-0015 §1.1), не policy: Policy Engine её не читает.
+
+        Fail-closed: по умолчанию tool считается пишущим — забытый override
+        делает исполнение медленнее, но не опаснее. `True` переопределяют
+        только заведомо читающие tools; `bash` и MCP остаются `False` всегда
+        (классификацию поверх исполнения не строим, ADR-0002).
+        """
+        return False
+
+    def is_concurrency_safe(self, args: ArgsT) -> bool:
+        """Можно ли исполнять вызов в параллельном батче (ADR-0015 §1.3)."""
+        return self.is_read_only(args)
+
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name=self.name,

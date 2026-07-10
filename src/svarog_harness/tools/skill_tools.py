@@ -31,6 +31,9 @@ class ReadSkillTool(Tool[ReadSkillArgs]):
     risk_level = RiskLevel.LOW
     args_model = ReadSkillArgs
 
+    def is_read_only(self, args: ReadSkillArgs) -> bool:
+        return True
+
     def __init__(self, skills: list[Skill], *, on_load: SkillLoadCallback | None = None) -> None:
         self._skills = {skill.name: skill for skill in skills}
         self._on_load = on_load

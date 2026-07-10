@@ -100,3 +100,22 @@ def test_registry_unknown_tool() -> None:
     registry.register(EchoTool())
     with pytest.raises(UnknownToolError, match="неизвестный tool 'nope'"):
         registry.get("nope")
+
+
+def test_execution_metadata_fail_closed_defaults() -> None:
+    """ADR-0015 §1.1: не знаешь про tool — считай, что он пишет и не параллелится."""
+    tool = EchoTool()
+    args = EchoArgs(text="x")
+    assert tool.is_read_only(args) is False
+    assert tool.is_concurrency_safe(args) is False
+
+
+def test_concurrency_safe_follows_read_only_override() -> None:
+    class ReadingTool(EchoTool):
+        def is_read_only(self, args: EchoArgs) -> bool:
+            return True
+
+    tool = ReadingTool()
+    args = EchoArgs(text="x")
+    assert tool.is_read_only(args) is True
+    assert tool.is_concurrency_safe(args) is True

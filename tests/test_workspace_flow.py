@@ -185,3 +185,23 @@ async def test_start_pulls_from_remote(tmp_path: Path) -> None:
     prep = await WorkspaceFlow(clone, GitConfig(auto_pull=True)).start("подтяни и работай")
     assert prep.pulled
     assert (clone_dir / "new.txt").exists()
+
+
+async def test_commit_step_skips_svarog_tree(tmp_path: Path) -> None:
+    """ADR-0015 §1.2: spill-каталог .svarog не попадает в коммиты Flow C."""
+    repo = GitRepo(tmp_path)
+    await repo.init()
+    await repo.ensure_identity()
+    flow = WorkspaceFlow(repo, GitConfig())
+
+    (tmp_path / "code.py").write_text("print('ok')\n", encoding="utf-8")
+    spill = tmp_path / ".svarog" / "tool-results" / "run" / "call.txt"
+    spill.parent.mkdir(parents=True, exist_ok=True)
+    spill.write_text("огромный вывод", encoding="utf-8")
+
+    sha = await flow.commit_step("шаг")
+    assert sha is not None
+    _, out, _ = await repo._git("ls-tree", "-r", "--name-only", "HEAD")
+    files = out.split()
+    assert "code.py" in files
+    assert not any(name.startswith(".svarog") for name in files)

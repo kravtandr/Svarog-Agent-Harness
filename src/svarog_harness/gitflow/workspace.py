@@ -66,6 +66,9 @@ class WorkspaceFlow:
         self, message: str, *, run_id: str | None = None, known_values: frozenset[str] = frozenset()
     ) -> str | None:
         """Закоммитить все изменения workspace; None — коммитить нечего."""
+        # Служебное дерево runtime (spill tool-результатов, ADR-0015 §1.2)
+        # не попадает в коммиты Flow C.
+        await self._repo.ensure_excluded(".svarog/")
         await self._repo.add_all()
         if not await self._repo.has_staged_changes():
             return None

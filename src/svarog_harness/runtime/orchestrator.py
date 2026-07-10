@@ -494,7 +494,9 @@ class TaskRunner:
         mem_dir = memory_dir(self._cfg)
         if mem_dir is None or not mem_dir.is_dir():
             return
-        writer = MemoryWriter(db, mem_dir, lock=self._lock)
+        writer = MemoryWriter(
+            db, mem_dir, lock=self._lock, index_max_lines=self._cfg.memory.index_max_lines
+        )
         # known_values обязательны: без них secret scan не поймает реальные
         # значения секретов, пересказанные агентом в remember (ADR-0006).
         for row in await writer.drain(known_values=self.known_secret_values()):

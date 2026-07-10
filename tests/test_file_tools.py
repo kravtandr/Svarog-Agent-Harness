@@ -170,3 +170,56 @@ async def test_read_from_control_tree_allowed(workspace: Path) -> None:
     result = await ReadFileTool(workspace).call({"path": ".svarog/tool-results/run/call.txt"})
     assert result.ok
     assert "полный вывод" in result.output
+
+
+def test_read_only_tools_declare_execution_metadata(tmp_path: Path) -> None:
+    """ADR-0015 §1.1: читающие file-tools параллелятся, пишущие — нет."""
+    from svarog_harness.tools.file_tools import (
+        EditFileArgs,
+        EditFileTool,
+        ListDirArgs,
+        ListDirTool,
+        ReadFileArgs,
+        SearchFilesArgs,
+        SearchFilesTool,
+        WriteFileArgs,
+    )
+
+    assert ReadFileTool(tmp_path).is_read_only(ReadFileArgs(path="a.txt")) is True
+    assert ListDirTool(tmp_path).is_read_only(ListDirArgs(path=".")) is True
+    assert SearchFilesTool(tmp_path).is_read_only(SearchFilesArgs(pattern="x")) is True
+    assert WriteFileTool(tmp_path).is_read_only(WriteFileArgs(path="a", content="b")) is False
+    assert (
+        EditFileTool(tmp_path).is_read_only(EditFileArgs(path="a", old_string="x", new_string="y"))
+        is False
+    )
+
+
+async def test_read_file_offset_and_limit(workspace: Path) -> None:
+    """ADR-0015 §1.2/§4: дочитывание файла частями через offset/limit."""
+    lines = "\n".join(f"строка {i}" for i in range(1, 11))
+    (workspace / "long.txt").write_text(lines, encoding="utf-8")
+
+    result = await ReadFileTool(workspace).call({"path": "long.txt", "offset": 3, "limit": 2})
+    assert result.ok
+    assert "строка 3" in result.output
+    assert "строка 4" in result.output
+    assert "строка 5" not in result.output
+    # Маркер объясняет, что показано и как дочитать.
+    assert "строки 3–4 из 10" in result.output
+    assert "offset=5" in result.output
+
+
+async def test_read_file_offset_past_end(workspace: Path) -> None:
+    (workspace / "short.txt").write_text("одна строка", encoding="utf-8")
+    result = await ReadFileTool(workspace).call({"path": "short.txt", "offset": 5})
+    assert not result.ok
+    assert result.error is not None
+    assert "за концом файла" in result.error
+
+
+async def test_read_file_whole_file_has_no_marker(workspace: Path) -> None:
+    (workspace / "small.txt").write_text("a\nb", encoding="utf-8")
+    result = await ReadFileTool(workspace).call({"path": "small.txt"})
+    assert result.ok
+    assert result.output == "a\nb"

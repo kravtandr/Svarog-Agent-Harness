@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from svarog_harness.paths import PathTraversalError, safe_join
-from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult, truncate_text
+from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult
 
 _MAX_OUTPUT_CHARS = 50_000
 _MAX_SEARCH_MATCHES = 200
@@ -54,14 +54,22 @@ class _WorkspaceTool[ArgsT: BaseModel](Tool[ArgsT]):
 
 class ReadFileArgs(BaseModel):
     path: str = Field(description="Путь к файлу относительно workspace")
+    offset: int = Field(default=1, ge=1, description="Начальная строка (1-based)")
+    limit: int | None = Field(default=None, ge=1, description="Сколько строк вернуть")
 
 
 class ReadFileTool(_WorkspaceTool[ReadFileArgs]):
     name = "read_file"
     action_type = "file.read"
-    description = "Прочитать текстовый файл внутри workspace"
+    description = (
+        "Прочитать текстовый файл внутри workspace; большие файлы "
+        "дочитываются частями через offset/limit"
+    )
     risk_level = RiskLevel.LOW
     args_model = ReadFileArgs
+
+    def is_read_only(self, args: ReadFileArgs) -> bool:
+        return True
 
     async def execute(self, args: ReadFileArgs) -> ToolResult:
         path = self._resolve(args.path)
@@ -71,7 +79,35 @@ class ReadFileTool(_WorkspaceTool[ReadFileArgs]):
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             raise ToolError(f"файл не является текстовым (utf-8): {args.path}") from None
-        return ToolResult.success(truncate_text(content, _MAX_OUTPUT_CHARS))
+
+        lines = content.splitlines()
+        total = len(lines)
+        start = args.offset - 1
+        if not lines:
+            if start:
+                raise ToolError(f"offset {args.offset} за концом файла: {args.path} пуст")
+            return ToolResult.success(content)
+        if start >= total:
+            raise ToolError(f"offset {args.offset} за концом файла ({total} строк): {args.path}")
+
+        # Окно по строкам (offset/limit) + потолок по символам: обрезка честная —
+        # по границе строки, с маркером «что показано и как дочитать» (ADR-0015 §1.2).
+        end = min(total, start + args.limit) if args.limit is not None else total
+        shown: list[str] = []
+        size = 0
+        for line in lines[start:end]:
+            size += len(line) + 1
+            if shown and size > _MAX_OUTPUT_CHARS:
+                break
+            shown.append(line)
+        shown_end = start + len(shown)
+        body = "\n".join(shown)
+        if start == 0 and shown_end == total:
+            return ToolResult.success(content)
+        marker = f"[показаны строки {start + 1}–{shown_end} из {total}"
+        if shown_end < total:
+            marker += f"; продолжение: offset={shown_end + 1}"
+        return ToolResult.success(f"{body}\n{marker}]")
 
 
 class WriteFileArgs(BaseModel):
@@ -140,6 +176,9 @@ class ListDirTool(_WorkspaceTool[ListDirArgs]):
     risk_level = RiskLevel.LOW
     args_model = ListDirArgs
 
+    def is_read_only(self, args: ListDirArgs) -> bool:
+        return True
+
     async def execute(self, args: ListDirArgs) -> ToolResult:
         path = self._resolve(args.path)
         if not path.is_dir():
@@ -161,6 +200,9 @@ class SearchFilesTool(_WorkspaceTool[SearchFilesArgs]):
     description = "Поиск по содержимому файлов регулярным выражением; вывод path:line: текст"
     risk_level = RiskLevel.LOW
     args_model = SearchFilesArgs
+
+    def is_read_only(self, args: SearchFilesArgs) -> bool:
+        return True
 
     async def execute(self, args: SearchFilesArgs) -> ToolResult:
         root = self._resolve(args.path)

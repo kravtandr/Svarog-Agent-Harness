@@ -153,6 +153,24 @@ class GitRepo:
         _, out, _ = await self._git("rev-parse", "--short", "HEAD")
         return out.strip()
 
+    async def ensure_excluded(self, pattern: str) -> None:
+        """Добавить pattern в `info/exclude` git-каталога (идемпотентно).
+
+        В отличие от .gitignore не трогает пользовательские файлы рабочего
+        дерева; при separate-git-dir лежит вне bind-mount (ADR-0015 §0.2/§1.2).
+        """
+        _, out, _ = await self._git("rev-parse", "--git-path", "info/exclude")
+        exclude = Path(out.strip())
+        if not exclude.is_absolute():
+            exclude = self.path / exclude
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if pattern in existing.splitlines():
+            return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        exclude.write_text(existing + pattern + "\n", encoding="utf-8")
+
     async def status_porcelain(self) -> list[str]:
         _, out, _ = await self._git("status", "--porcelain")
         return [line for line in out.splitlines() if line]

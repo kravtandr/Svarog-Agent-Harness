@@ -1,9 +1,11 @@
 """Тесты agent loop v0: итерации, tool calls, лимиты, запись trace."""
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +29,7 @@ from svarog_harness.storage.models import (
     ToolCall,
     ToolCallStatus,
 )
+from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import ToolRegistry
@@ -243,8 +246,9 @@ async def test_suspends_at_max_iterations(db: AsyncSession, tmp_path: Path) -> N
         for i in range(10)
     ]
     provider = ScriptedProvider(endless)
-    # refuel отключён (порог > max), чтобы проверить именно стоп-кран max_iterations.
-    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=5)
+    # refuel отключён (порог > max) и детектор стагнации поднят (§1.6 ловит
+    # идентичные вызовы раньше), чтобы проверить именно стоп-кран max_iterations.
+    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=5, stagnation_repeats=10)
     outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("зациклись", AutonomyMode.YOLO)
 
     assert outcome.state is RunState.SUSPENDED
@@ -370,3 +374,397 @@ async def test_empty_answer_is_nudged(db: AsyncSession, tmp_path: Path) -> None:
     nudge = provider.seen_messages[1][-1]
     assert nudge.role == "user"
     assert "пустой ответ" in nudge.content
+
+
+# --- ADR-0015 §1.2: персистенция больших tool-результатов -------------------
+
+
+class _NoisyArgs(BaseModel):
+    pass
+
+
+class _NoisyTool(Tool[_NoisyArgs]):
+    """Возвращает вывод заведомо длиннее tool_output_context_chars."""
+
+    name = "noisy"
+    description = "шумный tool"
+    risk_level = RiskLevel.LOW
+    args_model = _NoisyArgs
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+
+    async def execute(self, args: _NoisyArgs) -> ToolResult:
+        return ToolResult.success(self.payload)
+
+
+async def test_large_tool_output_spilled_to_workspace(db: AsyncSession, tmp_path: Path) -> None:
+    payload = "".join(f"строка {i}\n" for i in range(100))
+    registry = ToolRegistry()
+    registry.register(_NoisyTool(payload))
+    provider = ScriptedProvider(
+        [
+            _tool_turn(ToolCallRequest(id="call-1", name="noisy", arguments_json="{}")),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(tool_output_context_chars=200)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg, registry=registry).run(
+        "шуми", AutonomyMode.YOLO
+    )
+    assert outcome.state is RunState.COMPLETED
+
+    tool_message = provider.seen_messages[-1][-1]
+    assert tool_message.role == "tool"
+    # Модель получает голову + маркер с путём к полному файлу.
+    assert "строка 0" in tool_message.content
+    assert f"показано 200 из {len(payload)} символов" in tool_message.content
+    assert ".svarog/tool-results/" in tool_message.content
+    assert "читай read_file частями" in tool_message.content
+    assert len(tool_message.content) < len(payload)
+
+    run = (await db.execute(select(Run))).scalar_one()
+    spill = tmp_path / ".svarog" / "tool-results" / run.id[:8] / "call-1.txt"
+    assert spill.is_file()
+    assert spill.read_text(encoding="utf-8") == payload
+
+
+async def test_read_file_output_truncated_without_spill(db: AsyncSession, tmp_path: Path) -> None:
+    """read_file не персистится (петля Read → файл → Read) — честная обрезка."""
+    (tmp_path / "big.txt").write_text(
+        "".join(f"строка {i}\n" for i in range(100)), encoding="utf-8"
+    )
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "big.txt"}')
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(tool_output_context_chars=200)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    tool_message = provider.seen_messages[-1][-1]
+    assert "обрезан" in tool_message.content
+    assert "offset" in tool_message.content
+    assert not (tmp_path / ".svarog" / "tool-results").exists()
+
+
+# --- ADR-0015 §1.3: параллельные read-only батчи -----------------------------
+
+
+class _PairedTool(Tool[_NoisyArgs]):
+    """Оба вызова должны стартовать до завершения любого из них.
+
+    При последовательном исполнении первый вызов упрётся в timeout —
+    успех обоих доказывает параллельность батча.
+    """
+
+    name = "paired"
+    description = "ждёт второго участника батча"
+    risk_level = RiskLevel.LOW
+    timeout_sec = 2.0
+    args_model = _NoisyArgs
+
+    def __init__(self) -> None:
+        self.started = 0
+        self._both_started = asyncio.Event()
+
+    def is_read_only(self, args: _NoisyArgs) -> bool:
+        return True
+
+    async def execute(self, args: _NoisyArgs) -> ToolResult:
+        self.started += 1
+        if self.started >= 2:
+            self._both_started.set()
+        await self._both_started.wait()
+        return ToolResult.success("парный вызов исполнен")
+
+
+async def test_read_only_calls_execute_concurrently(db: AsyncSession, tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register(_PairedTool())
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="p1", name="paired", arguments_json="{}"),
+                ToolCallRequest(id="p2", name="paired", arguments_json="{}"),
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path, registry=registry).run(
+        "парный вызов", AutonomyMode.YOLO
+    )
+    assert outcome.state is RunState.COMPLETED
+
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert len(tool_messages) == 2
+    assert all("парный вызов исполнен" in m.content for m in tool_messages)
+
+
+async def test_batch_results_in_order_single_checkpoint(db: AsyncSession, tmp_path: Path) -> None:
+    """Результаты батча — в исходном порядке; checkpoint — один на батч."""
+    (tmp_path / "a.txt").write_text("содержимое A", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("содержимое B", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}'),
+                ToolCallRequest(id="c2", name="read_file", arguments_json='{"path": "b.txt"}'),
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай оба", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c1", "c2"]
+    assert "содержимое A" in tool_messages[0].content
+    assert "содержимое B" in tool_messages[1].content
+
+    # Checkpoints: стартовый + write-ahead + один на весь батч (не по одному на вызов).
+    checkpoints = (await db.execute(select(Checkpoint))).scalars().all()
+    assert len(checkpoints) == 3
+
+
+async def test_write_call_not_batched_with_reads(db: AsyncSession, tmp_path: Path) -> None:
+    """Мутирующий вызов исполняется последовательно; порядок результатов сохранён."""
+    (tmp_path / "a.txt").write_text("до", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="r1", name="read_file", arguments_json='{"path": "a.txt"}'),
+                ToolCallRequest(
+                    id="w1",
+                    name="write_file",
+                    arguments_json='{"path": "new.txt", "content": "после"}',
+                ),
+                ToolCallRequest(id="r2", name="read_file", arguments_json='{"path": "new.txt"}'),
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("смешанный батч", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["r1", "w1", "r2"]
+    # r2 видит результат w1 — записи не «уезжают» в параллель с чтениями.
+    assert "после" in tool_messages[2].content
+
+
+# --- ADR-0015 §1.4: микрокомпакция — очистка старых tool-результатов ---------
+
+
+async def test_microcompact_clears_old_tool_results(db: AsyncSession, tmp_path: Path) -> None:
+    """Порог контекста превышен → старые tool-результаты очищаются маркером,
+    защищённый хвост не трогается, структура истории сохраняется."""
+    big = "\n".join(f"строка {i}: " + "х" * 40 for i in range(20))  # > 500 символов
+    (tmp_path / "a.txt").write_text(big, encoding="utf-8")
+    (tmp_path / "b.txt").write_text(big, encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _tool_turn(
+                ToolCallRequest(id="c2", name="read_file", arguments_json='{"path": "b.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(
+        max_context_tokens=1000,
+        microcompact_threshold_ratio=0.5,
+        microcompact_keep_recent=1,
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    final_request = provider.seen_messages[-1]
+    tool_messages = [m for m in final_request if m.role == "tool"]
+    assert len(tool_messages) == 2
+    # Старый результат очищен, но структура истории цела (role/tool_call_id на месте).
+    assert tool_messages[0].tool_call_id == "c1"
+    assert "очищен для экономии контекста" in tool_messages[0].content
+    assert "read_file" in tool_messages[0].content
+    assert "строка 1" not in tool_messages[0].content
+    # Защищённый хвост (keep_recent=1) не тронут.
+    assert "строка 1" in tool_messages[1].content
+
+
+async def test_microcompact_skips_short_results_and_below_threshold(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    (tmp_path / "short.txt").write_text("коротко", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "short.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _tool_turn(
+                ToolCallRequest(id="c2", name="read_file", arguments_json='{"path": "short.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(
+        max_context_tokens=1000,
+        microcompact_threshold_ratio=0.5,
+        microcompact_keep_recent=0,
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    # Сообщения < 500 символов не чистятся даже при превышении порога.
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert all("коротко" in m.content for m in tool_messages)
+
+
+async def test_microcompact_marker_references_spill_file(db: AsyncSession, tmp_path: Path) -> None:
+    """Есть spill-файл из §1.2 → маркер очистки ссылается на него (данные не теряются)."""
+    payload = "".join(f"строка {i}\n" for i in range(200))
+    registry = ToolRegistry()
+    registry.register(_NoisyTool(payload))
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="n1", name="noisy", arguments_json="{}"),
+                usage=Usage(600, 5),
+            ),
+            _tool_turn(
+                ToolCallRequest(id="n2", name="noisy", arguments_json="{}"),
+                usage=Usage(600, 5),
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(
+        max_context_tokens=1000,
+        microcompact_threshold_ratio=0.5,
+        microcompact_keep_recent=1,
+        tool_output_context_chars=600,
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg, registry=registry).run(
+        "шуми", AutonomyMode.YOLO
+    )
+    assert outcome.state is RunState.COMPLETED
+
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    cleared = tool_messages[0].content
+    assert "очищен для экономии контекста" in cleared
+    assert ".svarog/tool-results/" in cleared  # ссылка на полный вывод
+
+
+# --- ADR-0015 §1.6: детектор затухающей отдачи --------------------------------
+
+
+class _CountingTool(Tool[_NoisyArgs]):
+    """Возвращает разный результат на каждый вызов — прогресс есть."""
+
+    name = "counting"
+    description = "счётчик"
+    risk_level = RiskLevel.LOW
+    args_model = _NoisyArgs
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, args: _NoisyArgs) -> ToolResult:
+        self.calls += 1
+        return ToolResult.success(f"вызов номер {self.calls}")
+
+
+def _same_read(call_id: str) -> CompletionResult:
+    return _tool_turn(
+        ToolCallRequest(id=call_id, name="read_file", arguments_json='{"path": "same.txt"}')
+    )
+
+
+async def test_stagnation_identical_calls_suspend(db: AsyncSession, tmp_path: Path) -> None:
+    """3 подряд идентичных вызова с идентичным результатом → suspended, не failed."""
+    (tmp_path / "same.txt").write_text("неизменно", encoding="utf-8")
+    provider = ScriptedProvider([_same_read("c1"), _same_read("c2"), _same_read("c3")])
+    cfg = RuntimeConfig(stagnation_repeats=3)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("зациклись", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "затухающая отдача" in outcome.error
+    assert "read_file" in outcome.error
+    assert "resume" in outcome.error
+
+
+async def test_no_stagnation_when_results_differ(db: AsyncSession, tmp_path: Path) -> None:
+    """Поллинг с меняющимся выводом — не стагнация (вызовы не идентичны)."""
+    registry = ToolRegistry()
+    registry.register(_CountingTool())
+    call = ToolCallRequest(id="c", name="counting", arguments_json="{}")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(call),
+            _tool_turn(call),
+            _tool_turn(call),
+            _final("дождался", usage=Usage(10, 600)),
+        ]
+    )
+    cfg = RuntimeConfig(stagnation_repeats=3)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg, registry=registry).run(
+        "поллинг", AutonomyMode.YOLO
+    )
+    assert outcome.state is RunState.COMPLETED
+
+
+async def test_stagnation_token_fading_suspends(db: AsyncSession, tmp_path: Path) -> None:
+    """Итерации без успешных tool-результатов и с малой дельтой вывода → suspended."""
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="f1", name="read_file", arguments_json='{"path": "no1.txt"}')
+            ),
+            _tool_turn(
+                ToolCallRequest(id="f2", name="read_file", arguments_json='{"path": "no2.txt"}')
+            ),
+            _tool_turn(
+                ToolCallRequest(id="f3", name="read_file", arguments_json='{"path": "no3.txt"}')
+            ),
+        ]
+    )
+    cfg = RuntimeConfig(stagnation_repeats=3)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("тупик", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "затухающая отдача" in outcome.error
+
+
+async def test_successful_progress_resets_fading_counter(db: AsyncSession, tmp_path: Path) -> None:
+    """Успешные tool-результаты обнуляют счётчик затухания."""
+    (tmp_path / "ok.txt").write_text("есть", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="f1", name="read_file", arguments_json='{"path": "no1.txt"}')
+            ),
+            _tool_turn(
+                ToolCallRequest(id="f2", name="read_file", arguments_json='{"path": "no2.txt"}')
+            ),
+            _tool_turn(
+                ToolCallRequest(id="ok", name="read_file", arguments_json='{"path": "ok.txt"}')
+            ),
+            _tool_turn(
+                ToolCallRequest(id="f3", name="read_file", arguments_json='{"path": "no3.txt"}')
+            ),
+            _final("разобрался"),
+        ]
+    )
+    cfg = RuntimeConfig(stagnation_repeats=3)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("почти тупик", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED

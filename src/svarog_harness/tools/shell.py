@@ -16,7 +16,9 @@ from svarog_harness.tools.base import (
     truncate_text,
 )
 
-_MAX_STREAM_CHARS = 20_000
+# Жёсткий потолок захвата — защита памяти процесса, не экономия контекста:
+# backpressure (персистенция + усечение) применяет loop (ADR-0015 §1.2).
+_MAX_STREAM_CHARS = 1_000_000
 
 
 class BashArgs(BaseModel):

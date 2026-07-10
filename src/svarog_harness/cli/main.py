@@ -1080,7 +1080,12 @@ def memory_flush() -> None:
     store = default_secret_store(cfg.secrets.path)
 
     async def action(db: AsyncSession) -> int:
-        writer = MemoryWriter(db, mem_dir, lock=default_lock_backend(cfg.storage.db_path))
+        writer = MemoryWriter(
+            db,
+            mem_dir,
+            lock=default_lock_backend(cfg.storage.db_path),
+            index_max_lines=cfg.memory.index_max_lines,
+        )
         rows = await writer.drain(known_values=_known_secret_values(cfg, store))
         for row in rows:
             if row.error:

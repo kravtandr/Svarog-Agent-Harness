@@ -9,13 +9,17 @@ Tool calls фиксируются в checkpoint до исполнения (write
 недоисполненные вызовы доисполняются первыми.
 """
 
+import asyncio
 import contextlib
+import hashlib
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from svarog_harness.config.schema import AutonomyMode, RuntimeConfig
 from svarog_harness.gitflow.workspace import WorkspaceFlow
@@ -31,7 +35,7 @@ from svarog_harness.runtime.context_builder import build_initial_messages, build
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
-from svarog_harness.tools.base import ToolResult
+from svarog_harness.tools.base import Tool, ToolResult, truncate_text
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME
 from svarog_harness.trace.recorder import TraceRecorder
@@ -71,6 +75,18 @@ _EMPTY_NUDGE = (
 
 _SAVED_CONTENT_MARKER = "[содержимое сохранено в файле]"
 
+# Микрокомпакция (ADR-0015 §1.4): маркер очищенного tool-результата и порог,
+# ниже которого сообщение не трогается (мелочь чистить бессмысленно).
+_CLEARED_RESULT_PREFIX = "[результат инструмента очищен для экономии контекста"
+_MICROCOMPACT_MIN_CHARS = 500
+# Путь spill-файла из маркера персистенции (§1.2) — очистка ссылается на него.
+_SPILL_PATH_RE = re.compile(r"полный вывод: (\S+) — читай read_file частями")
+
+# Детектор затухающей отдачи (§1.6): итерация «без прогресса» — дельта
+# полезного вывода меньше этого числа токенов при отсутствии новых успешных
+# tool-результатов. Детерминированные счётчики, не LLM-судья.
+_STAGNATION_MIN_PROGRESS_TOKENS = 500
+
 _FILE_ACTION_RE = re.compile(
     r"(?iu)(?:созда[йть]|сохрани|запиши|create|write|save).{0,80}"
     r"(?:файл|file|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})"
@@ -107,6 +123,16 @@ class RunOutcome:
     tokens_used: int
     cost_usd: float
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedCall:
+    """Вызов, прошедший отбор в параллельный батч (ADR-0015 §1.3)."""
+
+    call: ToolCallRequest
+    arguments: dict[str, Any]
+    tool: Tool[Any]
+    decision: PolicyDecision
 
 
 class _ApprovalRequiredError(Exception):
@@ -227,6 +253,11 @@ class AgentLoop:
             while state.iterations < self._cfg.max_iterations:
                 state.iterations += 1
                 state.iterations_since_refuel += 1
+                # Микрокомпакция (§1.4): дешёвый слой без LLM между «всё в
+                # контексте» и refuel. Цена — разовая инвалидация префиксного
+                # кэша провайдера; порог держит число срабатываний малым.
+                if self._should_microcompact(state):
+                    self._microcompact(state)
                 stream_callback = None if self._saved_file_contents else self._on_text_delta
                 result = await self._provider.complete(
                     state.messages,
@@ -238,6 +269,7 @@ class AgentLoop:
                     self._on_text_delta(result_content)
                 state.tokens_used += result.usage.total_tokens
                 state.cost_usd += result.cost_usd
+                state.last_prompt_tokens = result.usage.prompt_tokens
                 await self._recorder.update_progress(
                     run,
                     iterations=state.iterations,
@@ -293,7 +325,17 @@ class AgentLoop:
                 if budget_error is not None:
                     return await self._suspend(run, state, budget_error)
 
-                await self._execute_pending(run, state)
+                had_tool_success = await self._execute_pending(run, state)
+
+                # Детектор затухающей отдачи (§1.6): suspended (решает человек),
+                # не failed. Счётчики сбрасываются при suspend — resume после
+                # уточнения задачи получает свежее окно.
+                stagnation = self._stagnation_reason(state, result, had_tool_success)
+                if stagnation is not None:
+                    state.stagnation_call_repeats = 0
+                    state.stagnation_last_sig = ""
+                    state.stagnation_low_progress_iters = 0
+                    return await self._suspend(run, state, stagnation)
 
                 # Refuel: порог итераций с последнего сброса достигнут — сбросить
                 # контекст в task_state.md и ПРИОСТАНОВИТЬ run (§6.10, ADR-0005).
@@ -316,19 +358,112 @@ class AgentLoop:
             await self._recorder.finish_run(run, RunState.FAILED, error=error)
             return self._outcome(run, RunState.FAILED, state, "", error)
 
-    async def _execute_pending(self, run: Run, state: LoopState) -> None:
-        """Исполнить write-ahead вызовы; checkpoint после каждого результата."""
+    async def _execute_pending(self, run: Run, state: LoopState) -> bool:
+        """Исполнить write-ahead вызовы; checkpoint после каждого результата.
+
+        Подряд идущие вызовы с policy-решением ALLOW и is_concurrency_safe
+        исполняются параллельным батчем (ADR-0015 §1.3); checkpoint — один на
+        батч. Падение посреди батча → resume переисполняет его целиком —
+        безопасно, в батче только читающие вызовы. Остальные вызовы — по
+        одному, как раньше.
+
+        Возвращает, был ли хотя бы один успешный результат (сырьё для
+        детектора затухающей отдачи, §1.6).
+        """
+        had_success = False
         while state.pending_tool_calls:
+            batch = self._concurrency_safe_prefix(run, state.pending_tool_calls)
+            if len(batch) >= 2:
+                had_success = await self._execute_batch(run, state, batch) or had_success
+                continue
             call = state.pending_tool_calls[0]
             tool_result = await self._execute_tool(run, call)
+            had_success = had_success or tool_result.ok
+            self._note_tool_call_result(state, call, tool_result)
             await self._flush_skill_loads(run)
             await self._flush_memory(run)
             self._flush_plan_updates(state)
-            rendered = self._render_tool_result(tool_result)
+            rendered = self._render_tool_result(run, call, tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
             state.pending_tool_calls = state.pending_tool_calls[1:]
             await self._save_checkpoint(run, state)
+        return had_success
+
+    def _concurrency_safe_prefix(
+        self, run: Run, calls: tuple[ToolCallRequest, ...]
+    ) -> list["_PreparedCall"]:
+        """Префикс подряд идущих вызовов, пригодных для параллельного батча.
+
+        Policy оценивается здесь — последовательно, в исходном порядке, ДО
+        партиционирования: require_approval/deny/notify не «уезжают» в батч,
+        а останавливают его и обрабатываются последовательным путём.
+        """
+        batch: list[_PreparedCall] = []
+        for call in calls:
+            if len(batch) >= self._cfg.max_tool_concurrency:
+                break
+            try:
+                arguments = call.parse_arguments()
+                tool = self._registry.get(call.name)
+            except (ValueError, UnknownToolError):
+                break
+            decision = self._policy.evaluate(tool, arguments)
+            if decision.action is not PolicyAction.ALLOW:
+                break
+            try:
+                args = tool.args_model.model_validate(arguments)
+            except ValidationError:
+                break
+            if not tool.is_concurrency_safe(args):
+                break
+            batch.append(_PreparedCall(call, arguments, tool, decision))
+        return batch
+
+    async def _execute_batch(
+        self, run: Run, state: LoopState, batch: list["_PreparedCall"]
+    ) -> bool:
+        """Исполнить батч читающих вызовов параллельно (asyncio.gather).
+
+        Trace-запись остаётся последовательной: recorder держит одну
+        DB-сессию, конкурентный доступ к ней небезопасен — параллелится
+        только само исполнение tool.call. Возвращает, был ли успешный результат.
+        """
+        records = []
+        for prepared in batch:
+            if self._on_tool_call is not None:
+                self._on_tool_call(prepared.call.name, self._redact_json(dict(prepared.arguments)))
+            records.append(
+                await self._recorder.start_tool_call(
+                    run,
+                    tool_name=prepared.call.name,
+                    arguments=self._redact_json(prepared.arguments),
+                    risk_level=prepared.decision.risk_level.value,
+                    policy_decision=prepared.decision.action.value,
+                )
+            )
+        results = await asyncio.gather(
+            *(prepared.tool.call(prepared.arguments) for prepared in batch)
+        )
+        # Результаты дописываются в исходном порядке вызовов (ADR-0005 не ослабляется).
+        had_success = False
+        for prepared, record, result in zip(batch, records, results, strict=True):
+            had_success = had_success or result.ok
+            self._note_tool_call_result(state, prepared.call, result)
+            await self._recorder.finish_tool_call(
+                record, ok=result.ok, output=result.output, error=result.error
+            )
+            rendered = self._render_tool_result(run, prepared.call, result)
+            state.messages.append(
+                ChatMessage(role="tool", content=rendered, tool_call_id=prepared.call.id)
+            )
+            await self._record_message(
+                run, "tool", {"tool_call_id": prepared.call.id, "content": rendered}
+            )
+        await self._flush_skill_loads(run)
+        state.pending_tool_calls = state.pending_tool_calls[len(batch) :]
+        await self._save_checkpoint(run, state)
+        return had_success
 
     async def _flush_skill_loads(self, run: Run) -> None:
         """Записать SkillLoad для скиллов, загруженных read_skill (ADR-0009)."""
@@ -393,6 +528,7 @@ class AgentLoop:
         state.messages = []
         state.pending_tool_calls = ()
         state.iterations_since_refuel = 0
+        state.last_prompt_tokens = 0
         return await self._suspend(
             run,
             state,
@@ -581,6 +717,93 @@ class AgentLoop:
         )
         return self._outcome(run, RunState.WAITING_APPROVAL, state, "", approval.decision.reason)
 
+    def _note_tool_call_result(
+        self, state: LoopState, call: ToolCallRequest, result: ToolResult
+    ) -> None:
+        """Учесть вызов для детектора повторов (§1.6).
+
+        Идентичность — совпадение (name, arguments_json) И результата: поллинг
+        с меняющимся выводом повтором не считается.
+        """
+        raw = "\x00".join(
+            (call.name, call.arguments_json, str(result.ok), result.output, result.error or "")
+        )
+        signature = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if signature == state.stagnation_last_sig:
+            state.stagnation_call_repeats += 1
+        else:
+            state.stagnation_last_sig = signature
+            state.stagnation_last_tool = call.name
+            state.stagnation_call_repeats = 1
+
+    def _stagnation_reason(
+        self, state: LoopState, result: CompletionResult, had_tool_success: bool
+    ) -> str | None:
+        """Причина увести run в suspended по затухающей отдаче (или None)."""
+        threshold = self._cfg.stagnation_repeats
+        if state.stagnation_call_repeats >= threshold:
+            return (
+                f"затухающая отдача: {state.stagnation_call_repeats} идентичных вызова(ов) "
+                f"{state.stagnation_last_tool} без прогресса; resume после уточнения задачи"
+            )
+        if (
+            result.usage.completion_tokens < _STAGNATION_MIN_PROGRESS_TOKENS
+            and not had_tool_success
+        ):
+            state.stagnation_low_progress_iters += 1
+        else:
+            state.stagnation_low_progress_iters = 0
+        if state.stagnation_low_progress_iters >= threshold:
+            return (
+                f"затухающая отдача: {state.stagnation_low_progress_iters} итерации(й) подряд "
+                f"без новых успешных tool-результатов и с дельтой вывода "
+                f"< {_STAGNATION_MIN_PROGRESS_TOKENS} токенов; resume после уточнения задачи"
+            )
+        return None
+
+    def _should_microcompact(self, state: LoopState) -> bool:
+        threshold = self._cfg.microcompact_threshold_ratio * self._cfg.max_context_tokens
+        return state.last_prompt_tokens > threshold
+
+    def _microcompact(self, state: LoopState) -> None:
+        """Очистить содержимое старых tool-сообщений маркером (ADR-0015 §1.4).
+
+        Структура истории сохраняется (`role`/`tool_call_id` на месте, меняется
+        только content) — provider-совместимость цела. Есть spill-файл из §1.2
+        → маркер ссылается на него (данные не теряются), иначе предлагает
+        повторить вызов. Полные результаты уже в trace — аудит цел.
+        """
+        tool_indices = [i for i, m in enumerate(state.messages) if m.role == "tool"]
+        keep = self._cfg.microcompact_keep_recent
+        candidates = tool_indices[:-keep] if keep else tool_indices
+        for index in candidates:
+            message = state.messages[index]
+            if len(message.content) < _MICROCOMPACT_MIN_CHARS:
+                continue
+            if message.content.startswith(_CLEARED_RESULT_PREFIX):
+                continue
+            tool_name = self._tool_name_for(state.messages, index, message.tool_call_id)
+            spill = _SPILL_PATH_RE.search(message.content)
+            tail = f"Полный вывод: {spill.group(1)}" if spill else "повтори вызов при необходимости"
+            state.messages[index] = replace(
+                message,
+                content=(
+                    f"{_CLEARED_RESULT_PREFIX}: {tool_name}, "
+                    f"{len(message.content)} символов. {tail}]"
+                ),
+            )
+
+    @staticmethod
+    def _tool_name_for(messages: list[ChatMessage], index: int, tool_call_id: str | None) -> str:
+        """Имя tool для tool-сообщения — из tool_calls предыдущего assistant."""
+        for message in reversed(messages[:index]):
+            if message.role != "assistant":
+                continue
+            for call in message.tool_calls:
+                if call.id == tool_call_id:
+                    return call.name
+        return "tool"
+
     def _budget_exceeded(self, prompt_tokens: int, state: LoopState) -> str | None:
         """Проверка бюджетов (§3.7): превышение — suspended, не failed."""
         if prompt_tokens > self._cfg.max_context_tokens:
@@ -664,15 +887,51 @@ class AgentLoop:
         )
         return result
 
-    def _render_tool_result(self, result: ToolResult) -> str:
-        # Redaction секретов до попадания в контекст LLM и trace (ADR-0006, §12).
+    def _render_tool_result(self, run: Run, call: ToolCallRequest, result: ToolResult) -> str:
+        """Порядок: redaction → персистенция → усечение (ADR-0015 §1.2).
+
+        Длинный вывод не теряется: полный (уже отредактированный — секреты на
+        диск не попадают, ADR-0006) текст пишется в .svarog/tool-results/,
+        модель получает голову + путь. read_file — исключение (петля
+        «Read → файл → Read»): честная обрезка с рецептом offset/limit.
+        """
         if result.ok:
             text = result.output or "(успех, пустой вывод)"
         elif result.output:
             text = f"ошибка: {result.error}\n{result.output}"
         else:
             text = f"ошибка: {result.error}"
-        return redact(text, self._secret_values)
+        text = redact(text, self._secret_values)
+
+        limit = self._cfg.tool_output_context_chars
+        if len(text) <= limit:
+            return text
+        if call.name == "read_file":
+            return (
+                f"{text[:limit]}\n… [вывод обрезан: {len(text)} символов, лимит {limit}; "
+                f"читай файл частями: read_file(offset=, limit=)]"
+            )
+        spill_rel = self._spill_tool_output(run, call, text)
+        if spill_rel is None:
+            # Не удалось записать (например, read-only workspace) — деградация
+            # до прежней обрезки, данные останутся только в trace.
+            return truncate_text(text, limit)
+        return (
+            f"{text[:limit]}\n… [показано {limit} из {len(text)} символов; "
+            f"полный вывод: {spill_rel} — читай read_file частями]"
+        )
+
+    def _spill_tool_output(self, run: Run, call: ToolCallRequest, text: str) -> str | None:
+        """Записать полный вывод в workspace; вернуть относительный путь или None."""
+        safe_call_id = re.sub(r"[^A-Za-z0-9._-]", "_", call.id) or "call"
+        rel = Path(".svarog") / "tool-results" / run.id[:8] / f"{safe_call_id}.txt"
+        target = self._workspace / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except OSError:
+            return None
+        return str(rel)
 
     def _outcome(
         self,

@@ -36,12 +36,19 @@ class MemoryWriter:
     """
 
     def __init__(
-        self, db: AsyncSession, memory_dir: Path, *, lock: LockBackend | None = None
+        self,
+        db: AsyncSession,
+        memory_dir: Path,
+        *,
+        lock: LockBackend | None = None,
+        index_max_lines: int = 200,
     ) -> None:
         self._db = db
         self._memory_dir = memory_dir
         self._repo = GitRepo(memory_dir)
         self._lock = lock
+        # Потолок автогенного index.md (ADR-0015 §1.5, memory.index_max_lines).
+        self._index_max_lines = index_max_lines
 
     async def enqueue(self, request: MemoryChangeRequest) -> MemoryChange:
         row = MemoryChange(
@@ -100,7 +107,7 @@ class MemoryWriter:
         изменилось, staged-изменений нет и коммита не будет.
         """
         append_log(self._memory_dir, entries)
-        regenerate_index(self._memory_dir)
+        regenerate_index(self._memory_dir, max_lines=self._index_max_lines)
         await self._repo.add_all()
         if not await self._repo.has_staged_changes():
             return

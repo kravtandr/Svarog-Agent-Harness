@@ -201,7 +201,7 @@ def test_read_memory_respects_limit(tmp_path: Path) -> None:
     (tmp_path / "user").mkdir()
     (tmp_path / "user/profile.md").write_text("y" * 5000, encoding="utf-8")
     text = read_memory(tmp_path, limit_bytes=3000)
-    assert "усечена" in text
+    assert "превысил лимит контекста" in text
 
 
 def test_read_memory_missing_dir(tmp_path: Path) -> None:
@@ -453,7 +453,7 @@ def test_read_memory_truncation_keeps_profile(tmp_path: Path) -> None:
     (tmp_path / "index.md").write_text("x" * 5000, encoding="utf-8")
     text = read_memory(tmp_path, limit_bytes=200)
     assert "важный профиль" in text
-    assert "память усечена" in text
+    assert "превысил лимит контекста" in text
 
 
 # --- ReadMemoryTool: прогрессивная загрузка (ADR-0011) ---
@@ -535,3 +535,27 @@ async def test_remember_rejects_append_to_source(tmp_path: Path) -> None:
     assert not result.ok
     assert "неизменяем" in result.error
     assert sink == []
+
+
+def test_read_memory_truncates_at_line_boundary_with_recipe(tmp_path: Path) -> None:
+    """ADR-0015 §1.5: усечение по границе строки + warning с действием."""
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user/profile.md").write_text("краткий профиль", encoding="utf-8")
+    index_lines = "\n".join(
+        f"- [proj{i}](projects/proj{i}/overview.md) — описание" for i in range(200)
+    )
+    (tmp_path / "index.md").write_text(f"# Индекс памяти\n{index_lines}", encoding="utf-8")
+
+    text = read_memory(tmp_path, limit_bytes=2000)
+    # Профиль (первый по порядку) цел, индекс усечён частично, а не заглушкой.
+    assert "краткий профиль" in text
+    assert "proj0" in text
+    assert "proj199" not in text
+    # Усечение по границе строки: нет разорванных пополам строк-ссылок.
+    for line in text.splitlines():
+        if line.startswith("- [proj"):
+            assert line.endswith("описание")
+    # Warning объясняет, что случилось и что делать.
+    assert "WARNING" in text
+    assert "превысил лимит" in text
+    assert "Сокращай summary" in text

@@ -18,15 +18,20 @@ status: active
 """
 
 
-def _create_project(root: Path, slug: str, *, status: str = "active", today: date) -> None:
+def _create_project(
+    root: Path, slug: str, *, status: str = "active", today: date, summary: str | None = None
+) -> None:
+    content = _PAGE.replace("slug: animateyou", f"slug: {slug}").replace(
+        "status: active", f"status: {status}"
+    )
+    if summary is not None:
+        content = content.replace("summary: бот генерации медиа", f"summary: {summary}")
     apply_change(
         root,
         MemoryChangeRequest(
             file=f"projects/{slug}/overview.md",
             operation=MemoryOperation.CREATE,
-            content=_PAGE.replace("slug: animateyou", f"slug: {slug}").replace(
-                "status: active", f"status: {status}"
-            ),
+            content=content,
         ),
         today=today,
     )
@@ -129,3 +134,27 @@ def test_append_log_is_append_only(tmp_path: Path) -> None:
     text = (tmp_path / "log.md").read_text(encoding="utf-8")
     assert text.count("## [") == 2
     assert text.index("2026-07-10") < text.index("2026-07-11")
+
+
+def test_render_index_caps_line_length(tmp_path: Path) -> None:
+    """ADR-0015 §1.5: длинный summary укорачивается — строка индекса ~200 символов."""
+    _create_project(tmp_path, "wordy", today=date(2026, 7, 10), summary="о" * 500)
+    index = render_index(tmp_path)
+    line = next(li for li in index.splitlines() if "wordy" in li)
+    assert len(line) <= 200
+    assert line.endswith("…") or "…" in line
+
+
+def test_render_index_caps_total_lines(tmp_path: Path) -> None:
+    for i in range(30):
+        _create_project(tmp_path, f"proj{i:02d}", today=date(2026, 7, 10))
+    index = render_index(tmp_path, max_lines=10)
+    lines = index.splitlines()
+    assert len(lines) <= 10
+    assert "и ещё" in lines[-1]
+    assert "read_memory" in lines[-1]
+
+
+def test_render_index_no_tail_when_under_limit(tmp_path: Path) -> None:
+    _create_project(tmp_path, "single", today=date(2026, 7, 10))
+    assert "и ещё" not in render_index(tmp_path)

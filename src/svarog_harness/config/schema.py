@@ -88,6 +88,19 @@ class RuntimeConfig(StrictModel):
     # возвращается «ответа нет, продолжай по своему усмотрению». По умолчанию
     # 1 час — задача не зависает в ожидании человека навсегда.
     ask_user_timeout_sec: int = Field(default=3600, gt=0)
+    # Экономика контекста (ADR-0015 фаза 1).
+    # 1.2: tool-вывод длиннее порога персистится в .svarog/tool-results/,
+    # модель получает голову + путь к полному файлу (данные не теряются).
+    tool_output_context_chars: int = Field(default=20_000, gt=0)
+    # 1.3: потолок параллельного батча read-only tool calls.
+    max_tool_concurrency: int = Field(default=4, gt=0)
+    # 1.4: микрокомпакция — очистка старых tool-результатов при доле
+    # max_context_tokens; защищённый хвост последних результатов не трогается.
+    microcompact_threshold_ratio: float = Field(default=0.6, gt=0, le=1)
+    microcompact_keep_recent: int = Field(default=5, ge=0)
+    # 1.6: детектор затухающей отдачи — подряд идентичных вызовов/итераций
+    # без прогресса до ухода в suspended.
+    stagnation_repeats: int = Field(default=3, gt=1)
 
 
 class SandboxConfig(StrictModel):
@@ -126,6 +139,9 @@ class MemoryConfig(StrictModel):
     path: Path | None = None
     # Лимит memory-entrypoint в контексте (§6.7), чтобы не раздувать промпт.
     context_limit_bytes: int = Field(default=16_000, gt=0)
+    # Потолок автогенного index.md в строках (ADR-0015 §1.5); обеспечивается
+    # при генерации, хвост списка сворачивается в «…и ещё N страниц».
+    index_max_lines: int = Field(default=200, gt=0)
 
 
 class SecretsConfig(StrictModel):
