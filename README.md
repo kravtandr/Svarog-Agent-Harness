@@ -25,15 +25,16 @@
 ## Возможности
 
 * **Интерфейсы**: CLI (`run`, `chat`, `resume`, `traces`, `approvals`, `skills`, `memory`, `secrets`), REST + WebSocket API, Telegram-бот — с асинхронным approval.
-* **Инструменты**: файлы (read/write/edit/list/search в границах workspace), bash в sandbox, `read_skill`, `remember`, `create_skill_proposal`, `request_approval`, `ask_user` (уточняющий вопрос человеку с таймаутом), плюс внешние инструменты через **MCP**. Git — не tool агента, а привилегированный host-flow вне sandbox (ADR-0002/0003).
+* **Инструменты**: файлы (read/write/edit/list/search в границах workspace), bash в sandbox, `read_skill`, `remember`, `read_memory`, `create_skill_proposal`, `request_approval`, `ask_user` (уточняющий вопрос человеку с таймаутом), плюс внешние инструменты через **MCP**. Git — не tool агента, а привилегированный host-flow вне sandbox (ADR-0002/0003).
 * **Sandbox**: Docker (сеть off, non-root, лимиты CPU/RAM, timeout, mounts по allowlist) или явный `local-trusted`.
 * **Policy Engine**: allow / notify / deny / require_approval с режимами автономии и правилами `policies/*.yaml`; MCP-инструменты по умолчанию требуют approval.
-* **Память и Git**: Flow A (память, single-writer), Flow B (скиллы через proposals), Flow C (рабочий код: pull → task-ветка → commit с secret scan → push через policy).
+* **Память — LLM-wiki (ADR-0011)**: страницы проектов с YAML-frontmatter, детерминированный автоген `index.md`/`log.md` в single-writer'е, прогрессивная загрузка (в контекст — только индекс + профиль, остальное по требованию через `read_memory`), lint `svarog memory curate`, неизменяемый raw-слой `sources/`. Запись — только через контролируемую очередь (Flow A).
+* **Git-flows**: Flow B (скиллы через proposals), Flow C (рабочий код: pull → task-ветка → commit с secret scan → push через policy).
 * **Skill governance + Curator**: proposals с review, двухслойное кураторство (механический pruning + LLM-консолидация на auxiliary-модели).
 * **Надёжность**: resumable runs, refuel, recovery после падения, бюджеты токенов/стоимости, полный audit trace в SQLite.
 * **Секреты**: pluggable SecretStore (файл 0600 / env), инжекция только в sandbox, redaction в trace, обязательный secret scan перед каждым коммитом и push.
 
-Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0010](docs/adr/).
+Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0011](docs/adr/).
 
 ## Сравнение с Hermes и OpenClaw
 
@@ -191,10 +192,11 @@ rules:
 | Документ | Содержание |
 |---|---|
 | [TASK.md](TASK.md) | полное ТЗ |
-| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0010 |
+| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0011 |
 | [docs/repo-structure.md](docs/repo-structure.md) | структура пакета |
 | [docs/first-issues.md](docs/first-issues.md) | backlog M0–M5 |
 | [AGENTS.md](AGENTS.md) | правила работы с репозиторием |
+| [simulation/](simulation/) | agent-based user simulation: инструкции, сценарии, личности для тестирования Svarog на реальном LLM |
 
 ## Разработка
 
