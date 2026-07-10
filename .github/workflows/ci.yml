@@ -1,9 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  push: # на все ветки, а не только main — фиче-работа проверяется до мержа
   pull_request:
+
+# Отменять устаревшие run'ы того же ref при новом пуше (экономия минут).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
