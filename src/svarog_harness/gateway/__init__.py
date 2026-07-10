@@ -6,6 +6,7 @@
 ADR-0007) не требовала веб-стека.
 """
 
+from svarog_harness.gateway.hub import SingleTenantResolver, TenantHub
 from svarog_harness.gateway.service import GatewayService
 
-__all__ = ["GatewayService"]
+__all__ = ["GatewayService", "SingleTenantResolver", "TenantHub"]

@@ -7,11 +7,12 @@ GatewayService, сериализует ответ. Approval асинхронны
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 
+from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
     ApprovalDecisionRequest,
@@ -26,29 +27,34 @@ from svarog_harness.gateway.service import GatewayService
 from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
 
 
-def _authorized(authorization: str | None, token: str | None) -> bool:
-    if token is None:
-        return True
-    return authorization == f"Bearer {token}"
+def create_app(
+    service: GatewayService | None = None,
+    *,
+    bearer_token: str | None = None,
+    hub: TenantHub | None = None,
+) -> FastAPI:
+    """REST/WS-приложение над сервисом (single-tenant) или хабом (multi-tenant).
 
+    Auth и выбор сервиса объединены в резолвер: single-tenant — общий bearer
+    (или открытый режим без токена), multi-tenant — per-tenant token → тенант
+    через реестр (ADR-0014). Каждый защищённый роут получает сервис
+    аутентифицированного тенанта через зависимость `_require_service`.
+    """
+    if hub is not None:
+        resolver: GatewayResolver = hub
+    elif service is not None:
+        resolver = SingleTenantResolver(service, bearer_token)
+    else:
+        raise ValueError("create_app: нужен либо service, либо hub")
 
-def _auth_dependency(token: str | None) -> Callable[[str | None], None]:
-    def check(authorization: Annotated[str | None, Header()] = None) -> None:
-        if not _authorized(authorization, token):
-            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
-
-    return check
-
-
-def create_app(service: GatewayService, *, bearer_token: str | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # Супервизор refuel (§6.10): авто-поднятие refuel-suspended runs, пока
         # gateway жив. Запускается только при старте приложения (lifespan), а не
         # при простом создании TestClient без контекст-менеджера.
         task: asyncio.Task[None] | None = None
-        if service.cfg.supervisor.auto_resume_refuel:
-            task = asyncio.ensure_future(service.run_supervisor())
+        if resolver.supervisor_enabled:
+            task = asyncio.ensure_future(resolver.run_supervisor())
         try:
             yield
         finally:
@@ -58,23 +64,32 @@ def create_app(service: GatewayService, *, bearer_token: str | None = None) -> F
                     await task
 
     app = FastAPI(title="Svarog Gateway", version="0.1.0", lifespan=lifespan)
-    auth = [Depends(_auth_dependency(bearer_token))] if bearer_token is not None else []
+
+    def _require_service(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> GatewayService:
+        svc = resolver.authenticate(authorization)
+        if svc is None:
+            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+        return svc
+
+    ServiceDep = Annotated[GatewayService, Depends(_require_service)]  # noqa: N806 — тип-алиас
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
-        return {"status": "ok", "workspace": str(service.workspace)}
+        return {"status": "ok"}
 
-    @app.post("/runs", response_model=RunRef, status_code=201, dependencies=auth)
-    async def create_run(req: CreateRunRequest) -> RunRef:
+    @app.post("/runs", response_model=RunRef, status_code=201)
+    async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:
         run_id = await service.create_run(req.task, req.autonomy)
         return RunRef(run_id=run_id, state="running")
 
-    @app.get("/runs", response_model=list[RunSummary], dependencies=auth)
-    async def list_runs(limit: int = 20) -> list[RunSummary]:
+    @app.get("/runs", response_model=list[RunSummary])
+    async def list_runs(service: ServiceDep, limit: int = 20) -> list[RunSummary]:
         return await service.list_runs(limit=limit)
 
-    @app.get("/runs/{run_id}", response_model=RunDetail, dependencies=auth)
-    async def get_run(run_id: str) -> RunDetail:
+    @app.get("/runs/{run_id}", response_model=RunDetail)
+    async def get_run(run_id: str, service: ServiceDep) -> RunDetail:
         try:
             return await service.get_run(run_id)
         except RunNotFoundError as exc:
@@ -84,9 +99,8 @@ def create_app(service: GatewayService, *, bearer_token: str | None = None) -> F
     async def run_events(websocket: WebSocket, run_id: str) -> None:
         query_token = websocket.query_params.get("token")
         authorization = websocket.headers.get("authorization")
-        if bearer_token is not None and not (
-            _authorized(authorization, bearer_token) or query_token == bearer_token
-        ):
+        service = resolver.authenticate(authorization, query_token=query_token)
+        if service is None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
         await websocket.accept()
@@ -98,16 +112,18 @@ def create_app(service: GatewayService, *, bearer_token: str | None = None) -> F
         # Стрим завершился (run_finished в истории/живой) — закрываем соединение.
         await websocket.close()
 
-    @app.get("/skills", response_model=list[SkillCard], dependencies=auth)
-    async def list_skills() -> list[SkillCard]:
+    @app.get("/skills", response_model=list[SkillCard])
+    async def list_skills(service: ServiceDep) -> list[SkillCard]:
         return service.list_skills()
 
-    @app.get("/approvals", response_model=list[ApprovalView], dependencies=auth)
-    async def list_approvals() -> list[ApprovalView]:
+    @app.get("/approvals", response_model=list[ApprovalView])
+    async def list_approvals(service: ServiceDep) -> list[ApprovalView]:
         return await service.list_pending_approvals()
 
-    @app.post("/approvals/{approval_id}", response_model=RunRef, dependencies=auth)
-    async def decide_approval(approval_id: str, req: ApprovalDecisionRequest) -> RunRef:
+    @app.post("/approvals/{approval_id}", response_model=RunRef)
+    async def decide_approval(
+        approval_id: str, req: ApprovalDecisionRequest, service: ServiceDep
+    ) -> RunRef:
         try:
             run_id = await service.decide_approval(
                 approval_id, approved=req.approved, reason=req.reason
@@ -118,8 +134,10 @@ def create_app(service: GatewayService, *, bearer_token: str | None = None) -> F
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
 
-    @app.post("/approvals/{approval_id}/answer", response_model=RunRef, dependencies=auth)
-    async def answer_question(approval_id: str, req: AnswerRequest) -> RunRef:
+    @app.post("/approvals/{approval_id}/answer", response_model=RunRef)
+    async def answer_question(
+        approval_id: str, req: AnswerRequest, service: ServiceDep
+    ) -> RunRef:
         try:
             run_id = await service.answer_question(approval_id, answer=req.answer)
         except ApprovalNotFoundError as exc:
