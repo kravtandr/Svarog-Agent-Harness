@@ -36,7 +36,14 @@ class RememberArgs(BaseModel):
         default=MemoryOperation.APPEND,
         description="create | append | replace_section | delete",
     )
-    content: str = Field(default="", description="Содержимое для записи")
+    content: str = Field(
+        default="",
+        description=(
+            "Содержимое для записи. Для replace_section — ТОЛЬКО новое тело секции "
+            "БЕЗ строки заголовка (заголовок сохраняется автоматически; повтор "
+            "заголовка в content создаст дубль)"
+        ),
+    )
     section: str = Field(
         default="", description="Заголовок markdown-секции для replace_section (без #)"
     )
@@ -47,7 +54,11 @@ class RememberTool(Tool[RememberArgs]):
     action_type = "memory.write"
     description = (
         "Сохранить факт в долговременную память агента (memory-репозиторий); "
-        "изменение применяется через контролируемую очередь"
+        "изменение применяется через контролируемую очередь ПОСЛЕ завершения run. "
+        "Одну секцию правь одной заявкой: несколько replace_section на один и тот "
+        "же section применятся последовательно поверх друг друга и испортят файл. "
+        "Для replace_section в content кладётся только новое тело секции без "
+        "строки её заголовка."
     )
     risk_level = RiskLevel.LOW
     args_model = RememberArgs
