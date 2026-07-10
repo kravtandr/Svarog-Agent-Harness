@@ -1,5 +1,7 @@
 """Тесты файловых tools: операции и запрет выхода за пределы workspace."""
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -223,3 +225,58 @@ async def test_read_file_whole_file_has_no_marker(workspace: Path) -> None:
     result = await ReadFileTool(workspace).call({"path": "small.txt"})
     assert result.ok
     assert result.output == "a\nb"
+
+
+# --- ADR-0015 фаза 4: rg-backed search_files ---------------------------------
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep недоступен")
+async def test_search_respects_gitignore_with_rg(tmp_path: Path) -> None:
+    """rg-backend уважает .gitignore (корректность игнора — суть фазы 4)."""
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    subprocess.run(["git", "-C", str(ws), "init", "-q"], check=True)
+    (ws / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (ws / "ignored.txt").write_text("иголка тут", encoding="utf-8")
+    (ws / "visible.txt").write_text("иголка здесь", encoding="utf-8")
+
+    result = await SearchFilesTool(ws).call({"pattern": "иголка"})
+    assert result.ok
+    assert "visible.txt" in result.output
+    assert "ignored.txt" not in result.output
+
+
+async def test_search_python_fallback_without_rg(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без ripgrep поиск деградирует до Python-обхода с тем же контрактом."""
+    from svarog_harness.tools import file_tools as ft
+
+    monkeypatch.setattr(ft.shutil, "which", lambda name: None)
+    result = await SearchFilesTool(workspace).call({"pattern": r"return \d+", "glob": "**/*.py"})
+    assert result.ok
+    assert result.output == "src/app.py:2: return 42"
+
+
+async def test_search_max_results_honest_marker(tmp_path: Path) -> None:
+    ws = tmp_path / "many"
+    ws.mkdir()
+    (ws / "data.txt").write_text("\n".join("иголка" for _ in range(10)), encoding="utf-8")
+
+    result = await SearchFilesTool(ws).call({"pattern": "иголка", "max_results": 3})
+    assert result.ok
+    shown = [line for line in result.output.splitlines() if line.startswith("data.txt:")]
+    assert len(shown) == 3
+    assert "показано 3" in result.output
+    assert "10" in result.output  # честный итог: сколько совпадений всего
+
+
+async def test_search_rust_incompatible_regex_falls_back(tmp_path: Path) -> None:
+    """Паттерн с backreference не знаком rust-regex — работает Python-fallback."""
+    ws = tmp_path / "bref"
+    ws.mkdir()
+    (ws / "x.txt").write_text("шаблон: aa", encoding="utf-8")
+
+    result = await SearchFilesTool(ws).call({"pattern": r"(a)\1"})
+    assert result.ok
+    assert "x.txt:1:" in result.output

@@ -5,7 +5,9 @@
 Это инвариант файловых операций, не зависящий от режима автономии.
 """
 
+import asyncio
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -192,9 +194,23 @@ class SearchFilesArgs(BaseModel):
     pattern: str = Field(description="Регулярное выражение для поиска по содержимому")
     path: str = Field(default=".", description="Директория поиска относительно workspace")
     glob: str = Field(default="**/*", description="Glob-фильтр имен файлов, например '**/*.py'")
+    max_results: int = Field(
+        default=_MAX_SEARCH_MATCHES,
+        ge=1,
+        le=5000,
+        description="Максимум совпадений в ответе (пагинация: уточни pattern/glob или подними)",
+    )
 
 
 class SearchFilesTool(_WorkspaceTool[SearchFilesArgs]):
+    """Поиск по содержимому: ripgrep-backend с Python-fallback (ADR-0015 фаза 4).
+
+    rg быстрее и корректнее с игнором (уважает .gitignore внутри git-репо);
+    без rg в системе или на непереваренном им паттерне (backreferences и пр.
+    вне rust-regex) работает прежний Python-обход. Контракт вывода одинаковый:
+    `path:line: текст` + честный маркер усечения.
+    """
+
     name = "search_files"
     action_type = "file.search"
     description = "Поиск по содержимому файлов регулярным выражением; вывод path:line: текст"
@@ -208,12 +224,85 @@ class SearchFilesTool(_WorkspaceTool[SearchFilesArgs]):
         root = self._resolve(args.path)
         if not root.is_dir():
             raise ToolError(f"директория не найдена: {args.path}")
+        # Python-валидация паттерна всегда: и как ранняя ошибка модели, и как
+        # гарантия работоспособности fallback-ветки.
         try:
             regex = re.compile(args.pattern)
         except re.error as exc:
             raise ToolError(f"невалидное регулярное выражение: {exc}") from None
 
+        found = await self._ripgrep_search(root, args)
+        if found is not None:
+            matches, total = found
+            if not matches:
+                return ToolResult.success("совпадений не найдено")
+            if total > len(matches):
+                matches.append(
+                    f"… [показано {len(matches)} из {total} совпадений; "
+                    f"уточни pattern/glob или подними max_results]"
+                )
+            return ToolResult.success("\n".join(matches))
+        return self._python_search(root, args, regex)
+
+    async def _ripgrep_search(
+        self, root: Path, args: SearchFilesArgs
+    ) -> tuple[list[str], int] | None:
+        """Поиск через rg; None — rg недоступен или не понял паттерн (fallback).
+
+        `--hidden` выравнивает охват с Python-обходом (он не пропускает
+        dot-файлы), служебные каталоги закрыты glob'ами, `--sort path` даёт
+        детерминированный порядок, как у сортированного обхода.
+        """
+        rg = shutil.which("rg")
+        if rg is None:
+            return None
+        cmd = [
+            rg,
+            "--line-number",
+            "--no-heading",
+            "--color=never",
+            "--hidden",
+            "--sort",
+            "path",
+            "--regexp",
+            args.pattern,
+        ]
+        # Позитивный --glob у rg — whitelist поверх ignore-правил: дефолтный
+        # '**/*' не передаём (иначе .gitignore перестал бы действовать), а
+        # явный glob пользователя — осознанное «ищи именно эти файлы».
+        if args.glob != "**/*":
+            cmd += ["--glob", args.glob]
+        for skip in sorted(_SKIP_DIRS):
+            cmd += ["--glob", f"!{skip}/**"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode not in (0, 1):  # 0 — есть совпадения, 1 — нет
+            return None
+        prefix = root.resolve().relative_to(self.workspace.resolve())
         matches: list[str] = []
+        total = 0
+        for raw in stdout.decode(errors="replace").splitlines():
+            file_part, _, rest = raw.partition(":")
+            lineno, _, text = rest.partition(":")
+            if not lineno.isdigit():
+                continue
+            total += 1
+            if len(matches) >= args.max_results:
+                continue
+            rel = file_part if str(prefix) == "." else f"{prefix}/{file_part}"
+            matches.append(f"{rel}:{lineno}: {text.strip()}")
+        return matches, total
+
+    def _python_search(
+        self, root: Path, args: SearchFilesArgs, regex: re.Pattern[str]
+    ) -> ToolResult:
+        matches: list[str] = []
+        total = 0
         for file in sorted(root.glob(args.glob)):
             if not file.is_file() or _SKIP_DIRS.intersection(file.parts):
                 continue
@@ -223,12 +312,20 @@ class SearchFilesTool(_WorkspaceTool[SearchFilesArgs]):
                 continue
             rel = file.relative_to(self.workspace)
             for lineno, line in enumerate(text.splitlines(), start=1):
-                if regex.search(line):
+                if not regex.search(line):
+                    continue
+                # После потолка совпадения только считаются — маркер честный.
+                total += 1
+                if len(matches) < args.max_results:
                     matches.append(f"{rel}:{lineno}: {line.strip()}")
-                    if len(matches) >= _MAX_SEARCH_MATCHES:
-                        matches.append(f"… [достигнут лимит {_MAX_SEARCH_MATCHES} совпадений]")
-                        return ToolResult.success("\n".join(matches))
-        return ToolResult.success("\n".join(matches) or "совпадений не найдено")
+        if not matches:
+            return ToolResult.success("совпадений не найдено")
+        if total > len(matches):
+            matches.append(
+                f"… [показано {len(matches)} из {total} совпадений; "
+                f"уточни pattern/glob или подними max_results]"
+            )
+        return ToolResult.success("\n".join(matches))
 
 
 def file_tools(workspace: Path) -> list[Tool[Any]]:

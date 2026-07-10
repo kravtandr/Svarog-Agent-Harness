@@ -2,9 +2,9 @@
 
 ## Статус
 
-Фаза 0 реализована (feat/adr-0015-phase0, коммит e02b2d0, в `main` не влита).
-Фаза 1 реализована (feat/adr-0015-phase1, поверх фазы 0, в `main` не влита).
-Фазы 2–5 — предложены, не начаты.
+Фазы 0 и 1 реализованы и влиты в `main`. Фазы 3 и 4 реализованы
+(feat/adr-0015-phase3-4). Фаза 2 ждёт своего гейта (15+ MCP-tools),
+фаза 5 — не начата.
 
 | Фаза / пункт | Статус |
 |---|---|
@@ -19,9 +19,9 @@
 | 1.4 микрокомпакция | ✅ Сделано |
 | 1.5 лимиты индекса памяти | ✅ Сделано |
 | 1.6 детектор затухающей отдачи | ✅ Сделано |
-| Фаза 2 — deferred-схемы tools | ❌ Не начато |
-| Фаза 3 — child runs | ❌ Не начато |
-| Фаза 4 — rg-backed coding tools | ❌ Не начато |
+| Фаза 2 — deferred-схемы tools | ❌ Не начато (гейт 15+ MCP-tools не выполнен) |
+| Фаза 3 — child runs | ✅ Сделано (spawn_child_run; durable-очередь сообщений — отложена, см. оговорку) |
+| Фаза 4 — rg-backed coding tools | ✅ Сделано (LSP-plugin — следующий этап, вне фазы) |
 | Фаза 5 — ops/UX | ❌ Не начато |
 
 ### Реализация фазы 0 — заметки о scoping
@@ -84,6 +84,33 @@
   результат)); исход — `suspended` с человекочитаемой причиной; счётчики
   сбрасываются при suspend, чтобы resume получил свежее окно. Тесты:
   `tests/test_loop.py`.
+
+### Реализация фаз 3–4 — заметки о scoping
+
+* **Фаза 3** — `Run.parent_run_id` (миграция `e5a9c4d1b8f3`); tool
+  `spawn_child_run(task, budget)` — тонкая обёртка, логика в
+  `TaskRunner.spawn_child_run`: git-worktree-изоляция
+  (`<parent>/.worktrees/<ws>-<id8>`, по образцу `.gitdirs` §0.2), бюджеты
+  клампятся вниз, у ребёнка свои lease/checkpoint/config-snapshot. Работа
+  ребёнка коммитится на его ветке `svarog/child-<id8>`, worktree после успеха
+  убирается; suspended/failed-ребёнок оставляет worktree для `svarog resume`.
+  Идемпотентность write-ahead: повторный spawn той же подзадачи возвращает
+  результат из trace (`find_completed_child_run` + `last_assistant_text`) —
+  это и есть «результат забирается из trace». **Оговорки:** ребёнок исполняется
+  синхронно внутри tool-вызова родителя (durable-очередь parent↔child для
+  асинхронных детей — отложена до реальной потребности); глубина дерева — один
+  уровень (детям spawn_child_run не выдаётся, защита от рекурсии); MCP-tools
+  ребёнку не передаются; non-git workspace — отказ tool'а (изоляция без
+  worktree невозможна). Reproducer'ы: `tests/test_child_runs.py`.
+* **Фаза 4** — `search_files` = rg-backend + Python-fallback (нет rg в системе
+  или паттерн вне rust-regex, например backreferences). `--hidden` выравнивает
+  охват с Python-обходом, `--sort path` — детерминированный порядок; контракт
+  вывода общий: `path:line: текст`, `max_results` (пагинация) и честный маркер
+  «показано X из N». **Оговорка:** позитивный `--glob` у rg — whitelist поверх
+  ignore-правил, поэтому дефолтный `**/*` не передаётся (иначе .gitignore
+  переставал бы действовать), а явный glob пользователя осознанно ищет и в
+  игнорируемом. `read_file` offset/limit приземлился раньше, в §1.2. LSP —
+  optional plugin, вне этой фазы. Reproducer'ы: `tests/test_file_tools.py`.
 
 ## Контекст
 
@@ -367,7 +394,7 @@ tool-схемы; provider-neutral аналог ToolSearch CC, **без** Anthrop
 
 ---
 
-## Фаза 3 — Child runs вместо in-process subagents — ❌ НЕ НАЧАТО
+## Фаза 3 — Child runs вместо in-process subagents — ✅ СДЕЛАНО
 
 У Svarog subagents нет — greenfield. Полезное из `AgentTool` CC (lifecycle,
 отдельный trace, cancellation, mailbox, worktree isolation) реализуется через
@@ -386,7 +413,7 @@ tool-схемы; provider-neutral аналог ToolSearch CC, **без** Anthrop
 
 ---
 
-## Фаза 4 — Coding tools — ❌ НЕ НАЧАТО
+## Фаза 4 — Coding tools — ✅ СДЕЛАНО (LSP — вне фазы)
 
 * заменить Python-обход в `search_files` на `ripgrep`-backend (скорость,
   корректность игнора) с явным `read_range`/пагинацией и честным маркером
@@ -443,9 +470,9 @@ sandbox:
 |---|---|---|---|
 | **0** | Security: 0.1 traversal → 0.2 git/mount → 0.5 lease → 0.4 config-snapshot → 0.3 раскладка | **блокирует всё** | ✅ Сделано |
 | 1 | 1.1 метаданные → 1.2 spill → 1.3 параллель → 1.4 микрокомпакция → 1.5 индекс → 1.6 стагнация | после 0 | ✅ Сделано |
-| 2 | Deferred-схемы | 15+ MCP-tools | ❌ Не начато |
-| 3 | Child runs (`parent_run_id`) | после 1 | ❌ Не начато |
-| 4 | rg-backed coding tools | после 1 | ❌ Не начато |
+| 2 | Deferred-схемы | 15+ MCP-tools | ❌ Не начато (гейт не выполнен) |
+| 3 | Child runs (`parent_run_id`) | после 1 | ✅ Сделано |
+| 4 | rg-backed coding tools | после 1 | ✅ Сделано |
 | 5 | Ops/UX | параллельно, вне ядра | ❌ Не начато |
 
 Внутри фазы 0 первыми идут 0.1 и 0.2 — они дают host-side code execution и
