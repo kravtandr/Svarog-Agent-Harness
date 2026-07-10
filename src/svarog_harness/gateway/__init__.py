@@ -7,6 +7,13 @@ ADR-0007) не требовала веб-стека.
 """
 
 from svarog_harness.gateway.hub import SingleTenantResolver, TenantHub
+from svarog_harness.gateway.jwt_auth import JwtResolver, mint_tenant_jwt
 from svarog_harness.gateway.service import GatewayService
 
-__all__ = ["GatewayService", "SingleTenantResolver", "TenantHub"]
+__all__ = [
+    "GatewayService",
+    "JwtResolver",
+    "SingleTenantResolver",
+    "TenantHub",
+    "mint_tenant_jwt",
+]

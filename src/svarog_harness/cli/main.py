@@ -1304,7 +1304,7 @@ def serve(
         import uvicorn
 
         from svarog_harness.config.paths import registry_path
-        from svarog_harness.gateway import GatewayService, TenantHub
+        from svarog_harness.gateway import GatewayService, JwtResolver, TenantHub
         from svarog_harness.gateway.api import create_app
         from svarog_harness.tenant import TenantRegistry
     except ImportError:
@@ -1315,8 +1315,18 @@ def serve(
         raise typer.Exit(code=1) from None
     if cfg.tenancy.enabled:
         registry = TenantRegistry(registry_path(cfg))
-        api = create_app(hub=TenantHub(cfg, registry))
-        mode = f"multi-tenant | реестр: {registry_path(cfg)}"
+        hub = TenantHub(cfg, registry)
+        jwt_ref = cfg.tenancy.jwt_secret_ref
+        if jwt_ref is not None:
+            jwt_secret = default_secret_store(cfg.secrets.path).get(jwt_ref)
+            if not jwt_secret:
+                console.print(f"[red]секрет '{jwt_ref}' (jwt_secret_ref) не найден[/red]")
+                raise typer.Exit(code=1)
+            api = create_app(resolver=JwtResolver(hub, jwt_secret))
+            mode = f"multi-tenant (JWT) | реестр: {registry_path(cfg)}"
+        else:
+            api = create_app(hub=hub)
+            mode = f"multi-tenant (bearer) | реестр: {registry_path(cfg)}"
     else:
         api = create_app(GatewayService(cfg, workspace), bearer_token=token)
         mode = f"single-tenant | workspace: {workspace}"

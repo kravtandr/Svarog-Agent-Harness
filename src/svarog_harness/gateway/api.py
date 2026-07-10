@@ -33,20 +33,23 @@ def create_app(
     *,
     bearer_token: str | None = None,
     hub: TenantHub | None = None,
+    resolver: GatewayResolver | None = None,
 ) -> FastAPI:
-    """REST/WS-приложение над сервисом (single-tenant) или хабом (multi-tenant).
+    """REST/WS-приложение над сервисом (single-tenant), хабом или резолвером.
 
     Auth и выбор сервиса объединены в резолвер: single-tenant — общий bearer
     (или открытый режим без токена), multi-tenant — per-tenant token → тенант
-    через реестр (ADR-0014). Каждый защищённый роут получает сервис
-    аутентифицированного тенанта через зависимость `_require_service`.
+    через реестр, либо явный `resolver` (напр. JWT, ADR-0014 Фаза 3). Каждый
+    защищённый роут получает сервис аутентифицированного тенанта через
+    зависимость `_require_service`.
     """
-    if hub is not None:
-        resolver: GatewayResolver = hub
-    elif service is not None:
-        resolver = SingleTenantResolver(service, bearer_token)
-    else:
-        raise ValueError("create_app: нужен либо service, либо hub")
+    if resolver is None:
+        if hub is not None:
+            resolver = hub
+        elif service is not None:
+            resolver = SingleTenantResolver(service, bearer_token)
+        else:
+            raise ValueError("create_app: нужен service, hub или resolver")
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
