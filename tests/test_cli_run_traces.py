@@ -182,6 +182,8 @@ def test_run_iteration_limit_suspends_with_exit_code_3(
         for i in range(60)
     ]
     _patch_provider(monkeypatch, endless)
+    # Отключаем refuel (порог > max), чтобы проверить именно стоп-кран max_iterations.
+    monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "100")
     result = runner.invoke(cli_main.app, ["run", "зациклись", "--workspace", str(workspace)])
     assert result.exit_code == 3
     assert "лимит итераций" in result.output
@@ -201,7 +203,8 @@ def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.Mon
         ]
         + [CompletionResult(content="закончил после resume", usage=Usage(10, 5))],
     )
-    # refuel_after_iterations должен быть меньше max_iterations — валидатор.
+    # Низкий порог refuel → run приостанавливается (refuel-suspend, ADR-0005);
+    # resume поднимает задачу и доводит до конца.
     monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
     monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
     result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])

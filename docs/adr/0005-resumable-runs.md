@@ -39,3 +39,4 @@ Sandbox при приостановке останавливается (конт
 * Approval становится асинхронным по построению: никакого «CLI ждет с открытым stdin» как основы механизма.
 * Recovery после падения — просто частный случай resume.
 * Идемпотентность tool calls важна на границе «tool вызван, результат не записан» — checkpoint фиксирует tool call до исполнения (write-ahead).
+* **Refuel реализован через тот же suspend/resume** (`loop._refuel_suspend` + `_rebuild_after_refuel`): при достижении порога run уходит в `suspended` со сбросом контекста в `task_state.md` (раздутая история в checkpoint не сохраняется), процесс и sandbox освобождаются, а `resume` пересобирает контекст с нуля и создаёт новый sandbox над тем же workspace. В MVP поднятие refuel-suspended run — командой `svarog resume` (авто-супервизор, поднимающий такие run'ы в отдельных воркерах, — пост-MVP). `refuel_after_iterations > max_iterations` отключает refuel для коротких интерактивных задач.

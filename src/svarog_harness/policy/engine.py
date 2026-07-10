@@ -144,6 +144,16 @@ class PolicyEngine:
                 "неотключаемый critical-набор (§3.6): approval обязателен в любом режиме",
             )
 
+        # ask_user: агент просит ввод человека — run ждёт ответа в любом режиме
+        # автономии (таймаут не даёт зависнуть, §6.5).
+        if action_type == "user.question":
+            return PolicyDecision(
+                PolicyAction.REQUIRE_APPROVAL,
+                action_type,
+                risk,
+                "запрос ввода у пользователя (ask_user)",
+            )
+
         rule = self._match_rule("require_approval", action_type, path)
         if rule is not None or self._match_profile("require_approval", action_type):
             reason = (rule.reason if rule and rule.reason else None) or (

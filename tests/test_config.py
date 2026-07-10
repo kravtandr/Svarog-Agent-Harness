@@ -70,13 +70,16 @@ def test_default_model_must_be_defined_provider(tmp_path: Path) -> None:
         load(tmp_path)
 
 
-def test_refuel_threshold_must_be_below_max_iterations(tmp_path: Path) -> None:
+def test_refuel_threshold_above_max_disables_refuel(tmp_path: Path) -> None:
+    # refuel_after_iterations >= max_iterations допустимо: порог недостижим,
+    # refuel просто отключён (§6.10) — не ошибка конфигурации.
     write_project_config(
         tmp_path,
         MINIMAL_MODELS + "runtime:\n  max_iterations: 10\n  refuel_after_iterations: 10\n",
     )
-    with pytest.raises(ConfigError, match="refuel_after_iterations"):
-        load(tmp_path)
+    config = load(tmp_path)
+    assert config.runtime.refuel_after_iterations == 10
+    assert config.runtime.max_iterations == 10
 
 
 def test_missing_config_reports_searched_paths(tmp_path: Path) -> None:

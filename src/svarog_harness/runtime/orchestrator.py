@@ -31,6 +31,7 @@ from svarog_harness.skills.curator import CuratorStore
 from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+from svarog_harness.storage.locks import LockBackend, default_lock_backend
 from svarog_harness.storage.models import Run, RunState, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
@@ -38,6 +39,7 @@ from svarog_harness.tools.memory_tools import RememberTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
+from svarog_harness.tools.user_tools import AskUserTool
 from svarog_harness.trace.lookup import RunNotResumableError
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import CheckOutcome, Verifier, skill_checks
@@ -79,6 +81,8 @@ class TaskRunner:
         self._cfg = cfg
         self._workspace = workspace
         self._store: SecretStore = default_secret_store(cfg.secrets.path)
+        # Межпроцессная сериализация memory-writer (ADR-0004/0007).
+        self._lock: LockBackend = default_lock_backend(cfg.storage.db_path)
 
     @property
     def store(self) -> SecretStore:
@@ -212,6 +216,7 @@ class TaskRunner:
             registry.register(tool)
         registry.register(BashTool(environment, self._cfg.sandbox.timeout_sec))
         registry.register(RequestApprovalTool())
+        registry.register(AskUserTool())
         for mcp_tool in mcp_tools or []:
             # MCP tools проходят через Policy Engine как обычные (§9): по умолчанию
             # require_approval (action_type mcp.*), риск из конфига сервера.
@@ -370,7 +375,7 @@ class TaskRunner:
         mem_dir = memory_dir(self._cfg)
         if mem_dir is None or not mem_dir.is_dir():
             return
-        writer = MemoryWriter(db, mem_dir)
+        writer = MemoryWriter(db, mem_dir, lock=self._lock)
         # known_values обязательны: без них secret scan не поймает реальные
         # значения секретов, пересказанные агентом в remember (ADR-0006).
         for row in await writer.drain(known_values=self.known_secret_values()):

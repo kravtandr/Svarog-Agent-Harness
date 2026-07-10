@@ -194,7 +194,8 @@ async def test_suspends_at_max_iterations(db: AsyncSession, tmp_path: Path) -> N
         for i in range(10)
     ]
     provider = ScriptedProvider(endless)
-    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=2)
+    # refuel отключён (порог > max), чтобы проверить именно стоп-кран max_iterations.
+    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=5)
     outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("зациклись", AutonomyMode.YOLO)
 
     assert outcome.state is RunState.SUSPENDED

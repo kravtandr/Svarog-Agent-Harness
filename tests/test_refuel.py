@@ -1,4 +1,4 @@
-"""Тесты refuel (§6.10, §20): task_state.md, сброс и пересборка контекста inline."""
+"""Тесты refuel (§6.10, §20): task_state.md, refuel как cross-process suspend/resume."""
 
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -16,6 +16,7 @@ from svarog_harness.llm.provider import (
     Usage,
 )
 from svarog_harness.policy.engine import PolicyEngine
+from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.runtime.refuel import build_task_state
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
@@ -95,10 +96,10 @@ def _loop(
     )
 
 
-async def test_refuel_writes_task_state_and_rebuilds_context(
+async def test_refuel_suspends_then_resume_rebuilds_context(
     db: AsyncSession, tmp_path: Path
 ) -> None:
-    # refuel на 2-й итерации, всего разрешено 6.
+    # refuel на 2-й итерации: run приостанавливается, resume пересобирает контекст.
     cfg = RuntimeConfig(max_iterations=6, refuel_after_iterations=2)
     provider = ScriptedProvider(
         [
@@ -110,14 +111,24 @@ async def test_refuel_writes_task_state_and_rebuilds_context(
     )
     outcome = await _loop(provider, db, tmp_path, cfg).run("длинная задача", AutonomyMode.YOLO)
 
-    assert outcome.state is RunState.COMPLETED
-    # task_state.md записан на диск при refuel.
+    # Refuel = приостановка (ADR-0005), а не inline-продолжение.
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None and "refuel" in outcome.error
     assert (tmp_path / "task_state.md").exists()
-    task_state = (tmp_path / "task_state.md").read_text(encoding="utf-8")
-    assert "# Task state" in task_state
+    assert "# Task state" in (tmp_path / "task_state.md").read_text(encoding="utf-8")
 
-    # После refuel контекст пересобран: 3-й запрос к модели короткий (system+user),
-    # а не накопленная история из 6+ сообщений.
+    # Resume поднимает run: контекст пересобирается из task_state.md.
+    recorder = TraceRecorder(db)
+    run, raw = await recorder.load_resumable(outcome.run_id)
+    state = LoopState.from_dict(raw)
+    assert state.refuel_pending is True
+    assert state.messages == []  # раздутую историю в checkpoint не тащим
+
+    resumed = await _loop(provider, db, tmp_path, cfg).resume(run, state)
+    assert resumed.state is RunState.COMPLETED
+
+    # Первый запрос после resume короткий (system + user с task_state), а не
+    # накопленная история.
     request_after_refuel = provider.seen_messages[2]
     assert len(request_after_refuel) == 2
     assert request_after_refuel[0].role == "system"
@@ -125,12 +136,20 @@ async def test_refuel_writes_task_state_and_rebuilds_context(
 
 
 async def test_max_iterations_still_caps_across_refuel(db: AsyncSession, tmp_path: Path) -> None:
-    # refuel каждые 2 итерации, но всего не больше 3 — max должен сработать.
+    # refuel каждые 2 итерации, но всего не больше 3 — max должен сработать после resume.
     cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=2)
     provider = ScriptedProvider([_tool_turn(i) for i in range(10)])
-    outcome = await _loop(provider, db, tmp_path, cfg).run("бесконечная", AutonomyMode.YOLO)
+    first = await _loop(provider, db, tmp_path, cfg).run("бесконечная", AutonomyMode.YOLO)
 
-    assert outcome.state is RunState.SUSPENDED
-    assert outcome.iterations == 3
-    assert outcome.error is not None
-    assert "лимит итераций" in outcome.error
+    # Первая остановка — refuel на 2-й итерации.
+    assert first.state is RunState.SUSPENDED
+    assert "refuel" in (first.error or "")
+    assert first.iterations == 2
+
+    run, raw = await TraceRecorder(db).load_resumable(first.run_id)
+    resumed = await _loop(provider, db, tmp_path, cfg).resume(run, LoopState.from_dict(raw))
+
+    # После resume max_iterations срабатывает на 3-й итерации (жёсткий стоп-кран).
+    assert resumed.state is RunState.SUSPENDED
+    assert resumed.iterations == 3
+    assert "лимит итераций" in (resumed.error or "")

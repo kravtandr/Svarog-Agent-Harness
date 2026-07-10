@@ -59,6 +59,7 @@ from svarog_harness.skills.proposal_manager import (
     SkillProposalStateError,
 )
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+from svarog_harness.storage.locks import default_lock_backend
 from svarog_harness.storage.models import Approval, Run, RunState, SkillProposal
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
@@ -575,6 +576,9 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
             break
         console.print()
         for approval in approvals:
+            if approval.action_type == "user.question":
+                _answer_question_interactive(cfg, approval)
+                continue
             _show_approval(approval)
             approved = typer.confirm("одобрить действие?", default=False)
             reason = None
@@ -596,6 +600,23 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
             asyncio.run(_with_db(cfg, decide))
         outcome = asyncio.run(_resume_task(cfg, outcome.run_id))
     return outcome
+
+
+def _answer_question_interactive(cfg: SvarogConfig, approval: Approval) -> None:
+    """ask_user: показать вопрос и записать текстовый ответ (§6.5)."""
+    payload = approval.payload or {}
+    console.print(f"[bold]вопрос {approval.id[:8]}[/bold] | run {approval.run_id[:8]}")
+    console.print(f"  [cyan]{payload.get('question') or payload.get('reason') or ''}[/cyan]")
+    answer = typer.prompt(
+        "ваш ответ (Enter — продолжить без ответа)", default="", show_default=False
+    )
+
+    async def record(db: AsyncSession, approval_id: str = approval.id, text: str = answer) -> None:
+        recorder = TraceRecorder(db)
+        found = await recorder.find_approval_by_prefix(approval_id)
+        await recorder.answer_question(found, answer=text, answered_by="cli")
+
+    asyncio.run(_with_db(cfg, record))
 
 
 def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
@@ -721,6 +742,29 @@ def approvals_deny(
 ) -> None:
     """Отклонить действие; агент получит причину отказа при resume."""
     _decide_approval_command(approval_id, approved=False, reason=reason)
+
+
+@approvals_app.command("answer")
+def approvals_answer(
+    approval_id: Annotated[str, typer.Argument(help="id вопроса ask_user или его префикс")],
+    text: Annotated[str, typer.Argument(help="Текст ответа; пусто — продолжить без ответа")] = "",
+) -> None:
+    """Ответить на вопрос ask_user; run возобновляется командой resume (§6.5)."""
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> Approval:
+        recorder = TraceRecorder(db)
+        approval = await recorder.find_approval_by_prefix(approval_id)
+        await recorder.answer_question(approval, answer=text, answered_by="cli")
+        return approval
+
+    try:
+        approval = asyncio.run(_with_db(cfg, action))
+    except ApprovalNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"вопрос {approval.id[:8]} [green]отвечен[/green]")
+    console.print(f"[dim]продолжить run: svarog resume {approval.run_id[:8]}[/dim]")
 
 
 @skills_app.command("list")
@@ -1015,7 +1059,7 @@ def memory_flush() -> None:
     store = default_secret_store(cfg.secrets.path)
 
     async def action(db: AsyncSession) -> int:
-        writer = MemoryWriter(db, mem_dir)
+        writer = MemoryWriter(db, mem_dir, lock=default_lock_backend(cfg.storage.db_path))
         rows = await writer.drain(known_values=_known_secret_values(cfg, store))
         for row in rows:
             if row.error:

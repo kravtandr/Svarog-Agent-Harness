@@ -112,7 +112,8 @@ async def test_suspended_run_resumes_and_completes(db: AsyncSession, tmp_path: P
             _final("после resume"),
         ]
     )
-    cfg = RuntimeConfig(max_iterations=2, refuel_after_iterations=1)
+    # refuel отключён (порог > max), чтобы проверить именно стоп-кран max_iterations.
+    cfg = RuntimeConfig(max_iterations=2, refuel_after_iterations=5)
     outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("длинная задача", AutonomyMode.YOLO)
     assert outcome.state is RunState.SUSPENDED
     assert outcome.iterations == 2

@@ -29,6 +29,9 @@ class LoopState:
     # Сколько раз модели возвращали дефектный «финальный» ответ на повтор
     # (протёкший tool call, обрезка по токенам, пустой ответ).
     nudges: int = 0
+    # Refuel-приостановка (§6.10, ADR-0005): контекст сброшен в task_state.md,
+    # resume пересобирает его с нуля (а не восстанавливает из checkpoint).
+    refuel_pending: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +44,7 @@ class LoopState:
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
             "iterations_since_refuel": self.iterations_since_refuel,
             "nudges": self.nudges,
+            "refuel_pending": self.refuel_pending,
         }
 
     @classmethod
@@ -55,6 +59,7 @@ class LoopState:
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
             nudges=raw.get("nudges", 0),
+            refuel_pending=raw.get("refuel_pending", False),
         )
 
 

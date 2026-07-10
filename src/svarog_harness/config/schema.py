@@ -65,18 +65,16 @@ class RuntimeConfig(StrictModel):
     autonomy: AutonomyMode = AutonomyMode.YOLO
     max_iterations: int = Field(default=50, gt=0)
     max_context_tokens: int = Field(default=120_000, gt=0)
+    # Порог refuel: при достижении run приостанавливается со сбросом контекста в
+    # task_state.md (§6.10, ADR-0005). Значение > max_iterations отключает refuel
+    # (порог недостижим) — для коротких интерактивных задач, где сброс не нужен.
     refuel_after_iterations: int = Field(default=35, gt=0)
     max_tokens_per_run: int = Field(default=2_000_000, gt=0)
     max_cost_usd_per_run: float = Field(default=5.0, gt=0)
-
-    @model_validator(mode="after")
-    def _check_refuel_threshold(self) -> Self:
-        if self.refuel_after_iterations >= self.max_iterations:
-            raise ValueError(
-                f"runtime.refuel_after_iterations ({self.refuel_after_iterations}) должен быть "
-                f"меньше runtime.max_iterations ({self.max_iterations}), иначе refuel не сработает"
-            )
-        return self
+    # Дедлайн ответа на ask_user (§6.5): по истечении при resume агенту
+    # возвращается «ответа нет, продолжай по своему усмотрению». По умолчанию
+    # 1 час — задача не зависает в ожидании человека навсегда.
+    ask_user_timeout_sec: int = Field(default=3600, gt=0)
 
 
 class SandboxConfig(StrictModel):

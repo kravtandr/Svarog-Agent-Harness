@@ -168,6 +168,25 @@ class TraceRecorder:
         approval.reason = reason
         await self._db.commit()
 
+    async def answer_question(self, approval: Approval, *, answer: str, answered_by: str) -> None:
+        """ask_user: зафиксировать текстовый ответ человека (§6.5).
+
+        Ответ хранится в reason (APPROVED = отвечено); пустой ответ — согласие
+        продолжить без уточнения.
+        """
+        approval.status = ApprovalStatus.APPROVED
+        approval.decided_at = utcnow()
+        approval.decided_by = answered_by
+        approval.reason = answer
+        await self._db.commit()
+
+    async def expire_approval(self, approval: Approval) -> None:
+        """Пометить вопрос/approval истёкшим по таймауту (§6.5)."""
+        approval.status = ApprovalStatus.EXPIRED
+        approval.decided_at = utcnow()
+        approval.decided_by = "timeout"
+        await self._db.commit()
+
     async def enqueue_memory_change(self, run: Run, change: dict[str, Any]) -> MemoryChange:
         """Поставить MemoryChangeRequest в очередь single writer'а (ADR-0004)."""
         row = MemoryChange(change=change, source_run_id=run.id)

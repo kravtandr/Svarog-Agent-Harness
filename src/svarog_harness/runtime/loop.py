@@ -3,14 +3,16 @@
 build context → LLM → tool calls → observe → iterate; checkpoint после
 каждого шага. Остановки: финальный ответ модели → completed; лимиты
 итераций/токенов/стоимости/контекста → suspended (возобновляется после
-изменения лимитов в конфигурации; compaction/refuel — M3); исключение →
-failed. Tool calls фиксируются в checkpoint до исполнения (write-ahead) —
-при resume недоисполненные вызовы доисполняются первыми.
+изменения лимитов); порог refuel → suspended со сбросом контекста в
+task_state.md (resume пересобирает его с нуля, §6.10); исключение → failed.
+Tool calls фиксируются в checkpoint до исполнения (write-ahead) — при resume
+недоисполненные вызовы доисполняются первыми.
 """
 
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +29,22 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
-from svarog_harness.storage.models import ApprovalStatus, Run, RunState
+from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
+from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME
 from svarog_harness.trace.recorder import TraceRecorder
+
+# Сообщения агенту, когда ответа на ask_user нет (§6.5): не ошибка — сигнал
+# продолжать по своему усмотрению, чтобы run не зависал в ожидании человека.
+_QUESTION_TIMEOUT_MSG = (
+    "пользователь не ответил в отведённое время — продолжай по своему усмотрению, "
+    "зафиксировав сделанное допущение"
+)
+_QUESTION_NO_ANSWER_MSG = (
+    "пользователь оставил вопрос без ответа — продолжай по своему усмотрению, "
+    "зафиксировав сделанное допущение"
+)
 
 # Сколько раз возвращать модели дефектный «финальный» ответ на повтор
 # (протёкший tool call, обрезка, пустой ответ), прежде чем сдаться.
@@ -176,6 +190,10 @@ class AgentLoop:
         try:
             # Write-ahead: доисполнить вызовы, зафиксированные до остановки.
             await self._execute_pending(run, state)
+            # Resume после refuel-приостановки: пересобрать контекст из
+            # task_state.md, отбросив прежнюю историю (§6.10, ADR-0005).
+            if state.refuel_pending:
+                await self._rebuild_after_refuel(run, state)
 
             while state.iterations < self._cfg.max_iterations:
                 state.iterations += 1
@@ -235,10 +253,12 @@ class AgentLoop:
                 await self._execute_pending(run, state)
 
                 # Refuel: порог итераций с последнего сброса достигнут — сбросить
-                # контекст из task_state.md и продолжить (§6.10). max_iterations
+                # контекст в task_state.md и ПРИОСТАНОВИТЬ run (§6.10, ADR-0005).
+                # Cross-process: процесс и sandbox освобождаются, resume поднимает
+                # задачу с пересобранным из task_state.md контекстом. max_iterations
                 # (total) остаётся жёстким стоп-краном поверх refuel.
                 if state.iterations_since_refuel >= self._cfg.refuel_after_iterations:
-                    await self._refuel(run, state)
+                    return await self._refuel_suspend(run, state)
 
             return await self._suspend(
                 run,
@@ -289,14 +309,16 @@ class AgentLoop:
         await self._recorder.set_run_state(run, RunState.SUSPENDED, error=reason)
         return self._outcome(run, RunState.SUSPENDED, state, "", reason)
 
-    async def _refuel(self, run: Run, state: LoopState) -> None:
-        """Сбросить раздутый контекст в task_state.md и пересобрать его (§6.10).
+    async def _refuel_suspend(self, run: Run, state: LoopState) -> RunOutcome:
+        """Refuel как приостановка (§6.10, ADR-0005): сбросить контекст в
+        task_state.md и уйти в suspended.
 
-        MVP: refuel происходит inline — состояние сериализуется в task_state.md
-        (+ коммит Flow C для durability), затем контекст пересобирается из него,
-        отбрасывая накопленную историю. Cross-process refuel (новый OS-процесс)
-        — расширение server-режимов. Total-счётчик итераций не сбрасывается,
-        поэтому max_iterations остаётся жёстким стоп-краном.
+        Состояние сериализуется в task_state.md (+ коммит Flow C для durability),
+        раздутая история из checkpoint убирается — resume пересоберёт контекст с
+        нуля из task_state.md. Процесс и sandbox между refuel и resume
+        освобождаются; поднятие — `svarog resume` (авто-супервизор — пост-MVP).
+        Total-счётчик итераций не сбрасывается: max_iterations остаётся жёстким
+        стоп-краном поверх refuel.
         """
         task_state = build_task_state(state.task, state.messages, state.iterations)
         (state.workspace / task_state_path()).write_text(task_state, encoding="utf-8")
@@ -306,6 +328,21 @@ class AgentLoop:
                 await self._workspace_flow.commit_step(
                     "svarog refuel: task_state.md", run_id=run.id
                 )
+        state.refuel_pending = True
+        # Раздутую историю в checkpoint не тащим — resume пересоберёт из файла.
+        state.messages = []
+        state.pending_tool_calls = ()
+        state.iterations_since_refuel = 0
+        return await self._suspend(
+            run,
+            state,
+            "refuel: контекст сброшен в task_state.md; выполните svarog resume для продолжения",
+        )
+
+    async def _rebuild_after_refuel(self, run: Run, state: LoopState) -> None:
+        """Пересобрать контекст из task_state.md при resume после refuel (§6.10)."""
+        task_state_file = state.workspace / task_state_path()
+        task_state = task_state_file.read_text(encoding="utf-8") if task_state_file.exists() else ""
         state.messages = build_refuel_messages(
             state.task,
             state.workspace,
@@ -313,6 +350,7 @@ class AgentLoop:
             skill_cards=self._skill_cards,
             memory=self._memory,
         )
+        state.refuel_pending = False
         state.iterations_since_refuel = 0
         for message in state.messages:
             await self._recorder.add_message(run, message.role, {"content": message.content})
@@ -351,26 +389,102 @@ class AgentLoop:
         )
         return result
 
+    async def _consume_question(
+        self,
+        run: Run,
+        call: ToolCallRequest,
+        arguments: dict[str, Any],
+        decision: PolicyDecision,
+    ) -> ToolResult | None:
+        """ask_user: вернуть ответ человека либо (по таймауту) продолжить (§6.5).
+
+        None — здесь не возвращается: у вопроса всегда есть исход (ответ или
+        истечение). Нет решения и дедлайн не наступил → _ApprovalRequiredError
+        (waiting_approval).
+        """
+        approval = await self._recorder.find_approval_for_call(run, call.id)
+        if approval is None:
+            # Первый заход — создать вопрос и уйти в ожидание ответа.
+            raise _ApprovalRequiredError(call, arguments, decision)
+        if approval.status is ApprovalStatus.APPROVED:
+            answer = (approval.reason or "").strip()
+            message = f"ответ пользователя: {answer}" if answer else _QUESTION_NO_ANSWER_MSG
+            return await self._record_question_result(run, call, arguments, decision, message)
+        if approval.status is ApprovalStatus.PENDING:
+            if not self._question_deadline_passed(approval):
+                raise _ApprovalRequiredError(call, arguments, decision)
+            await self._recorder.expire_approval(approval)
+            return await self._record_question_result(
+                run, call, arguments, decision, _QUESTION_TIMEOUT_MSG
+            )
+        # DENIED или EXPIRED — ответа нет, продолжаем по best-guess.
+        message = (
+            _QUESTION_TIMEOUT_MSG
+            if approval.status is ApprovalStatus.EXPIRED
+            else _QUESTION_NO_ANSWER_MSG
+        )
+        return await self._record_question_result(run, call, arguments, decision, message)
+
+    async def _record_question_result(
+        self,
+        run: Run,
+        call: ToolCallRequest,
+        arguments: dict[str, Any],
+        decision: PolicyDecision,
+        message: str,
+    ) -> ToolResult:
+        """Записать исход ask_user в trace и вернуть его модели как результат."""
+        record = await self._recorder.start_tool_call(
+            run,
+            tool_name=call.name,
+            arguments=arguments,
+            risk_level=decision.risk_level.value,
+            policy_decision=decision.action.value,
+        )
+        result = ToolResult.success(message)
+        await self._recorder.finish_tool_call(record, ok=True, output=message, error=None)
+        return result
+
+    def _question_deadline_passed(self, approval: Any) -> bool:
+        raw = approval.payload.get("deadline")
+        if not raw:
+            return False
+        try:
+            deadline = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return False
+        return utcnow() >= deadline
+
+    def _question_deadline(self, arguments: dict[str, Any]) -> datetime:
+        timeout = arguments.get("timeout_sec") or self._cfg.ask_user_timeout_sec
+        return utcnow() + timedelta(seconds=int(timeout))
+
     async def _wait_for_approval(
         self, run: Run, state: LoopState, approval: _ApprovalRequiredError
     ) -> RunOutcome:
         """require_approval: Approval-запрос + waiting_approval (ADR-0005, ADR-0010).
 
         Вызов остается в pending_tool_calls checkpoint'а — после решения
-        человека resume доисполнит его (или вернет отказ модели).
+        человека resume доисполнит его (или вернет отказ модели). Для ask_user
+        в payload добавляется дедлайн: по нему resume решает, ждать ли дальше
+        или продолжать без ответа (§6.5).
         """
         existing = await self._recorder.find_approval_for_call(run, approval.call.id)
         if existing is None:
             # Approval показывает фактические аргументы, не пересказ агента (§12).
+            payload: dict[str, Any] = {
+                "call_id": approval.call.id,
+                "tool": approval.call.name,
+                "arguments": approval.arguments,
+                "reason": approval.decision.reason,
+            }
+            if approval.call.name == ASK_USER_TOOL_NAME:
+                payload["question"] = approval.arguments.get("question", "")
+                payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
             await self._recorder.create_approval(
                 run,
                 action_type=approval.decision.action_type,
-                payload={
-                    "call_id": approval.call.id,
-                    "tool": approval.call.name,
-                    "arguments": approval.arguments,
-                    "reason": approval.decision.reason,
-                },
+                payload=payload,
             )
         await self._save_checkpoint(run, state)
         await self._recorder.set_run_state(
@@ -432,7 +546,10 @@ class AgentLoop:
             )
             return result
         if decision.action is PolicyAction.REQUIRE_APPROVAL:
-            verdict = await self._consume_approval(run, call, arguments, decision)
+            if call.name == ASK_USER_TOOL_NAME:
+                verdict = await self._consume_question(run, call, arguments, decision)
+            else:
+                verdict = await self._consume_approval(run, call, arguments, decision)
             if verdict is not None:
                 return verdict
         if decision.action is PolicyAction.NOTIFY and self._on_notify is not None:
