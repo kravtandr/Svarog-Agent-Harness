@@ -149,6 +149,10 @@ class Run(TimestampedBase):
     # же workspace, а recovery приостанавливает только протухшие RUNNING.
     workspace: Mapped[str | None] = mapped_column(String(1024), index=True)
     heartbeat_at: Mapped[datetime | None]
+    # Дочерний run (ADR-0015 фаза 3): id родителя; NULL — верхнеуровневый run.
+    # Без FK-constraint: SQLite перестраивает таблицу ради self-FK, а
+    # целостность обеспечивает единственный писатель (recorder.start_run).
+    parent_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
     meta: Mapped[dict[str, Any]] = mapped_column(default=dict)
 
     session: Mapped[Session] = relationship(back_populates="runs")

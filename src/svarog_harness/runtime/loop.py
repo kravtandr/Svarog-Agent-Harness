@@ -170,6 +170,7 @@ class AgentLoop:
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
+        parent_run_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -197,6 +198,8 @@ class AgentLoop:
         # Интерфейсам (gateway/Telegram) нужен run_id сразу после создания run,
         # чтобы подписаться на его события до завершения (§6.1).
         self._on_run_started = on_run_started
+        # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
+        self._parent_run_id = parent_run_id
 
     async def run(
         self,
@@ -218,6 +221,7 @@ class AgentLoop:
             session_id=session_id,
             config_hash=self._config_hash,
             workspace=str(self._workspace),
+            parent_run_id=self._parent_run_id,
         )
         if self._on_run_started is not None:
             self._on_run_started(run)

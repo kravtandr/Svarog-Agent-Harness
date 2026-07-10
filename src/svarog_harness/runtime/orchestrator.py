@@ -8,6 +8,7 @@ CLI, gateway (REST/WS) и Telegram гоняют один и тот же end-to-e
 """
 
 import contextlib
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -38,7 +39,13 @@ from svarog_harness.sandbox import (
     create_environment,
     find_docker,
 )
-from svarog_harness.secrets import SecretStore, default_secret_store, injected_env, selected_values
+from svarog_harness.secrets import (
+    SecretStore,
+    default_secret_store,
+    injected_env,
+    redact,
+    selected_values,
+)
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.skills.curator import CuratorStore
 from svarog_harness.skills.proposal import SkillProposalRequest
@@ -47,6 +54,12 @@ from svarog_harness.storage.db import create_engine, create_session_factory, ini
 from svarog_harness.storage.locks import LockBackend, default_lock_backend
 from svarog_harness.storage.models import Run, RunState, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
+from svarog_harness.tools.base import ToolError
+from svarog_harness.tools.child_tools import (
+    SpawnChildCallback,
+    SpawnChildRunArgs,
+    SpawnChildRunTool,
+)
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.plan_tools import UpdatePlanTool
@@ -230,6 +243,8 @@ class TaskRunner:
         *,
         excluded_skills: frozenset[str] = frozenset(),
         mcp_tools: list[MCPTool] | None = None,
+        child_spawn: SpawnChildCallback | None = None,
+        parent_run_id: str | None = None,
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
@@ -268,6 +283,7 @@ class TaskRunner:
             proposal_sink,
             mem_dir=mem_dir,
             mcp_tools=mcp_tools,
+            child_spawn=child_spawn,
         )
         return AgentLoop(
             default_provider(cfg.models, self._host_store),  # host-скоуп (ADR-0014 #2)
@@ -289,6 +305,7 @@ class TaskRunner:
             on_tool_call=hooks.on_tool_call,
             on_notify=hooks.on_notify,
             on_run_started=hooks.on_run_started,
+            parent_run_id=parent_run_id,
         )
 
     def _build_registry(
@@ -302,6 +319,7 @@ class TaskRunner:
         *,
         mem_dir: Path | None,
         mcp_tools: list[MCPTool] | None = None,
+        child_spawn: SpawnChildCallback | None = None,
     ) -> ToolRegistry:
         registry = ToolRegistry()
         for tool in file_tools(self._workspace):
@@ -316,6 +334,10 @@ class TaskRunner:
         registry.register(BashTool(environment, self._cfg.sandbox.timeout_sec))
         registry.register(RequestApprovalTool())
         registry.register(AskUserTool())
+        if child_spawn is not None:
+            # Child runs (ADR-0015 фаза 3): только верхнеуровневым runs — детям
+            # callback не передаётся, глубина дерева ограничена одним уровнем.
+            registry.register(SpawnChildRunTool(child_spawn))
         for mcp_tool in mcp_tools or []:
             # MCP tools проходят через Policy Engine как обычные (§9): по умолчанию
             # require_approval (action_type mcp.*), риск из конфига сервера.
@@ -343,6 +365,119 @@ class TaskRunner:
             registry.register(CreateSkillProposalTool(on_propose=proposal_sink.append))
         return registry
 
+    async def spawn_child_run(
+        self,
+        recorder: TraceRecorder,
+        parent_run: Run,
+        autonomy: AutonomyMode,
+        args: SpawnChildRunArgs,
+        hooks: RunHooks,
+        *,
+        excluded_skills: frozenset[str] = frozenset(),
+    ) -> str:
+        """Дочерний run (ADR-0015 фаза 3): worktree → клампнутый бюджет → loop.
+
+        Ребёнок — обычный `Run` с `parent_run_id`, своим checkpoint'ом и
+        config-snapshot'ом. Результат durable в той же SQLite: повторный spawn
+        той же подзадачи (write-ahead resume родителя) вернёт результат из
+        trace, не гоняя ребёнка заново. Работа ребёнка коммитится на его
+        ветке; физический worktree после успеха убирается.
+        """
+        # Lookup по той же redacted-форме, в которой loop сохраняет Run.task.
+        task = redact(args.task, self.known_secret_values())
+        existing = await recorder.find_completed_child_run(parent_run.id, task)
+        if existing is not None:
+            answer = await recorder.last_assistant_text(existing)
+            return f"дочерний run {existing.id[:8]} уже выполнен (результат из trace):\n{answer}"
+
+        parent_repo = GitRepo(self._workspace)
+        if not await parent_repo.is_repo() or not await parent_repo.has_commits():
+            raise ToolError(
+                "spawn_child_run требует git-workspace хотя бы с одним коммитом: "
+                "изоляция ребёнка — отдельный git-worktree (ADR-0015 фаза 3)"
+            )
+        suffix = uuid.uuid4().hex[:8]
+        branch = f"svarog/child-{suffix}"
+        ws = self._workspace.expanduser().resolve()
+        # Worktree — сосед workspace (вне его дерева и вне bind-mount родителя),
+        # по образцу .gitdirs из §0.2.
+        child_ws = ws.parent / ".worktrees" / f"{ws.name}-{suffix}"
+        await parent_repo.add_worktree(child_ws, branch)
+
+        # Бюджеты клампятся вниз к родительским (как autonomy/role): запросить
+        # больше, чем разрешено родителю, нельзя.
+        runtime = self._cfg.runtime
+        child_runtime = runtime.model_copy(
+            update={
+                "max_iterations": min(
+                    args.max_iterations or runtime.max_iterations, runtime.max_iterations
+                ),
+                "max_tokens_per_run": min(
+                    args.max_tokens or runtime.max_tokens_per_run, runtime.max_tokens_per_run
+                ),
+                "max_cost_usd_per_run": min(
+                    args.max_cost_usd or runtime.max_cost_usd_per_run,
+                    runtime.max_cost_usd_per_run,
+                ),
+            }
+        )
+        child_runner = TaskRunner(
+            self._cfg.model_copy(update={"runtime": child_runtime}), child_ws, role=self._role
+        )
+        child_runner.assert_sandbox_available()
+        # Свой lease на своё дерево (§0.5): parent и child не конфликтуют.
+        await recorder.acquire_workspace_lease(str(child_ws))
+        environment = child_runner.build_environment()
+        await environment.start()
+        try:
+            # Ребёнок не стримит текст в канал родителя (перемешался бы с его
+            # выводом); tool calls и notify пробрасываются для наблюдаемости.
+            child_hooks = RunHooks(on_tool_call=hooks.on_tool_call, on_notify=hooks.on_notify)
+            loop = child_runner.build_loop(
+                recorder,
+                environment,
+                autonomy,
+                child_hooks,
+                None,
+                excluded_skills=excluded_skills,
+                mcp_tools=None,
+                parent_run_id=parent_run.id,
+            )
+            outcome = await loop.run(args.task, autonomy)
+        finally:
+            await environment.cleanup()
+
+        committed: str | None = None
+        if outcome.state is RunState.COMPLETED:
+            # Работа ребёнка — на его ветке (durable); физический worktree после
+            # коммита убираем. Secret-scan-блок оставит дерево грязным — тогда
+            # remove откажется и worktree сохранится для разбора.
+            with contextlib.suppress(Exception):
+                committed = await WorkspaceFlow(GitRepo(child_ws), self._cfg.git).commit_step(
+                    f"svarog child: {args.task[:64]}",
+                    run_id=outcome.run_id,
+                    known_values=self.known_secret_values(),
+                )
+            with contextlib.suppress(Exception):
+                await parent_repo.remove_worktree(child_ws)
+        else:
+            # suspended/failed: worktree сохраняем — checkpoint ребёнка ссылается
+            # на него, `svarog resume` дочернего run'а возможен.
+            raise ToolError(
+                f"дочерний run {outcome.run_id[:8]} завершился "
+                f"'{outcome.state.value}': {outcome.error or 'без причины'}; "
+                f"worktree сохранён для resume: {child_ws}"
+            )
+
+        parts = [
+            f"дочерний run {outcome.run_id[:8]} выполнен (итераций: {outcome.iterations}, "
+            f"токенов: {outcome.tokens_used}, стоимость: ${outcome.cost_usd:.4f})"
+        ]
+        if committed is not None:
+            parts.append(f"изменения ребёнка — на ветке {branch} (коммит {committed})")
+        parts.append(f"результат:\n{outcome.final_answer}")
+        return "\n".join(parts)
+
     async def run_once(self, task: str, autonomy: AutonomyMode, *, hooks: RunHooks) -> RunOutcome:
         """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit."""
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
@@ -367,14 +502,37 @@ class TaskRunner:
                 await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
+                # Child runs (ADR-0015 фаза 3): родительский Run становится
+                # известен через on_run_started — держим его в holder'е для
+                # callback'а spawn_child_run.
+                parent_runs: list[Run] = []
+
+                def _on_run_started(run: Run) -> None:
+                    parent_runs.append(run)
+                    if hooks.on_run_started is not None:
+                        hooks.on_run_started(run)
+
+                async def spawn(args: SpawnChildRunArgs) -> str:
+                    if not parent_runs:
+                        raise ToolError("родительский run ещё не зарегистрирован")
+                    return await self.spawn_child_run(
+                        recorder,
+                        parent_runs[-1],
+                        autonomy,
+                        args,
+                        hooks,
+                        excluded_skills=excluded,
+                    )
+
                 loop = self.build_loop(
                     recorder,
                     environment,
                     autonomy,
-                    hooks,
+                    replace(hooks, on_run_started=_on_run_started),
                     proposal_sink,
                     excluded_skills=excluded,
                     mcp_tools=mcp_tools,
+                    child_spawn=spawn,
                 )
                 outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
@@ -429,6 +587,18 @@ class TaskRunner:
             try:
                 proposal_sink: list[SkillProposalRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
+
+                async def spawn(args: SpawnChildRunArgs) -> str:
+                    # Родитель при resume известен сразу — это возобновляемый run.
+                    return await runner.spawn_child_run(
+                        recorder,
+                        run,
+                        AutonomyMode(run.autonomy),
+                        args,
+                        hooks,
+                        excluded_skills=excluded,
+                    )
+
                 loop = runner.build_loop(
                     recorder,
                     environment,
@@ -437,6 +607,7 @@ class TaskRunner:
                     proposal_sink,
                     excluded_skills=excluded,
                     mcp_tools=build_mcp_tools(backends),
+                    child_spawn=spawn,
                 )
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)

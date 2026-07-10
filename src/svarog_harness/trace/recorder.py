@@ -62,6 +62,7 @@ class TraceRecorder:
         session_id: str | None = None,
         config_hash: str | None = None,
         workspace: str | None = None,
+        parent_run_id: str | None = None,
     ) -> Run:
         # config_hash — снимок security-конфига run'а (ADR-0015 §0.4): resume
         # сверяет с ним текущий конфиг и fail-closed при расхождении.
@@ -81,6 +82,7 @@ class TraceRecorder:
                 started_at=now,
                 workspace=workspace,
                 heartbeat_at=now,
+                parent_run_id=parent_run_id,
                 meta=meta,
             )
         else:
@@ -92,6 +94,7 @@ class TraceRecorder:
                 started_at=now,
                 workspace=workspace,
                 heartbeat_at=now,
+                parent_run_id=parent_run_id,
                 meta=meta,
             )
         self._db.add(run)
@@ -251,6 +254,37 @@ class TraceRecorder:
         """Результат детерминированной проверки verifier'а (§6.11)."""
         self._db.add(CheckResult(run_id=run.id, check_name=name, status=status, output=output))
         await self._db.commit()
+
+    async def find_completed_child_run(self, parent_run_id: str, task: str) -> Run | None:
+        """Завершённый дочерний run родителя с той же задачей (ADR-0015 фаза 3).
+
+        Идемпотентность spawn_child_run на границе write-ahead: если родитель
+        упал между исполнением ребёнка и checkpoint'ом, resume переисполняет
+        вызов — результат берётся из trace, ребёнок не гоняется повторно.
+        """
+        result = await self._db.execute(
+            select(Run)
+            .where(
+                Run.parent_run_id == parent_run_id,
+                Run.task == task,
+                Run.state == RunState.COMPLETED,
+            )
+            .order_by(Run.created_at.desc())
+        )
+        return result.scalars().first()
+
+    async def last_assistant_text(self, run: Run) -> str:
+        """Финальный ответ run'а из trace: последний непустой assistant-текст."""
+        result = await self._db.execute(
+            select(Message)
+            .where(Message.run_id == run.id, Message.role == "assistant")
+            .order_by(Message.index_in_run.desc())
+        )
+        for message in result.scalars():
+            text = str(message.content.get("content") or "")
+            if text.strip():
+                return text
+        return ""
 
     async def get_run(self, run_id: str) -> Run | None:
         return await self._db.get(Run, run_id)
