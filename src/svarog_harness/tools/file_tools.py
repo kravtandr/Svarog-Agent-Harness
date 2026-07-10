@@ -11,25 +11,36 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from svarog_harness.paths import PathTraversalError, safe_join
 from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult, truncate_text
 
 _MAX_OUTPUT_CHARS = 50_000
 _MAX_SEARCH_MATCHES = 200
 _SKIP_DIRS = {".git", ".svarog", "__pycache__", "node_modules", ".venv"}
+# Управляющее дерево, недоступное на запись из-под агента (ADR-0015 §0.2):
+# `.git` = host-git hooks/config (escape из sandbox), `.svarog` = trace/spill.
+# Чтение не запрещаем — spill-файлы 1.2 лежат в `.svarog` и читаются read_file.
+_WRITE_DENY_PREFIXES = (".git", ".svarog")
 
 
-def resolve_in_workspace(workspace: Path, raw: str) -> Path:
+def resolve_in_workspace(workspace: Path, raw: str, *, for_write: bool = False) -> Path:
     """Разрешить путь из аргументов tool внутри workspace или упасть.
 
-    resolve() раскрывает и `..`, и symlink'и — значит, ссылка, ведущая
-    наружу workspace, тоже будет отвергнута.
+    safe_join раскрывает `..` и symlink'и — ссылка наружу workspace отвергается.
+    Для записи (`for_write`) дополнительно запрещены управляющие префиксы
+    (`.git`, `.svarog`): инвариант симметричен пропуску их из поиска.
     """
-    candidate = Path(raw)
-    if candidate.is_absolute():
-        raise ToolError(f"абсолютные пути запрещены, используйте относительный: {raw}")
-    resolved = (workspace / candidate).resolve()
-    if not resolved.is_relative_to(workspace.resolve()):
-        raise ToolError(f"путь выходит за пределы workspace: {raw}")
+    try:
+        resolved = safe_join(workspace, raw)
+    except PathTraversalError as exc:
+        raise ToolError(str(exc)) from None
+    if for_write:
+        rel_parts = resolved.relative_to(workspace.resolve()).parts
+        if rel_parts and rel_parts[0] in _WRITE_DENY_PREFIXES:
+            raise ToolError(
+                f"запись в управляющий каталог запрещена: {raw} "
+                f"(префикс '{rel_parts[0]}' зарезервирован runtime)"
+            )
     return resolved
 
 
@@ -37,8 +48,8 @@ class _WorkspaceTool[ArgsT: BaseModel](Tool[ArgsT]):
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
 
-    def _resolve(self, raw: str) -> Path:
-        return resolve_in_workspace(self.workspace, raw)
+    def _resolve(self, raw: str, *, for_write: bool = False) -> Path:
+        return resolve_in_workspace(self.workspace, raw, for_write=for_write)
 
 
 class ReadFileArgs(BaseModel):
@@ -76,7 +87,7 @@ class WriteFileTool(_WorkspaceTool[WriteFileArgs]):
     args_model = WriteFileArgs
 
     async def execute(self, args: WriteFileArgs) -> ToolResult:
-        path = self._resolve(args.path)
+        path = self._resolve(args.path, for_write=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args.content, encoding="utf-8")
         return ToolResult.success(f"записано {len(args.content)} символов в {args.path}")
@@ -100,7 +111,7 @@ class EditFileTool(_WorkspaceTool[EditFileArgs]):
     args_model = EditFileArgs
 
     async def execute(self, args: EditFileArgs) -> ToolResult:
-        path = self._resolve(args.path)
+        path = self._resolve(args.path, for_write=True)
         if not path.is_file():
             raise ToolError(f"файл не найден: {args.path}")
         content = path.read_text(encoding="utf-8")

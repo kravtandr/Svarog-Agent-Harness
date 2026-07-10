@@ -74,8 +74,10 @@ def test_init_command_creates_home_and_memory_repo(
     result = runner.invoke(cli_main.app, ["init", str(home)])
     assert result.exit_code == 0, result.output
     assert (home / "svarog.yaml").exists()
-    # memory-репозиторий инициализирован (Flow A).
-    assert (home / "memory" / ".git").is_dir()
+    # memory-репозиторий инициализирован (Flow A); объекты git вне дерева
+    # (separate-git-dir, ADR-0015 §0.2) — в дереве только файл-указатель `.git`.
+    assert (home / "memory" / ".git").is_file()
+    assert (home / ".gitdirs" / "memory").is_dir()
 
 
 def test_scaffold_writes_model_endpoint(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from svarog_harness.config.paths import tenant_home
 from svarog_harness.config.schema import SvarogConfig, TenantRole
-from svarog_harness.gitflow import GitError, GitRepo
+from svarog_harness.gitflow import GitError, GitRepo, separate_gitdir_for
 from svarog_harness.secrets.store import FileSecretStore
 from svarog_harness.storage.db import init_db
 from svarog_harness.tenant.registry import TenantRegistry
@@ -33,10 +33,12 @@ class ProvisionResult:
     token: str
 
 
-async def _git_init(path: Path, message: str) -> None:
+async def _git_init(path: Path, message: str, *, separate_git_dir: bool = True) -> None:
     repo = GitRepo(path)
     if not await repo.is_repo():
-        await repo.init()
+        # separate-git-dir (ADR-0015 §0.2): git-объекты вне дерева репозитория.
+        gitdir = separate_gitdir_for(path) if separate_git_dir else None
+        await repo.init(separate_git_dir=gitdir)
         await repo.ensure_identity()
         await repo.add_all()
         with contextlib.suppress(GitError):
@@ -64,8 +66,9 @@ async def provision_tenant(
     try:
         for sub in _SUBDIRS:
             (home / sub).mkdir(parents=True, exist_ok=True)
-        await _git_init(home / "memory", "svarog tenant: memory repo")
-        await _git_init(home / "skills", "svarog tenant: skills repo")
+        sep = cfg.sandbox.separate_git_dir
+        await _git_init(home / "memory", "svarog tenant: memory repo", separate_git_dir=sep)
+        await _git_init(home / "skills", "svarog tenant: skills repo", separate_git_dir=sep)
         init_db(home / "svarog.db")
         token = _issue_token()
         FileSecretStore(home / "secrets.json").set(GATEWAY_TOKEN_REF, token)

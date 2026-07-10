@@ -97,6 +97,10 @@ class SandboxConfig(StrictModel):
     memory_limit: str = "8g"
     cpu_limit: float = Field(default=4, gt=0)
     timeout_sec: int = Field(default=120, gt=0)
+    # Git-объекты (hooks/config) выносятся за пределы дерева репозитория через
+    # `git init --separate-git-dir` (ADR-0015 §0.2, слой Mount): даже rw-доступ
+    # из sandbox не достаёт до host-git hooks, т.к. они физически вне bind-mount.
+    separate_git_dir: bool = True
 
 
 class GitConfig(StrictModel):

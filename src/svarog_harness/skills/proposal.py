@@ -6,13 +6,19 @@ proposal: набор файлов скилла (обязателен SKILL.md) +
 skills-репозитория; merge — только после человеческого review (§18, ADR-0003).
 """
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Self
 
+from svarog_harness.paths import PathTraversalError, safe_join
 from svarog_harness.skills.loader import SkillMetadataError, parse_metadata
 
 # Единственный обязательный файл скилла (§7).
 SKILL_FILE = "SKILL.md"
+
+# Имя каталога скилла: без `..`, `/`, начальной точки и прочих traversal-трюков.
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -51,8 +57,23 @@ def validate_proposal(request: SkillProposalRequest) -> list[str]:
     кураторские инварианты.
     """
     errors: list[str] = []
+    # Path-traversal (ADR-0015 §0.1): ни имя скилла, ни ключи files не должны
+    # уводить запись за пределы каталога скилла в skills-репозитории. Проверяем
+    # до материализации — ошибка возвращается модели, запись на хост не идёт.
+    if not _SKILL_NAME_RE.match(request.skill_name) or ".." in request.skill_name:
+        errors.append(
+            f"недопустимое имя скилла '{request.skill_name}': ожидается "
+            f"^[a-z0-9][a-z0-9._-]*$ без '..'/'/'/начальной точки"
+        )
+    else:
+        skill_root = Path("/__skill__") / request.skill_name
+        for rel in request.files:
+            try:
+                safe_join(skill_root, rel)
+            except PathTraversalError:
+                errors.append(f"путь файла скилла выходит за пределы каталога: '{rel}'")
     if SKILL_FILE not in request.files:
-        return [f"proposal должен содержать {SKILL_FILE}"]
+        return [f"proposal должен содержать {SKILL_FILE}", *errors]
     try:
         metadata, _ = parse_metadata(request.skill_name, request.files[SKILL_FILE])
     except SkillMetadataError as exc:

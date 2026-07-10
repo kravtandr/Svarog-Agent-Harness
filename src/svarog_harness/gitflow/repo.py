@@ -6,25 +6,66 @@ credentials (push, приватный pull) выполняет host-компон
 """
 
 import asyncio
+import os
 from pathlib import Path
+
+# Host-git hardening (ADR-0015 §0.2): агент может посадить hook/config внутри
+# rw-workspace (`.git/hooks/pre-commit`, `.git/config`), а host-side commit
+# исполняет их на хосте. Нейтрализуем на КАЖДОМ вызове git:
+#  * hooks — не исполнять (`core.hooksPath=/dev/null`);
+#  * fsmonitor — не запускать внешний процесс наблюдателя;
+#  * global/system config — не читать (env → /dev/null): фильтры/алиасы из
+#    ~/.gitconfig не подхватываются host-side.
+# Локальный `.git/config` в рамках слоя Tool закрыт denylist'ом (file_tools),
+# в рамках Mount — separate-git-dir выносит `.git` за пределы bind-mount.
+# Эталон — защита Git admin paths / bare-repo planting в Claude Code.
+_HARDENED_GIT_FLAGS = (
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.ext.allow=never",
+)
+_HARDENED_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
 
 
 class GitError(Exception):
     """git-команда завершилась с ненулевым кодом."""
 
 
+def separate_gitdir_for(repo_path: Path) -> Path:
+    """Каталог git-объектов вне рабочего дерева репозитория (ADR-0015 §0.2).
+
+    `<parent>/.gitdirs/<name>` — сосед репозитория, но вне самого дерева
+    (и вне будущего bind-mount этого дерева в sandbox).
+    """
+    repo_path = repo_path.expanduser()
+    return repo_path.parent / ".gitdirs" / repo_path.name
+
+
 class GitRepo:
     def __init__(self, path: Path) -> None:
         self.path = path
+
+    def _hardened_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update(_HARDENED_GIT_ENV)
+        return env
 
     async def _git(self, *args: str, check: bool = True) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             "git",
             "-C",
             str(self.path),
+            *_HARDENED_GIT_FLAGS,
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._hardened_env(),
         )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode(errors="replace")
@@ -38,8 +79,20 @@ class GitRepo:
         code, out, _ = await self._git("rev-parse", "--is-inside-work-tree", check=False)
         return code == 0 and out.strip() == "true"
 
-    async def init(self, *, initial_branch: str = "main") -> None:
-        await self._git("init", "-b", initial_branch)
+    async def init(
+        self, *, initial_branch: str = "main", separate_git_dir: Path | None = None
+    ) -> None:
+        """Инициализировать репозиторий; separate_git_dir выносит объекты git
+        (hooks/config) за пределы рабочего дерева (ADR-0015 §0.2, слой Mount).
+
+        При separate_git_dir в рабочем дереве остаётся файл-указатель `.git`,
+        а hooks/config лежат вне bind-mount и недостижимы из sandbox.
+        """
+        args = ["init", "-b", initial_branch]
+        if separate_git_dir is not None:
+            separate_git_dir.parent.mkdir(parents=True, exist_ok=True)
+            args.append(f"--separate-git-dir={separate_git_dir}")
+        await self._git(*args)
 
     async def ensure_identity(self, name: str = "Svarog", email: str = "svarog@localhost") -> None:
         """Локальная git-идентичность, если глобальная не настроена (для commit)."""

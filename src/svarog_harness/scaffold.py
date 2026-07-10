@@ -58,6 +58,7 @@ runtime:
 sandbox:
   type: docker            # docker (изоляция) | local-trusted (без изоляции, §17)
   image: python:3.12-slim
+  separate_git_dir: true  # git-объекты (hooks/config) вне рабочего дерева (§0.2)
 
 memory:
   path: ./memory          # Flow A memory-репозиторий (ADR-0004)

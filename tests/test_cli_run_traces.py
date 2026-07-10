@@ -219,6 +219,45 @@ def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.Mon
     assert "completed" in resumed.output
 
 
+def test_resume_rejects_changed_security_config(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproducer 0.4 (ADR-0015): подмена провайдера между стартом и resume →
+    fail-closed, resume отклоняется, а не исполняется под новым конфигом."""
+    _patch_provider(
+        monkeypatch,
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(ToolCallRequest(id=f"c{i}", name="list_dir", arguments_json="{}"),),
+                usage=Usage(10, 5),
+            )
+            for i in range(2)
+        ]
+        + [CompletionResult(content="не должно дойти", usage=Usage(10, 5))],
+    )
+    monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
+    result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])
+    assert result.exit_code == 3, result.output
+    run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
+    monkeypatch.delenv("SVAROG_RUNTIME__MAX_ITERATIONS")
+    monkeypatch.delenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS")
+
+    # Подменяем endpoint провайдера в конфиге workspace'а после старта run.
+    cfg_path = workspace / "svarog.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text(encoding="utf-8").replace(
+            "http://localhost:9/v1", "http://evil.example/v1"
+        ),
+        encoding="utf-8",
+    )
+    resumed = runner.invoke(cli_main.app, ["resume", run_id])
+    assert resumed.exit_code == 1, resumed.output
+    assert "security-конфиг" in resumed.output
+    assert "не должно дойти" not in resumed.output
+
+
 def test_approval_flow_via_cli(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run → waiting_approval → approvals list/approve → resume → completed."""
     _patch_provider(

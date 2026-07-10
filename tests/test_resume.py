@@ -24,7 +24,7 @@ from svarog_harness.storage.models import Checkpoint, Message, Run, RunState
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.trace.lookup import RunNotResumableError
-from svarog_harness.trace.recorder import TraceRecorder
+from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 
 
 class ScriptedProvider(ModelProvider):
@@ -169,9 +169,16 @@ async def test_resume_executes_pending_write_ahead_calls(db: AsyncSession, tmp_p
 
 
 async def test_recover_interrupted_runs(db: AsyncSession) -> None:
+    from datetime import timedelta
+
+    from svarog_harness.storage.models import utcnow
+
     recorder = TraceRecorder(db)
     run = await recorder.start_run(task="упавший", autonomy="yolo", model="m")
     assert run.state is RunState.RUNNING
+    # Симулируем мёртвый процесс: heartbeat протух (ADR-0015 §0.5).
+    run.heartbeat_at = utcnow() - timedelta(seconds=3600)
+    await db.commit()
 
     recovered = await recorder.recover_interrupted_runs()
     assert [r.id for r in recovered] == [run.id]
@@ -182,6 +189,43 @@ async def test_recover_interrupted_runs(db: AsyncSession) -> None:
 
     # Повторный вызов — no-op.
     assert await recorder.recover_interrupted_runs() == []
+
+
+async def test_recover_leaves_live_run_alone(db: AsyncSession) -> None:
+    """Живой run в другом процессе (свежий heartbeat) не приостанавливается
+    ложно (ADR-0015 §0.5) — снят прежний компромисс recovery."""
+    recorder = TraceRecorder(db)
+    run = await recorder.start_run(task="живой", autonomy="yolo", model="m")
+    assert run.state is RunState.RUNNING  # heartbeat свежий из start_run
+
+    recovered = await recorder.recover_interrupted_runs()
+    assert recovered == []
+    stored = (await db.execute(select(Run))).scalar_one()
+    assert stored.state is RunState.RUNNING
+
+
+async def test_workspace_lease_blocks_second_run(db: AsyncSession) -> None:
+    """Второй run на залоченном workspace отклоняется, пока первый жив (§0.5)."""
+    recorder = TraceRecorder(db)
+    await recorder.start_run(task="первый", autonomy="yolo", model="m", workspace="/ws/a")
+
+    with pytest.raises(WorkspaceBusyError):
+        await recorder.acquire_workspace_lease("/ws/a")
+    # Другой workspace свободен.
+    await recorder.acquire_workspace_lease("/ws/b")
+
+
+async def test_workspace_lease_free_after_stale_heartbeat(db: AsyncSession) -> None:
+    from datetime import timedelta
+
+    from svarog_harness.storage.models import utcnow
+
+    recorder = TraceRecorder(db)
+    run = await recorder.start_run(task="упал", autonomy="yolo", model="m", workspace="/ws/a")
+    run.heartbeat_at = utcnow() - timedelta(seconds=3600)
+    await db.commit()
+    # Мёртвый держатель lease не блокирует новый run.
+    await recorder.acquire_workspace_lease("/ws/a")
 
 
 async def test_load_resumable_rejects_completed_run(db: AsyncSession, tmp_path: Path) -> None:

@@ -63,6 +63,43 @@ async def test_commit_step_commits_changes(tmp_path: Path) -> None:
     assert "Run-Id: run-1" in log
 
 
+async def test_planted_git_hook_not_executed_on_host(tmp_path: Path) -> None:
+    """Reproducer 0.2 (ADR-0015): агент сажает .git/hooks/pre-commit, host-side
+    commit его НЕ исполняет (core.hooksPath=/dev/null)."""
+    repo = await _init_repo(tmp_path / "ws")
+    await _seed_commit(repo)
+    flow = WorkspaceFlow(repo, GitConfig())
+    await flow.start("задача")
+
+    sentinel = tmp_path / "hook-ran.txt"
+    hook = repo.path / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    (repo.path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    sha = await flow.commit_step("svarog: с подсаженным hook", run_id="run-1")
+    assert sha is not None
+    # Коммит прошёл, но hook на хосте не выполнился.
+    assert not sentinel.exists()
+
+
+async def test_hardened_git_ignores_global_config(tmp_path: Path, monkeypatch) -> None:
+    """Global git-config (алиасы/фильтры из ~/.gitconfig) не подхватывается."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".gitconfig").write_text(
+        "[core]\n\thooksPath = /tmp/should-not-be-used\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+    repo = await _init_repo(tmp_path / "ws")
+    # hardened env выставляет GIT_CONFIG_GLOBAL=/dev/null — hooksPath из
+    # ~/.gitconfig не подхватывается host-side git.
+    _, out, _ = await repo._git("config", "--get", "core.hooksPath", check=False)
+    assert "/tmp/should-not-be-used" not in out
+
+
 async def test_commit_step_noop_when_clean(tmp_path: Path) -> None:
     repo = await _init_repo(tmp_path / "ws")
     await _seed_commit(repo)

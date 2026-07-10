@@ -48,6 +48,66 @@ class TenantConfinementError(Exception):
     """Резолвнутый путь тенанта вышел за пределы его home — нарушение изоляции."""
 
 
+class WorkspaceLayoutError(Exception):
+    """Control-plane (БД/память/скиллы) пересекается с workspace (ADR-0015 §0.3)."""
+
+
+def _control_plane_paths(cfg: SvarogConfig, workspace: Path) -> list[tuple[str, Path]]:
+    """Пути control-plane, которые ОБЯЗАНЫ быть непересекающимися с workspace.
+
+    Только tenant-writable слой скиллов (`paths[0]`) — shared-ro слои общие и
+    лежат вне home (ADR-0012 §5), их пересечение с workspace допустимо.
+    """
+    paths: list[tuple[str, Path]] = [("storage.db_path", cfg.storage.db_path)]
+    if cfg.memory.path is not None:
+        paths.append(("memory.path", cfg.memory.path))
+    if cfg.skills.paths:
+        paths.append(("skills.paths[0]", cfg.skills.paths[0]))
+    return paths
+
+
+def workspace_layout_violations(cfg: SvarogConfig, workspace: Path) -> list[str]:
+    """Пересечения workspace с control-plane каталогами (ADR-0015 §0.3), без raise.
+
+    cp внутри workspace — агент дотягивается до control-plane файлами/bash;
+    workspace внутри cp — control-plane является предком рабочего дерева.
+    """
+    ws = workspace.expanduser().resolve()
+    violations: list[str] = []
+    for label, raw in _control_plane_paths(cfg, workspace):
+        cp = raw.expanduser().resolve()
+        if cp == ws or cp.is_relative_to(ws) or ws.is_relative_to(cp):
+            violations.append(f"{label} ({cp}) пересекается с workspace ({ws})")
+    return violations
+
+
+def assert_workspace_isolated(cfg: SvarogConfig, workspace: Path) -> None:
+    """Workspace непересекается с control-plane каталогами (ADR-0015 §0.3).
+
+    Инвариант раскладки: рабочая директория агента — строго отдельный каталог,
+    в котором НЕ лежат ни БД, ни память, ни tenant-скиллы, и который сам не
+    является их подкаталогом.
+
+    Enforcement привязан к модели изоляции: в `docker` (все `standard`-тенанты
+    заклампаны сюда, ADR-0013; их раскладка уже даёт disjoint через
+    resolve_tenant_config) пересечение — ошибка конфигурации и run отклоняется.
+    В `local-trusted` bash работает на хосте и путями не заперт в принципе —
+    остаточный доступ к control-plane принят как явный trade-off режима
+    «trusted» (§17): нарушения возвращаются как предупреждения, а не блокируют.
+    """
+    violations = workspace_layout_violations(cfg, workspace)
+    if not violations:
+        return
+    detail = "; ".join(violations)
+    if cfg.sandbox.type == "local-trusted":
+        return  # документированный trade-off режима trusted — не блокируем
+    raise WorkspaceLayoutError(
+        f"control-plane пересекается с workspace: {detail}. "
+        f"Держите БД/память/скиллы вне рабочего дерева агента (ADR-0015 §0.3): "
+        f"запускайте run в отдельном каталоге (напр. workspaces/tasks/<run>/)"
+    )
+
+
 @dataclass(frozen=True)
 class ResolvedTenant:
     """Готовый к запуску контекст тенанта: cfg с путями под home + роль.

@@ -6,7 +6,7 @@ from svarog_harness.gitflow.commit_gate import (
     scan_ref,
     scan_staged,
 )
-from svarog_harness.gitflow.repo import GitError, GitRepo
+from svarog_harness.gitflow.repo import GitError, GitRepo, separate_gitdir_for
 from svarog_harness.gitflow.workspace import (
     WorkspaceFlow,
     WorkspacePrep,
@@ -22,5 +22,6 @@ __all__ = [
     "commit_guarded",
     "scan_ref",
     "scan_staged",
+    "separate_gitdir_for",
     "task_branch_name",
 ]
