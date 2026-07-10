@@ -11,9 +11,19 @@ def test_memory_section_includes_layout_guide() -> None:
     )
     system = messages[0].content
     assert "user/profile.md — факты о пользователе" in system
-    assert "projects/<имя-проекта>.md" in system
+    assert "projects/<slug>/overview.md" in system
     assert "create перезаписывает файл целиком" in system
     assert "важный факт" in system
+
+
+def test_memory_guide_documents_wiki_contract() -> None:
+    system = build_initial_messages("t", Path("/ws"), memory="## index.md\nкаталог")[0].content
+    # прогрессивная загрузка и автоген — ключевые правила ADR-0011
+    assert "index.md" in system and "АВТОГЕН" in system
+    assert "read_memory" in system
+    # шаблон frontmatter страницы проекта
+    assert "slug: animateyou" in system
+    assert "status: active" in system
 
 
 def test_without_memory_no_guide() -> None:

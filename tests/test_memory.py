@@ -14,7 +14,7 @@ from svarog_harness.memory.reader import read_memory
 from svarog_harness.memory.writer import MemoryWriter
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import MemoryChange, MemoryChangeStatus
-from svarog_harness.tools.memory_tools import RememberTool
+from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.trace.recorder import TraceRecorder
 
 
@@ -108,19 +108,26 @@ def test_apply_rejects_escape(tmp_path: Path) -> None:
 # --- reader ---
 
 
-def test_read_memory_concatenates(tmp_path: Path) -> None:
+def test_read_memory_injects_only_hot_files(tmp_path: Path) -> None:
+    # В контекст идут только index.md и user/profile.md; остальное — по требованию.
     (tmp_path / "user").mkdir()
     (tmp_path / "user/profile.md").write_text("любит Python", encoding="utf-8")
-    (tmp_path / "projects.md").write_text("проект Svarog", encoding="utf-8")
+    (tmp_path / "index.md").write_text("# Индекс памяти\n## Проекты", encoding="utf-8")
+    (tmp_path / "projects" / "svarog").mkdir(parents=True)
+    (tmp_path / "projects/svarog/overview.md").write_text("секрет проекта", encoding="utf-8")
+    (tmp_path / "decisions").mkdir()
+    (tmp_path / "decisions/adr.md").write_text("детали решения", encoding="utf-8")
     text = read_memory(tmp_path)
     assert "любит Python" in text
-    assert "проект Svarog" in text
-    assert "user/profile.md" in text
+    assert "Индекс памяти" in text
+    assert "секрет проекта" not in text  # страница проекта не инъектится
+    assert "детали решения" not in text  # decisions не инъектятся
 
 
 def test_read_memory_respects_limit(tmp_path: Path) -> None:
-    (tmp_path / "big.md").write_text("x" * 5000, encoding="utf-8")
-    (tmp_path / "more.md").write_text("y" * 5000, encoding="utf-8")
+    (tmp_path / "index.md").write_text("x" * 5000, encoding="utf-8")
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user/profile.md").write_text("y" * 5000, encoding="utf-8")
     text = read_memory(tmp_path, limit_bytes=3000)
     assert "усечена" in text
 
@@ -172,9 +179,12 @@ async def test_writer_applies_and_commits_sequentially(db: AsyncSession, tmp_pat
     assert "любит Python" in text
     assert "и краткость" in text
 
-    # Каждая заявка — отдельный коммит с trailer Run-Id.
+    # Каждая заявка — отдельный коммит с trailer Run-Id; сверху reindex-коммит
+    # (ADR-0011, автоген index.md/log.md) без Run-Id.
     repo = GitRepo(memory_dir)
-    _, log, _ = await repo._git("log", "--format=%B", "-n", "2")
+    _, head, _ = await repo._git("log", "--format=%s", "-n", "1")
+    assert head.strip() == "memory: reindex"
+    _, log, _ = await repo._git("log", "--format=%B", "-n", "3")
     assert f"Run-Id: {run2}" in log
     assert f"Run-Id: {run1}" in log
 
@@ -299,26 +309,102 @@ async def test_remember_allows_chain_create_then_replace(tmp_path: Path) -> None
     assert len(sink) == 2
 
 
-# --- read_memory: приоритет user/ при усечении ---
+# --- read_memory: профиль первым, при усечении режется хвост (index) ---
 
 
-def test_read_memory_priority_order(tmp_path: Path) -> None:
+def test_read_memory_profile_before_index(tmp_path: Path) -> None:
     (tmp_path / "user").mkdir()
-    (tmp_path / "decisions").mkdir()
-    (tmp_path / "projects").mkdir()
-    (tmp_path / "decisions" / "adr.md").write_text("решение", encoding="utf-8")
-    (tmp_path / "projects" / "app.md").write_text("проект", encoding="utf-8")
+    (tmp_path / "index.md").write_text("индекс", encoding="utf-8")
     (tmp_path / "user" / "profile.md").write_text("профиль", encoding="utf-8")
     text = read_memory(tmp_path)
-    assert text.index("user/profile.md") < text.index("projects/app.md")
-    assert text.index("projects/app.md") < text.index("decisions/adr.md")
+    assert text.index("user/profile.md") < text.index("index.md")
 
 
-def test_read_memory_truncation_drops_least_important_first(tmp_path: Path) -> None:
+def test_read_memory_truncation_keeps_profile(tmp_path: Path) -> None:
     (tmp_path / "user").mkdir()
-    (tmp_path / "decisions").mkdir()
     (tmp_path / "user" / "profile.md").write_text("важный профиль", encoding="utf-8")
-    (tmp_path / "decisions" / "adr.md").write_text("x" * 5000, encoding="utf-8")
+    (tmp_path / "index.md").write_text("x" * 5000, encoding="utf-8")
     text = read_memory(tmp_path, limit_bytes=200)
     assert "важный профиль" in text
     assert "память усечена" in text
+
+
+# --- ReadMemoryTool: прогрессивная загрузка (ADR-0011) ---
+
+_PROJECT_PAGE = (
+    "---\nname: AnimateYou\nslug: animateyou\nsummary: бот\nstatus: active\n---\nОписание.\n"
+)
+
+
+async def test_read_memory_tool_reads_page(tmp_path: Path) -> None:
+    (tmp_path / "projects" / "animateyou").mkdir(parents=True)
+    (tmp_path / "projects/animateyou/overview.md").write_text(_PROJECT_PAGE, encoding="utf-8")
+    result = await ReadMemoryTool(tmp_path).call({"path": "projects/animateyou/overview.md"})
+    assert result.ok
+    assert "AnimateYou" in result.output
+
+
+async def test_read_memory_tool_missing_file(tmp_path: Path) -> None:
+    result = await ReadMemoryTool(tmp_path).call({"path": "projects/nope/overview.md"})
+    assert not result.ok
+    assert "не найден" in result.error
+
+
+async def test_read_memory_tool_rejects_escaping_path(tmp_path: Path) -> None:
+    result = await ReadMemoryTool(tmp_path).call({"path": "../../etc/passwd"})
+    assert not result.ok
+
+
+# --- remember: контракт страницы проекта (ADR-0011) ---
+
+
+async def test_remember_rejects_project_page_without_frontmatter(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "projects/x/overview.md", "operation": "create", "content": "# без frontmatter\n"}
+    )
+    assert not result.ok
+    assert "frontmatter" in result.error
+    assert sink == []
+
+
+async def test_remember_rejects_project_page_slug_mismatch(tmp_path: Path) -> None:
+    tool, _ = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "projects/other/overview.md", "operation": "create", "content": _PROJECT_PAGE}
+    )
+    assert not result.ok
+    assert "slug" in result.error
+
+
+async def test_remember_accepts_valid_project_page(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "projects/animateyou/overview.md", "operation": "create", "content": _PROJECT_PAGE}
+    )
+    assert result.ok, result.error
+    assert len(sink) == 1
+
+
+# --- remember: raw-слой sources/ неизменяем (ADR-0011) ---
+
+
+async def test_remember_creates_source(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "sources/animateyou/spec.md", "operation": "create", "content": "raw spec\n"}
+    )
+    assert result.ok, result.error
+    assert len(sink) == 1
+
+
+async def test_remember_rejects_append_to_source(tmp_path: Path) -> None:
+    (tmp_path / "sources" / "animateyou").mkdir(parents=True)
+    (tmp_path / "sources/animateyou/spec.md").write_text("raw\n", encoding="utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "sources/animateyou/spec.md", "operation": "append", "content": "правка\n"}
+    )
+    assert not result.ok
+    assert "неизменяем" in result.error
+    assert sink == []

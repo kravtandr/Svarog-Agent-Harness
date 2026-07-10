@@ -35,7 +35,7 @@ from svarog_harness.storage.locks import LockBackend, default_lock_backend
 from svarog_harness.storage.models import Run, RunState, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.file_tools import file_tools
-from svarog_harness.tools.memory_tools import RememberTool
+from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
@@ -236,6 +236,8 @@ class TaskRunner:
                     memory_dir=mem_dir,
                 )
             )
+            # Прогрессивная загрузка (ADR-0011): страницы памяти по требованию.
+            registry.register(ReadMemoryTool(mem_dir))
         if proposal_sink is not None:
             # Skill governance (Flow B, §18): агент предлагает скиллы через proposal,
             # прямые правки skills/ запрещены policy.

@@ -26,6 +26,7 @@ from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
+from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.loop import RunOutcome
@@ -1070,6 +1071,41 @@ def memory_flush() -> None:
 
     count = asyncio.run(_with_db(cfg, action))
     console.print(f"обработано заявок: {count}")
+
+
+def _write_memory_audit(workspace: Path, report: MemoryAuditReport) -> Path:
+    from datetime import UTC, datetime
+
+    artifacts = workspace / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    path = artifacts / f"memory-curation-{stamp}.md"
+    path.write_text(report.to_markdown(), encoding="utf-8")
+    return path
+
+
+@memory_app.command("curate")
+def memory_curate() -> None:
+    """Аудит здоровья памяти (ADR-0011): осиротевшие, битые, устаревшие, пустые страницы.
+
+    Детерминированный, только чтение — ничего не мутирует и не блокирует run'ы.
+    Находки печатаются и пишутся отчётом в artifacts/.
+    """
+    cfg = _load_config_or_exit()
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None or not mem_dir.is_dir():
+        console.print("память не настроена или каталог отсутствует")
+        raise typer.Exit(code=1)
+    report = audit_memory(mem_dir, stale_after_days=cfg.curator.stale_after_days)
+    path = _write_memory_audit(Path.cwd().resolve(), report)
+    if not report.findings:
+        console.print("memory curator: находок нет — память в порядке")
+    else:
+        for finding in report.findings:
+            console.print(
+                f"[magenta]{finding.kind}[/magenta] {finding.path}: {finding.detail}"
+            )
+    console.print(f"[dim]отчёт: {path}[/dim]")
 
 
 @app.command()

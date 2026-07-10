@@ -13,9 +13,18 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from svarog_harness.memory.apply import MemoryApplyError, has_section, resolve_memory_path
+from svarog_harness.memory.apply import (
+    MemoryApplyError,
+    has_section,
+    preview_content,
+    resolve_memory_path,
+)
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
-from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
+from svarog_harness.memory.project_page import project_slug_from_path, validate_project_page
+from svarog_harness.tools.base import RiskLevel, Tool, ToolResult, truncate_text
+
+# Лимит вывода read_memory — как у файловых tools workspace.
+_MAX_READ_CHARS = 50_000
 
 # loop подписывается, чтобы поставить заявку в очередь.
 MemoryEnqueueCallback = Callable[[MemoryChangeRequest], None]
@@ -68,7 +77,11 @@ class RememberTool(Tool[RememberArgs]):
         self._on_enqueue(request)
         if self._memory_dir is not None and args.operation is not MemoryOperation.DELETE:
             self._pending_files.add(str(resolve_memory_path(self._memory_dir, args.file)))
-        return ToolResult.success(f"заявка в память принята: {request.summary()}")
+        return ToolResult.success(
+            f"заявка в память принята ({request.summary()}); применится после "
+            f"завершения задачи. Не перечитывай файл через read_memory для проверки "
+            f"и не повторяй заявку — считай изменение сделанным."
+        )
 
     def _validate(self, args: RememberArgs) -> str | None:
         """Отловить предсказуемые ошибки применения до постановки в очередь."""
@@ -78,6 +91,16 @@ class RememberTool(Tool[RememberArgs]):
             target = resolve_memory_path(self._memory_dir, args.file)
         except MemoryApplyError as exc:
             return str(exc)
+        if args.file.split("/", 1)[0] == "sources" and args.operation in (
+            MemoryOperation.APPEND,
+            MemoryOperation.REPLACE_SECTION,
+        ):
+            # sources/ — raw-слой (ADR-0011): исходники неизменяемы, правки
+            # запрещены. Нужен новый вариант — create нового файла.
+            return (
+                f"'{args.file}' в sources/ — неизменяемый исходник; "
+                f"правки запрещены, создай новый файл через create"
+            )
         if args.operation is MemoryOperation.CREATE and target.exists():
             return (
                 f"файл '{args.file}' уже существует; create перезаписывает файл "
@@ -97,4 +120,68 @@ class RememberTool(Tool[RememberArgs]):
                 # Файл, поставленный в очередь этим же run'ом, ещё не применён —
                 # для него проверку пропускаем (оптимистично).
                 return f"файл '{args.file}' не существует для replace_section"
+
+        slug = project_slug_from_path(args.file)
+        if slug is not None and args.operation is not MemoryOperation.DELETE:
+            # Контракт страницы проекта (ADR-0011): frontmatter должен быть
+            # валиден в прогнозируемом содержимом. Заявку, поставленную в
+            # очередь этим же run'ом и ещё не применённую (нет на диске),
+            # пропускаем — она провалидируется своей заявкой.
+            if str(target) in self._pending_files and not target.exists():
+                return None
+            try:
+                prospective = preview_content(
+                    self._memory_dir,
+                    MemoryChangeRequest(
+                        file=args.file,
+                        operation=args.operation,
+                        content=args.content,
+                        section=args.section,
+                    ),
+                )
+            except MemoryApplyError as exc:
+                return str(exc)
+            return validate_project_page(prospective, expected_slug=slug)
         return None
+
+
+class ReadMemoryArgs(BaseModel):
+    path: str = Field(
+        description="Путь к файлу памяти относительно memory/, "
+        "например projects/<slug>/overview.md или decisions/<тема>.md"
+    )
+
+
+class ReadMemoryTool(Tool[ReadMemoryArgs]):
+    """Прогрессивная загрузка памяти (ADR-0011): подтянуть страницу по требованию.
+
+    Чтение памяти без ограничений (ADR-0004), поэтому tool low-risk и без
+    approval. Список доступных страниц агент видит в index.md (горячий файл).
+    """
+
+    name = "read_memory"
+    action_type = "memory.read"
+    description = (
+        "Прочитать файл долговременной памяти (страницу проекта, решение). "
+        "Список всех страниц — в index.md, который уже в контексте."
+    )
+    risk_level = RiskLevel.LOW
+    args_model = ReadMemoryArgs
+
+    def __init__(self, memory_dir: Path) -> None:
+        self._memory_dir = memory_dir
+
+    async def execute(self, args: ReadMemoryArgs) -> ToolResult:
+        try:
+            target = resolve_memory_path(self._memory_dir, args.path)
+        except MemoryApplyError as exc:
+            return ToolResult.failure(str(exc))
+        if not target.is_file():
+            return ToolResult.failure(f"файл памяти не найден: {args.path}")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolResult.failure(f"файл памяти не является текстовым (utf-8): {args.path}")
+        except OSError as exc:
+            return ToolResult.failure(f"не удалось прочитать '{args.path}': {exc}")
+        return ToolResult.success(truncate_text(content, _MAX_READ_CHARS))
