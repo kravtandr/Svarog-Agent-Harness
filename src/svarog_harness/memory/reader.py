@@ -35,9 +35,30 @@ def read_memory(memory_dir: Path, *, limit_bytes: int = _DEFAULT_LIMIT_BYTES) ->
         if not text:
             continue
         block = f"## {rel}\n{text}"
-        total += len(block.encode("utf-8"))
-        if total > limit_bytes:
-            parts.append(f"## {rel}\n[память усечена: превышен лимит {limit_bytes} байт]")
+        size = len(block.encode("utf-8"))
+        if total + size > limit_bytes:
+            # Страховка при чтении (ADR-0015 §1.5): усечение по границе строки
+            # и warning с действием, а не молчаливая заглушка. Основной потолок
+            # обеспечивается при генерации индекса (wiki.render_index).
+            head = _clip_to_bytes(text, max(0, limit_bytes - total - len(rel) - 16))
+            warning = (
+                f"> WARNING: {rel} превысил лимит контекста ({limit_bytes} байт) — "
+                f"загружена часть. Сокращай summary; детали переноси в notes.md"
+            )
+            parts.append(f"## {rel}\n{head}\n{warning}" if head else f"## {rel}\n{warning}")
             break
+        total += size
         parts.append(block)
     return "\n\n".join(parts)
+
+
+def _clip_to_bytes(text: str, budget: int) -> str:
+    """Голова текста по границе строки, укладывающаяся в budget байт."""
+    kept: list[str] = []
+    size = 0
+    for line in text.splitlines():
+        size += len(line.encode("utf-8")) + 1
+        if size > budget:
+            break
+        kept.append(line)
+    return "\n".join(kept)

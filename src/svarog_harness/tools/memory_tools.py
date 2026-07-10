@@ -203,6 +203,9 @@ class ReadMemoryTool(Tool[ReadMemoryArgs]):
     risk_level = RiskLevel.LOW
     args_model = ReadMemoryArgs
 
+    def is_read_only(self, args: ReadMemoryArgs) -> bool:
+        return True
+
     def __init__(self, memory_dir: Path) -> None:
         self._memory_dir = memory_dir
 

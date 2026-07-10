@@ -23,6 +23,8 @@ class LoopState:
     iterations: int = 0  # всего за run (стоп-кран max_iterations)
     tokens_used: int = 0
     cost_usd: float = 0.0
+    # prompt_tokens последнего ответа провайдера — триггер микрокомпакции (§1.4).
+    last_prompt_tokens: int = 0
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
     # Итераций с последнего refuel; при пороге контекст сбрасывается (§6.10).
     iterations_since_refuel: int = 0
@@ -34,6 +36,12 @@ class LoopState:
     refuel_pending: bool = False
     # Run-local план для сложных задач. Не является памятью или workspace-файлом.
     plan: list[dict[str, str]] = field(default_factory=list)
+    # Детектор затухающей отдачи (ADR-0015 §1.6): подряд идентичные вызовы
+    # (совпадают имя+аргументы+результат) и итерации без прогресса.
+    stagnation_last_sig: str = ""
+    stagnation_last_tool: str = ""
+    stagnation_call_repeats: int = 0
+    stagnation_low_progress_iters: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,11 +51,16 @@ class LoopState:
             "iterations": self.iterations,
             "tokens_used": self.tokens_used,
             "cost_usd": self.cost_usd,
+            "last_prompt_tokens": self.last_prompt_tokens,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
             "iterations_since_refuel": self.iterations_since_refuel,
             "nudges": self.nudges,
             "refuel_pending": self.refuel_pending,
             "plan": self.plan,
+            "stagnation_last_sig": self.stagnation_last_sig,
+            "stagnation_last_tool": self.stagnation_last_tool,
+            "stagnation_call_repeats": self.stagnation_call_repeats,
+            "stagnation_low_progress_iters": self.stagnation_low_progress_iters,
         }
 
     @classmethod
@@ -59,6 +72,7 @@ class LoopState:
             iterations=raw["iterations"],
             tokens_used=raw["tokens_used"],
             cost_usd=raw["cost_usd"],
+            last_prompt_tokens=raw.get("last_prompt_tokens", 0),
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
             nudges=raw.get("nudges", 0),
@@ -72,6 +86,10 @@ class LoopState:
                 for item in raw.get("plan", [])
                 if isinstance(item, dict)
             ],
+            stagnation_last_sig=raw.get("stagnation_last_sig", ""),
+            stagnation_last_tool=raw.get("stagnation_last_tool", ""),
+            stagnation_call_repeats=raw.get("stagnation_call_repeats", 0),
+            stagnation_low_progress_iters=raw.get("stagnation_low_progress_iters", 0),
         )
 
 

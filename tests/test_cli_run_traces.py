@@ -182,8 +182,10 @@ def test_run_iteration_limit_suspends_with_exit_code_3(
         for i in range(60)
     ]
     _patch_provider(monkeypatch, endless)
-    # Отключаем refuel (порог > max), чтобы проверить именно стоп-кран max_iterations.
+    # Отключаем refuel (порог > max) и детектор стагнации (§1.6 ловит идентичные
+    # вызовы раньше), чтобы проверить именно стоп-кран max_iterations.
     monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "100")
+    monkeypatch.setenv("SVAROG_RUNTIME__STAGNATION_REPEATS", "100")
     result = runner.invoke(cli_main.app, ["run", "зациклись", "--workspace", str(workspace)])
     assert result.exit_code == 3
     assert "лимит итераций" in result.output

@@ -44,8 +44,17 @@ async def test_timeout_kills_process_group(tmp_path: Path) -> None:
     assert "timeout" in result.error
 
 
-async def test_output_truncated(tmp_path: Path) -> None:
+async def test_output_captured_fully_below_capture_cap(tmp_path: Path) -> None:
+    """ADR-0015 §1.2: backpressure в loop — tool возвращает вывод целиком."""
     result = await _tool(tmp_path).call({"command": "head -c 100000 /dev/zero | tr '\\0' 'a'"})
     assert result.ok
+    assert "вывод обрезан" not in result.output
+    assert result.output.count("a") == 100_000
+
+
+async def test_output_truncated_at_capture_cap(tmp_path: Path) -> None:
+    """Потолок захвата ~1 МБ остаётся как защита памяти процесса."""
+    result = await _tool(tmp_path).call({"command": "head -c 1500000 /dev/zero | tr '\\0' 'a'"})
+    assert result.ok
     assert "вывод обрезан" in result.output
-    assert len(result.output) < 30_000
+    assert len(result.output) < 1_100_000
