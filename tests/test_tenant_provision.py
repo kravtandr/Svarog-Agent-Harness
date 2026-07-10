@@ -126,7 +126,7 @@ async def test_telegram_from_hub_denies_unregistered(tmp_path: Path) -> None:
     assert tx.sent == [{"chat_id": 100, "text": "⛔ Доступ запрещён."}]
 
 
-def test_telegram_from_hub_resolves_registered_user(tmp_path: Path) -> None:
+async def test_telegram_from_hub_resolves_registered_user(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     reg = _registry(tmp_path)
     reg.create("alice", TenantRole.STANDARD)
@@ -134,9 +134,35 @@ def test_telegram_from_hub_resolves_registered_user(tmp_path: Path) -> None:
     hub = TenantHub(cfg, reg)
     bot = TelegramBot.from_hub(hub, reg, _FakeTx())
 
-    resolved = bot._resolve(42)  # user → сервис тенанта alice
+    resolved = await bot._resolve(42)  # user → сервис тенанта alice
     assert resolved is hub.service_for(TenantContext("alice", TenantRole.STANDARD))
-    assert bot._resolve(999) is None
+    assert await bot._resolve(999) is None  # неизвестный, provisioning=manual → отказ
+
+
+async def test_first_touch_provisions_unknown_user(tmp_path: Path) -> None:
+    # provisioning=first_touch: неизвестный пользователь авто-провижнится.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n  default: local\n  providers:\n    local:\n"
+        "      base_url: http://localhost:9/v1\n      model: fake\n"
+        f"tenancy:\n  enabled: true\n  provisioning: first_touch\n"
+        f"  home_root: {tmp_path / 'homes'}\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(project_dir=ws)
+    reg = _registry(tmp_path)
+    hub = TenantHub(cfg, reg)
+    bot = TelegramBot.from_hub(hub, reg, _FakeTx())
+
+    svc = await bot._resolve(777)  # новый пользователь
+    assert svc is not None
+    assert reg.get("tg-777") is not None  # тенант создан
+    ctx = reg.resolve_principal("telegram:777")
+    assert ctx is not None and ctx.tenant_id == "tg-777"
+    assert (tmp_path / "homes" / "tg-777" / "svarog.db").is_file()
+    # повторный вызов идемпотентен (тенант уже есть)
+    assert await bot._resolve(777) is svc
 
 
 # --- role re-clamp (ADR-0013) -------------------------------------------------

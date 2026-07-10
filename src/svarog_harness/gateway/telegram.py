@@ -11,14 +11,16 @@ inline-кнопками approve/deny (решение асинхронное, ADR
 без сети (фейковый транспорт со скриптованными updates).
 """
 
+import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from svarog_harness.gateway.models import ApprovalView
 from svarog_harness.gateway.service import GatewayService
+from svarog_harness.tenant import TenantExistsError, provision_tenant
 
 if TYPE_CHECKING:
     from svarog_harness.gateway.hub import TenantHub
@@ -96,7 +98,7 @@ class TelegramBot:
         allowed_users: set[int],
         poll_timeout: int = 30,
     ) -> None:
-        def resolve(user_id: int) -> GatewayService | None:
+        async def resolve(user_id: int) -> GatewayService | None:
             return service if user_id in allowed_users else None
 
         self._setup(resolve, transport, poll_timeout)
@@ -110,11 +112,28 @@ class TelegramBot:
         *,
         poll_timeout: int = 30,
     ) -> "TelegramBot":
-        """Multi-tenant бот: user_id → тенант через реестр → его сервис (ADR-0014)."""
+        """Multi-tenant бот: user_id → тенант через реестр → его сервис (ADR-0014).
+
+        При `tenancy.provisioning=first_touch` неизвестный пользователь
+        авто-провижнится как тенант `tg-<user_id>` (роль = default_role) и
+        сразу получает свой изолированный agent-home; иначе — отказ.
+        """
         bot = cls.__new__(cls)
 
-        def resolve(user_id: int) -> GatewayService | None:
-            ctx = registry.resolve_principal(f"telegram:{user_id}")
+        async def resolve(user_id: int) -> GatewayService | None:
+            principal = f"telegram:{user_id}"
+            ctx = registry.resolve_principal(principal)
+            if ctx is not None:
+                return hub.service_for(ctx)
+            if hub.base_cfg.tenancy.provisioning != "first_touch":
+                return None
+            tenant_id = f"tg-{user_id}"
+            with contextlib.suppress(TenantExistsError):
+                await provision_tenant(
+                    hub.base_cfg, registry, tenant_id, hub.base_cfg.tenancy.default_role
+                )
+            registry.add_principal(tenant_id, principal)
+            ctx = registry.resolve_principal(principal)
             return hub.service_for(ctx) if ctx is not None else None
 
         bot._setup(resolve, transport, poll_timeout)
@@ -122,7 +141,7 @@ class TelegramBot:
 
     def _setup(
         self,
-        resolve: Callable[[int], GatewayService | None],
+        resolve: Callable[[int], Awaitable[GatewayService | None]],
         transport: TelegramTransport,
         poll_timeout: int,
     ) -> None:
@@ -152,7 +171,7 @@ class TelegramBot:
         chat_id = int(message["chat"]["id"])
         user_id = int(message.get("from", {}).get("id", 0))
         text = str(message.get("text", "")).strip()
-        service = self._resolve(user_id)
+        service = await self._resolve(user_id)
         if service is None:
             await self._tx.send_message(chat_id, "⛔ Доступ запрещён.")
             return
@@ -184,7 +203,7 @@ class TelegramBot:
         chat_id = int(message.get("chat", {}).get("id", 0))
         data = str(callback.get("data", ""))
         await self._tx.answer_callback(callback_id)
-        service = self._resolve(user_id)
+        service = await self._resolve(user_id)
         if service is None or ":" not in data:
             return
         verb, approval_id = data.split(":", 1)
