@@ -64,3 +64,23 @@ def detect_dangerous_command(command: str) -> str | None:
         if pattern.search(command):
             return description
     return None
+
+
+_GIT_PUSH = re.compile(r"\bgit\s+push\b", re.IGNORECASE)
+
+
+def detect_protected_push(command: str, protected_branches: frozenset[str]) -> str | None:
+    """`git push`, целящий в защищённую ветку → описание, иначе None.
+
+    Дополняет типизированный git.push_protected (Flow C): внутри run агент
+    пушит через bash, который сам по себе не знает про protected-набор. Слой
+    строго best-effort (ADR-0002): статическое сопоставление имени ветки в
+    команде эскалирует риск до high (→ approval в supervised), но не даёт
+    гарантии — недоверенное должно идти в docker-sandbox.
+    """
+    if not _GIT_PUSH.search(command):
+        return None
+    for branch in protected_branches:
+        if re.search(rf"\bgit\s+push\b[^\n]*\b{re.escape(branch)}\b", command, re.IGNORECASE):
+            return f"push в защищённую ветку '{branch}'"
+    return None

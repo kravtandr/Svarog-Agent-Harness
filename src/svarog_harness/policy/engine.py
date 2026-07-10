@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from svarog_harness.config.schema import AutonomyMode, PoliciesConfig
-from svarog_harness.policy.heuristics import detect_dangerous_command
+from svarog_harness.policy.heuristics import detect_dangerous_command, detect_protected_push
 from svarog_harness.policy.rules import PolicyRule
 from svarog_harness.tools.base import RiskLevel, Tool
 
@@ -104,7 +104,10 @@ class PolicyEngine:
         # 3. Эвристики bash — UX-эскалация риска до high, не выше (ADR-0002).
         reason = ""
         if action_type == "bash.exec" and risk in (RiskLevel.LOW, RiskLevel.MEDIUM):
-            danger = detect_dangerous_command(str(arguments.get("command", "")))
+            command = str(arguments.get("command", ""))
+            danger = detect_dangerous_command(command) or detect_protected_push(
+                command, frozenset(self._policies.protected_branches)
+            )
             if danger is not None:
                 risk = RiskLevel.HIGH
                 reason = f"эвристика: {danger}"

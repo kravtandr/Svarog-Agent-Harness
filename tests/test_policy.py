@@ -141,6 +141,36 @@ def test_dangerous_bash_requires_approval_in_supervised(tmp_path: Path) -> None:
     assert decision.action is PolicyAction.REQUIRE_APPROVAL
 
 
+def test_detect_protected_push() -> None:
+    from svarog_harness.policy.heuristics import detect_protected_push
+
+    protected = frozenset({"main", "production"})
+    assert detect_protected_push("git push origin main", protected) is not None
+    assert detect_protected_push("git push origin HEAD:production", protected) is not None
+    assert detect_protected_push("git push origin feature-x", protected) is None
+    assert detect_protected_push("git status", protected) is None
+    # best-effort: без git push не срабатывает (перестраховка в спорных случаях ок)
+    assert detect_protected_push("ls && rm main", protected) is None
+
+
+def test_bash_push_to_protected_requires_approval_in_supervised(tmp_path: Path) -> None:
+    # S6-регрессия: bash-push в protected-ветку внутри run эскалируется до high и
+    # требует approval в supervised (git.push_protected обходился через bash).
+    bash = BashTool(LocalEnvironment(tmp_path))
+    engine = _engine(tmp_path, autonomy=AutonomyMode.SUPERVISED)
+    decision = engine.evaluate(bash, {"command": "git push origin main"})
+    assert decision.action is PolicyAction.REQUIRE_APPROVAL
+    assert decision.risk_level is RiskLevel.HIGH
+    assert "защищённую ветку" in decision.reason
+
+
+def test_bash_push_to_feature_branch_allowed(tmp_path: Path) -> None:
+    bash = BashTool(LocalEnvironment(tmp_path))
+    engine = _engine(tmp_path, autonomy=AutonomyMode.SUPERVISED)
+    decision = engine.evaluate(bash, {"command": "git push origin svarog/task-123"})
+    assert decision.action is PolicyAction.ALLOW
+
+
 # --- профили и правила ---
 
 
