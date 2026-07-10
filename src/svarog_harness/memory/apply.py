@@ -7,6 +7,7 @@ replace_section требует стабильных markdown-якорей — з
 from datetime import date
 from pathlib import Path
 
+from svarog_harness.common.frontmatter import render, split_frontmatter
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
 from svarog_harness.memory.project_page import project_slug_from_path, stamp_dates
 
@@ -66,8 +67,24 @@ def _replace_section(text: str, section: str, new_body: str) -> str:
     return "\n".join(rebuilt).rstrip("\n") + "\n"
 
 
+def _update_field(text: str, field: str, value: str) -> str:
+    """Обновить одно поле YAML-frontmatter, не трогая тело и порядок полей.
+
+    Поля нет во frontmatter → добавляется. Нет frontmatter вовсе →
+    MemoryApplyError (обновлять нечего). created/updated ведёт код —
+    их через update_field не трогаем.
+    """
+    if field in ("created", "updated"):
+        raise MemoryApplyError(f"поле '{field}' ведёт код, его нельзя менять через update_field")
+    frontmatter, body = split_frontmatter(text)
+    if not frontmatter:
+        raise MemoryApplyError("во frontmatter нечего обновлять: нет валидного ---блока")
+    frontmatter[field] = value
+    return render(frontmatter, body)
+
+
 def _new_content(existing: str, request: MemoryChangeRequest) -> str:
-    """Содержимое файла после применения create/append/replace_section (чистое)."""
+    """Содержимое файла после применения create/append/replace_section/update_field."""
     if request.operation is MemoryOperation.CREATE:
         return request.content
     if request.operation is MemoryOperation.APPEND:
@@ -77,6 +94,8 @@ def _new_content(existing: str, request: MemoryChangeRequest) -> str:
         return base + request.content
     if request.operation is MemoryOperation.REPLACE_SECTION:
         return _replace_section(existing, request.section, request.content)
+    if request.operation is MemoryOperation.UPDATE_FIELD:
+        return _update_field(existing, request.field, request.content)
     raise MemoryApplyError(f"неприменимая операция для расчёта содержимого: {request.operation}")
 
 
@@ -88,8 +107,13 @@ def preview_content(memory_dir: Path, request: MemoryChangeRequest) -> str:
     target = resolve_memory_path(memory_dir, request.file)
     if request.operation is MemoryOperation.DELETE:
         return ""
-    if request.operation is MemoryOperation.REPLACE_SECTION and not target.exists():
-        raise MemoryApplyError(f"файл '{request.file}' не существует для replace_section")
+    if (
+        request.operation in (MemoryOperation.REPLACE_SECTION, MemoryOperation.UPDATE_FIELD)
+        and not target.exists()
+    ):
+        raise MemoryApplyError(
+            f"файл '{request.file}' не существует для {request.operation.value}"
+        )
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
     return _new_content(existing, request)
 
@@ -108,8 +132,13 @@ def apply_change(
         target.unlink(missing_ok=True)
         return
 
-    if request.operation is MemoryOperation.REPLACE_SECTION and not target.exists():
-        raise MemoryApplyError(f"файл '{request.file}' не существует для replace_section")
+    if (
+        request.operation in (MemoryOperation.REPLACE_SECTION, MemoryOperation.UPDATE_FIELD)
+        and not target.exists()
+    ):
+        raise MemoryApplyError(
+            f"файл '{request.file}' не существует для {request.operation.value}"
+        )
 
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
     content = _new_content(existing, request)

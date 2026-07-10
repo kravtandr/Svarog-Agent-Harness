@@ -78,6 +78,9 @@ tags: [bot, media]
 пишет в workspace, память живёт отдельно. Чтобы завести страницу проекта — \
 remember с operation=create и путём projects/<slug>/overview.md;
 - в существующий файл дописывай append или обновляй секцию replace_section;
+- одно поле frontmatter (например status у проекта) меняй operation=update_field \
+(field=имя поля, content=новое значение) — НЕ через delete+create и НЕ через \
+edit_file: delete удалит страницу целиком, а edit_file пишет в workspace, не в память;
 - create перезаписывает файл целиком — только для новых файлов;
 - index.md и log.md не редактируй — они собираются автоматически;
 - память отложенная: заявка remember применяется ПОСЛЕ завершения задачи, \

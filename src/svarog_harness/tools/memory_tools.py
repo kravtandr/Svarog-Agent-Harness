@@ -47,6 +47,13 @@ class RememberArgs(BaseModel):
     section: str = Field(
         default="", description="Заголовок markdown-секции для replace_section (без #)"
     )
+    field: str = Field(
+        default="",
+        description=(
+            "Имя поля YAML-frontmatter для update_field (например status); "
+            "новое значение поля передаётся в content"
+        ),
+    )
 
 
 class RememberTool(Tool[RememberArgs]):
@@ -58,7 +65,11 @@ class RememberTool(Tool[RememberArgs]):
         "Одну секцию правь одной заявкой: несколько replace_section на один и тот "
         "же section применятся последовательно поверх друг друга и испортят файл. "
         "Для replace_section в content кладётся только новое тело секции без "
-        "строки её заголовка."
+        "строки её заголовка. Чтобы изменить одно поле frontmatter существующей "
+        "страницы (например status) — используй update_field (field=имя, "
+        "content=значение), НЕ delete+create: delete удалит страницу целиком, а "
+        "create на существующий файл отклоняется. delete — только чтобы удалить "
+        "сущность насовсем."
     )
     risk_level = RiskLevel.LOW
     args_model = RememberArgs
@@ -74,6 +85,10 @@ class RememberTool(Tool[RememberArgs]):
         self._pending_files: set[str] = set()
 
     async def execute(self, args: RememberArgs) -> ToolResult:
+        if args.operation is MemoryOperation.UPDATE_FIELD and (not args.field or not args.content):
+            return ToolResult.failure(
+                "для update_field нужны field (имя поля) и content (новое значение)"
+            )
         if args.operation is not MemoryOperation.DELETE and not args.content and not args.section:
             return ToolResult.failure("нужно указать content для записи в память")
         error = self._validate(args)
@@ -84,6 +99,7 @@ class RememberTool(Tool[RememberArgs]):
             operation=args.operation,
             content=args.content,
             section=args.section,
+            field=args.field,
         )
         self._on_enqueue(request)
         if self._memory_dir is not None and args.operation is not MemoryOperation.DELETE:
@@ -105,6 +121,7 @@ class RememberTool(Tool[RememberArgs]):
         if args.file.split("/", 1)[0] == "sources" and args.operation in (
             MemoryOperation.APPEND,
             MemoryOperation.REPLACE_SECTION,
+            MemoryOperation.UPDATE_FIELD,
         ):
             # sources/ — raw-слой (ADR-0011): исходники неизменяемы, правки
             # запрещены. Нужен новый вариант — create нового файла.
@@ -132,6 +149,12 @@ class RememberTool(Tool[RememberArgs]):
                 # для него проверку пропускаем (оптимистично).
                 return f"файл '{args.file}' не существует для replace_section"
 
+        if args.operation is MemoryOperation.UPDATE_FIELD:
+            if not args.field:
+                return "для update_field нужно указать field (имя поля frontmatter)"
+            if not target.exists() and str(target) not in self._pending_files:
+                return f"файл '{args.file}' не существует для update_field"
+
         slug = project_slug_from_path(args.file)
         if slug is not None and args.operation is not MemoryOperation.DELETE:
             # Контракт страницы проекта (ADR-0011): frontmatter должен быть
@@ -148,6 +171,7 @@ class RememberTool(Tool[RememberArgs]):
                         operation=args.operation,
                         content=args.content,
                         section=args.section,
+                        field=args.field,
                     ),
                 )
             except MemoryApplyError as exc:

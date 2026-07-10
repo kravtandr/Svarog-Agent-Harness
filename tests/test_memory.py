@@ -91,6 +91,78 @@ def test_apply_replace_missing_section(tmp_path: Path) -> None:
         )
 
 
+def test_apply_update_field(tmp_path: Path) -> None:
+    (tmp_path / "page.md").write_text(
+        "---\nname: X\nstatus: active\n---\n\n## Тело\nтекст\n", encoding="utf-8"
+    )
+    apply_change(
+        tmp_path,
+        MemoryChangeRequest(
+            file="page.md",
+            operation=MemoryOperation.UPDATE_FIELD,
+            field="status",
+            content="paused",
+        ),
+    )
+    text = (tmp_path / "page.md").read_text(encoding="utf-8")
+    assert "status: paused" in text
+    assert "status: active" not in text
+    assert "name: X" in text  # прочие поля целы
+    assert "## Тело" in text and "текст" in text  # тело цело
+
+
+def test_apply_update_field_stamps_updated_on_project_page(tmp_path: Path) -> None:
+    from datetime import date
+
+    (tmp_path / "projects" / "foo").mkdir(parents=True)
+    (tmp_path / "projects" / "foo" / "overview.md").write_text(
+        "---\nname: Foo\nslug: foo\nsummary: s\nstatus: active\n"
+        "created: 2026-01-01\nupdated: 2026-01-01\n---\n\n## Описание\nтекст\n",
+        encoding="utf-8",
+    )
+    apply_change(
+        tmp_path,
+        MemoryChangeRequest(
+            file="projects/foo/overview.md",
+            operation=MemoryOperation.UPDATE_FIELD,
+            field="status",
+            content="paused",
+        ),
+        today=date(2026, 7, 10),
+    )
+    text = (tmp_path / "projects" / "foo" / "overview.md").read_text(encoding="utf-8")
+    assert "status: paused" in text
+    assert "updated: 2026-07-10" in text  # updated проставлен кодом
+    assert "created: 2026-01-01" in text  # created сохранён
+
+
+def test_apply_update_field_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(MemoryApplyError, match="не существует"):
+        apply_change(
+            tmp_path,
+            MemoryChangeRequest(
+                file="ghost.md",
+                operation=MemoryOperation.UPDATE_FIELD,
+                field="status",
+                content="paused",
+            ),
+        )
+
+
+def test_apply_update_field_no_frontmatter(tmp_path: Path) -> None:
+    (tmp_path / "plain.md").write_text("просто текст без frontmatter\n", encoding="utf-8")
+    with pytest.raises(MemoryApplyError, match="frontmatter"):
+        apply_change(
+            tmp_path,
+            MemoryChangeRequest(
+                file="plain.md",
+                operation=MemoryOperation.UPDATE_FIELD,
+                field="status",
+                content="paused",
+            ),
+        )
+
+
 def test_apply_delete(tmp_path: Path) -> None:
     (tmp_path / "old.md").write_text("удалить", encoding="utf-8")
     apply_change(tmp_path, MemoryChangeRequest(file="old.md", operation=MemoryOperation.DELETE))
@@ -307,6 +379,63 @@ async def test_remember_allows_chain_create_then_replace(tmp_path: Path) -> None
     )
     assert replaced.ok, replaced.error
     assert len(sink) == 2
+
+
+async def test_remember_update_field_accepted(tmp_path: Path) -> None:
+    (tmp_path / "projects" / "foo").mkdir(parents=True)
+    (tmp_path / "projects" / "foo" / "overview.md").write_text(
+        "---\nname: Foo\nslug: foo\nsummary: s\nstatus: active\n---\n\n## Описание\nт\n",
+        encoding="utf-8",
+    )
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {
+            "file": "projects/foo/overview.md",
+            "operation": "update_field",
+            "field": "status",
+            "content": "paused",
+        }
+    )
+    assert result.ok, result.error
+    assert len(sink) == 1 and sink[0].field == "status"
+
+
+async def test_remember_update_field_requires_field(tmp_path: Path) -> None:
+    (tmp_path / "p.md").write_text("---\nstatus: active\n---\n", encoding="utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "p.md", "operation": "update_field", "content": "paused"}
+    )
+    assert not result.ok
+    assert result.error is not None and "field" in result.error
+    assert sink == []
+
+
+async def test_remember_update_field_rejects_missing_file(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "ghost.md", "operation": "update_field", "field": "status", "content": "paused"}
+    )
+    assert not result.ok
+    assert result.error is not None and "не существует" in result.error
+    assert sink == []
+
+
+async def test_remember_update_field_rejects_sources(tmp_path: Path) -> None:
+    (tmp_path / "sources" / "x").mkdir(parents=True)
+    (tmp_path / "sources" / "x" / "spec.md").write_text("---\nv: 1\n---\n", encoding="utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {
+            "file": "sources/x/spec.md",
+            "operation": "update_field",
+            "field": "v",
+            "content": "2",
+        }
+    )
+    assert not result.ok
+    assert result.error is not None and "неизменяемый" in result.error
+    assert sink == []
 
 
 # --- read_memory: профиль первым, при усечении режется хвост (index) ---

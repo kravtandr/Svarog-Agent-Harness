@@ -86,8 +86,27 @@
 - Driver:  «Что мы решали по проекту <slug>? Обнови у него статус на paused».
 - Assert:  агент находит проект через `index.md` и подтягивает страницу
            `read_memory('projects/<slug>/overview.md')` (а не выдумывает);
-           обновление статуса — через `remember`.
-- Watch:   галлюцинация вместо чтения; правка не через remember.
+           обновление статуса — через `remember` **operation=update_field**
+           (field=status). ПОСЛЕ прогона страница ЖИВА и `status: paused`
+           (НЕ удалена); в git — `memory: update_field …#status`; `memory
+           curate` без находок.
+- Watch:   галлюцинация вместо чтения; правка через edit_file (workspace) или
+           delete+create вместо update_field → потеря страницы (см. S8).
+- Runs:    3.
+
+### S8: Frontmatter field update  (регрессия — фикс update_field)
+- Persona: любая; провоцирует P7 (проверяющий) и P6 (меняющий требования).
+- Goal:    сменить ОДНО поле frontmatter существующей страницы (status).
+- Setup:   `projects/<slug>/overview.md` со `status: active` и телом с решениями.
+- Driver:  «Поставь проекту <slug> статус paused».
+- Assert:  ровно одна заявка `remember update_field` (field=status,
+           content=paused); страница НЕ удалена, тело/frontmatter целы, `updated`
+           проставлен кодом (сегодня), `created` сохранён; НЕ было delete и НЕ
+           было edit_file по пути памяти.
+- Watch:   до фикса агент попадал в тупик (нет операции для frontmatter) и
+           терял страницу через delete: read_memory показывает старое (eventual)
+           → edit_file (не память) → create (отклонён) → delete (проходит) →
+           страница удалена, а ответ врёт «обновлено».
 - Runs:    3.
 
 ### S7: Profile cleanup via replace_section  (регрессия — фикс промта remember)
