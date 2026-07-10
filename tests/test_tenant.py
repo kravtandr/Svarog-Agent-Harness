@@ -196,7 +196,8 @@ def test_registry_create_and_get(tmp_path: Path) -> None:
     reg = _registry(tmp_path)
     rec = reg.create("alice", TenantRole.STANDARD)
     assert rec.tenant_id == "alice"
-    assert reg.get("alice").role is TenantRole.STANDARD
+    fetched = reg.get("alice")
+    assert fetched is not None and fetched.role is TenantRole.STANDARD
     assert reg.get("missing") is None
 
 
@@ -244,5 +245,6 @@ def test_registry_run_index_roundtrip(tmp_path: Path) -> None:
 def test_registry_persists_across_instances(tmp_path: Path) -> None:
     _registry(tmp_path).create("alice", TenantRole.SUPERUSER)
     reloaded = _registry(tmp_path)
-    assert reloaded.get("alice").role is TenantRole.SUPERUSER
+    fetched = reloaded.get("alice")
+    assert fetched is not None and fetched.role is TenantRole.SUPERUSER
     assert [r.tenant_id for r in reloaded.list_tenants()] == ["alice"]
