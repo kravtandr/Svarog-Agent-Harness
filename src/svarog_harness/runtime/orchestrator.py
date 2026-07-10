@@ -98,17 +98,28 @@ class TaskRunner:
         self._cfg = clamp_by_role(cfg, role)
         cfg = self._cfg
         self._workspace = workspace
-        # env_fallback уважает кламп роли (ADR-0014): у standard-тенанта он
-        # выключен, чтобы tenant-ref не проваливался в хостовый os.environ.
+        # Два скоупа секретов (ADR-0014 #2):
+        #   _store — SANDBOX-инъекция (secrets.inject): у standard env_fallback
+        #     выключен клампом, чтобы tenant-ref не провалился в хостовый os.environ;
+        #   _host_store — HOST-side резолвинг (provider api_key_ref, MCP env_refs,
+        #     gateway): всегда с env-fallback. Значения используются в host-процессе
+        #     (LLM-вызов, spawn MCP), в sandbox не попадают — env здесь безопасен.
         self._store: SecretStore = default_secret_store(
             cfg.secrets.path, env_fallback=cfg.secrets.env_fallback
         )
+        self._host_store: SecretStore = default_secret_store(cfg.secrets.path, env_fallback=True)
         # Межпроцессная сериализация memory-writer (ADR-0004/0007).
         self._lock: LockBackend = default_lock_backend(cfg.storage.db_path)
 
     @property
     def store(self) -> SecretStore:
+        """Sandbox-скоуп секретов (для инъекции в контейнер)."""
         return self._store
+
+    @property
+    def host_store(self) -> SecretStore:
+        """Host-скоуп секретов (provider/MCP/gateway; резолвится вне sandbox)."""
+        return self._host_store
 
     async def with_db[T](self, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
         init_db(self._cfg.storage.db_path)
@@ -160,7 +171,9 @@ class TaskRunner:
             refs.append(self._cfg.gateway.token_ref)
         if self._cfg.telegram.token_ref is not None:
             refs.append(self._cfg.telegram.token_ref)
-        return self._store.values() | selected_values(self._store, refs)
+        # Redaction покрывает оба скоупа: host-store перечисляет тот же файл, а
+        # selected_values добавляет env-backed refs (provider-ключ и пр.).
+        return self._host_store.values() | selected_values(self._host_store, refs)
 
     async def recover(self, recorder: TraceRecorder, hooks: RunHooks) -> None:
         """Recovery незавершённых runs при старте (ADR-0005)."""
@@ -181,7 +194,7 @@ class TaskRunner:
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
-        cfg, workspace, store = self._cfg, self._workspace, self._store
+        cfg, workspace = self._cfg, self._workspace
         policy = PolicyEngine(
             autonomy=autonomy,
             policies=cfg.policies,
@@ -218,7 +231,7 @@ class TaskRunner:
             mcp_tools=mcp_tools,
         )
         return AgentLoop(
-            default_provider(cfg.models, store),
+            default_provider(cfg.models, self._host_store),  # host-скоуп (ADR-0014 #2)
             registry,
             recorder,
             cfg.runtime,
@@ -298,7 +311,7 @@ class TaskRunner:
         if hooks.on_workspace_prep is not None:
             hooks.on_workspace_prep(prep)
 
-        backends = await connect_mcp_servers(self._cfg.mcp, self._store)
+        backends = await connect_mcp_servers(self._cfg.mcp, self._host_store)  # host-скоуп
         environment = self.build_environment()
         await environment.start()
         try:
@@ -357,7 +370,7 @@ class TaskRunner:
             # говорит local-trusted. Для superuser (CLI-resume) — no-op.
             runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
             runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
-            backends = await connect_mcp_servers(runner._cfg.mcp, runner._store)
+            backends = await connect_mcp_servers(runner._cfg.mcp, runner._host_store)
             environment = runner.build_environment()
             await environment.start()
             try:

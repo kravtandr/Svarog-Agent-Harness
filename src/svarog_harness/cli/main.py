@@ -445,7 +445,7 @@ def _read_user_line(prompt: str) -> str:
 async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
-    backends = await connect_mcp_servers(cfg.mcp, runner.store)
+    backends = await connect_mcp_servers(cfg.mcp, runner.host_store)  # host-скоуп (ADR-0014 #2)
     mcp_tools = build_mcp_tools(backends)
     environment = runner.build_environment()
     await environment.start()

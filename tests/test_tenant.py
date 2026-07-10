@@ -19,6 +19,7 @@ from svarog_harness.config.paths import (
     tenant_home,
 )
 from svarog_harness.config.schema import SvarogConfig, TenantRole
+from svarog_harness.runtime.orchestrator import TaskRunner
 from svarog_harness.secrets import default_secret_store
 from svarog_harness.tenant import (
     PrincipalConflictError,
@@ -183,6 +184,26 @@ def test_standard_clamp_disables_env_fallback_end_to_end(tmp_path: Path) -> None
     base = _base_cfg(tmp_path)
     r = resolve_tenant_config(base, tenant_id="f", home=tmp_path / "f", role=TenantRole.STANDARD)
     assert r.cfg.secrets.env_fallback is False
+
+
+# --- два секрет-скоупа (ADR-0014 #2) и MCP off (#8) ---------------------------
+
+
+def test_clamp_standard_disables_mcp(tmp_path: Path) -> None:
+    base = _base_cfg(tmp_path, "mcp:\n  servers:\n    foo:\n      command: echo\n")
+    assert clamp_by_role(base, TenantRole.STANDARD).mcp.servers == {}
+    assert clamp_by_role(base, TenantRole.SUPERUSER).mcp.servers != {}  # superuser сохраняет
+
+
+def test_standard_two_secret_scopes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_PROVIDER_KEY", "sk-global")
+    base = _base_cfg(tmp_path)
+    r = resolve_tenant_config(base, tenant_id="p", home=tmp_path / "p", role=TenantRole.STANDARD)
+    runner = TaskRunner(r.cfg, r.workspace, role=TenantRole.STANDARD)
+    # host-скоуп резолвит глобальный env-ключ (провайдер вызывается host-side);
+    # sandbox-скоуп — нет (env-fallback выключен клампом).
+    assert runner.host_store.get("MY_PROVIDER_KEY") == "sk-global"
+    assert runner.store.get("MY_PROVIDER_KEY") is None
 
 
 # --- реестр -------------------------------------------------------------------

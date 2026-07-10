@@ -86,6 +86,9 @@ def clamp_by_role(cfg: SvarogConfig, role: TenantRole) -> SvarogConfig:
             "secrets": cfg.secrets.model_copy(update={"env_fallback": False}),
             "git": cfg.git.model_copy(update={"secret_scan_before_commit": True}),
             "verifier": cfg.verifier.model_copy(update={"secret_scan": True}),
+            # MCP выключен для standard по умолчанию (ADR-0014 #8): внешний сервер —
+            # выход за пределы sandbox; opt-in требует per-tenant конфига (Фаза 3).
+            "mcp": cfg.mcp.model_copy(update={"servers": {}}),
         }
     )
 
