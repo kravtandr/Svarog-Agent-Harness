@@ -15,8 +15,13 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
-from svarog_harness.config.paths import first_existing_skills_dir, memory_dir, skills_dirs
-from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.config.paths import (
+    clamp_by_role,
+    first_existing_skills_dir,
+    memory_dir,
+    skills_dirs,
+)
+from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gitflow import GitRepo, SecretScanBlockedError, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import default_provider
 from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
@@ -83,8 +88,15 @@ async def _close_backends(backends: list[MCPBackend]) -> None:
 class TaskRunner:
     """Гоняет задачи в фиксированном workspace по одной конфигурации."""
 
-    def __init__(self, cfg: SvarogConfig, workspace: Path) -> None:
-        self._cfg = cfg
+    def __init__(
+        self, cfg: SvarogConfig, workspace: Path, *, role: TenantRole = TenantRole.SUPERUSER
+    ) -> None:
+        # Роль фиксируется при старте (ADR-0010/0013) и заклампывает cfg
+        # идемпотентно: standard → docker/hardened, superuser (по умолчанию) —
+        # no-op. Клампим здесь, чтобы гарантия держалась и на resume (см. resume).
+        self._role = role
+        self._cfg = clamp_by_role(cfg, role)
+        cfg = self._cfg
         self._workspace = workspace
         # env_fallback уважает кламп роли (ADR-0014): у standard-тенанта он
         # выключен, чтобы tenant-ref не проваливался в хостовый os.environ.
@@ -340,7 +352,10 @@ class TaskRunner:
             workspace = state.workspace
             if not workspace.is_dir():
                 raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
-            runner = TaskRunner(load_config(project_dir=workspace), workspace)
+            # Роль тенанта переклампывает конфиг workspace'а на resume (ADR-0013):
+            # standard остаётся в docker/hardened, даже если yaml workspace'а
+            # говорит local-trusted. Для superuser (CLI-resume) — no-op.
+            runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
             runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
             backends = await connect_mcp_servers(runner._cfg.mcp, runner._store)
             environment = runner.build_environment()

@@ -98,6 +98,7 @@ class TenantHub:
                 resolved.cfg,
                 resolved.workspace,
                 on_run_created=lambda run_id: self.registry.record_run(run_id, tenant_id),
+                role=ctx.role,
             )
             self._services[ctx.tenant_id] = svc
         return svc

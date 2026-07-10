@@ -150,6 +150,30 @@ class TenantRegistry:
             data["run_index"][run_id] = tenant_id
             self._save(data)
 
+    def remove_principal(self, principal: str) -> None:
+        """Отвязать principal от тенанта (напр. отзыв старого токена при ротации)."""
+        with self._locked():
+            data = self._load()
+            tenant_id = data["index"].pop(principal, None)
+            if tenant_id is not None and tenant_id in data["tenants"]:
+                plist = data["tenants"][tenant_id]["principals"]
+                if principal in plist:
+                    plist.remove(principal)
+            self._save(data)
+
+    def delete(self, tenant_id: str) -> None:
+        """Удалить тенанта из реестра со всеми его principal'ами и run-индексом.
+
+        Файлы home НЕ трогает — только control-plane запись (для rollback провижна
+        и админ-снятия). Физическое удаление данных — отдельная осознанная операция.
+        """
+        with self._locked():
+            data = self._load()
+            data["tenants"].pop(tenant_id, None)
+            data["index"] = {p: t for p, t in data["index"].items() if t != tenant_id}
+            data["run_index"] = {r: t for r, t in data["run_index"].items() if t != tenant_id}
+            self._save(data)
+
     # --- внутреннее --------------------------------------------------------
 
     @staticmethod

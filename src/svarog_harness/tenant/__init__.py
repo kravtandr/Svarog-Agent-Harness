@@ -5,6 +5,13 @@
 """
 
 from svarog_harness.tenant.models import TenantContext, TenantRecord
+from svarog_harness.tenant.provision import (
+    GATEWAY_TOKEN_REF,
+    ProvisionResult,
+    current_token,
+    provision_tenant,
+    rotate_token,
+)
 from svarog_harness.tenant.registry import (
     PrincipalConflictError,
     TenantExistsError,
@@ -13,10 +20,15 @@ from svarog_harness.tenant.registry import (
 )
 
 __all__ = [
+    "GATEWAY_TOKEN_REF",
     "PrincipalConflictError",
+    "ProvisionResult",
     "TenantContext",
     "TenantExistsError",
     "TenantRecord",
     "TenantRegistry",
     "TenantRegistryError",
+    "current_token",
+    "provision_tenant",
+    "rotate_token",
 ]

@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.paths import skills_dirs
-from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
     ApprovalView,
     RunDetail,
@@ -50,9 +50,11 @@ class GatewayService:
     events: EventStream = field(default_factory=InProcessEventStream)
     # Колбэк на создание run'а — TenantHub пишет им run_index run→tenant (ADR-0014).
     on_run_created: Callable[[str], None] | None = None
+    # Роль тенанта (ADR-0013): фиксируется в runner'е и держит кламп на resume.
+    role: TenantRole = TenantRole.SUPERUSER
 
     def __post_init__(self) -> None:
-        self._runner = TaskRunner(self.cfg, self.workspace)
+        self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
         # Держим ссылки на фоновые задачи, чтобы их не собрал GC (RUF006).
         self._tasks: set[asyncio.Task[None]] = set()
         # Супервизор refuel (§6.10): счётчик авто-resume'ов на run (предохранитель)

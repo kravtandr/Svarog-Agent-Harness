@@ -13,12 +13,16 @@ inline-кнопками approve/deny (решение асинхронное, ADR
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from svarog_harness.gateway.models import ApprovalView
 from svarog_harness.gateway.service import GatewayService
+
+if TYPE_CHECKING:
+    from svarog_harness.gateway.hub import TenantHub
+    from svarog_harness.tenant import TenantRegistry
 
 _API = "https://api.telegram.org"
 
@@ -76,6 +80,14 @@ _MSG_LIMIT = 3800
 
 
 class TelegramBot:
+    """Бот поверх резолвера user_id → GatewayService.
+
+    Single-tenant: один сервис для user-id из allowlist (§16). Multi-tenant
+    (`from_hub`): user_id резолвится в тенанта через реестр
+    (`telegram:<id>`), каждый чат работает в изоляции своего agent-home
+    (ADR-0014). Неизвестный пользователь получает отказ в обоих режимах.
+    """
+
     def __init__(
         self,
         service: GatewayService,
@@ -84,9 +96,38 @@ class TelegramBot:
         allowed_users: set[int],
         poll_timeout: int = 30,
     ) -> None:
-        self._service = service
+        def resolve(user_id: int) -> GatewayService | None:
+            return service if user_id in allowed_users else None
+
+        self._setup(resolve, transport, poll_timeout)
+
+    @classmethod
+    def from_hub(
+        cls,
+        hub: "TenantHub",
+        registry: "TenantRegistry",
+        transport: TelegramTransport,
+        *,
+        poll_timeout: int = 30,
+    ) -> "TelegramBot":
+        """Multi-tenant бот: user_id → тенант через реестр → его сервис (ADR-0014)."""
+        bot = cls.__new__(cls)
+
+        def resolve(user_id: int) -> GatewayService | None:
+            ctx = registry.resolve_principal(f"telegram:{user_id}")
+            return hub.service_for(ctx) if ctx is not None else None
+
+        bot._setup(resolve, transport, poll_timeout)
+        return bot
+
+    def _setup(
+        self,
+        resolve: Callable[[int], GatewayService | None],
+        transport: TelegramTransport,
+        poll_timeout: int,
+    ) -> None:
+        self._resolve = resolve
         self._tx = transport
-        self._allowed = allowed_users
         self._poll_timeout = poll_timeout
         # Ожидающий ответа вопрос ask_user на чат (§6.5): следующее сообщение
         # пользователя в этот чат трактуется как ответ.
@@ -111,7 +152,8 @@ class TelegramBot:
         chat_id = int(message["chat"]["id"])
         user_id = int(message.get("from", {}).get("id", 0))
         text = str(message.get("text", "")).strip()
-        if not self._authorized(user_id):
+        service = self._resolve(user_id)
+        if service is None:
             await self._tx.send_message(chat_id, "⛔ Доступ запрещён.")
             return
         if not text:
@@ -120,20 +162,20 @@ class TelegramBot:
         if chat_id in self._pending:
             approval_id = self._pending.pop(chat_id)
             answer = "" if text == "/skip" else text
-            run_id = await self._service.answer_question(approval_id, answer=answer)
+            run_id = await service.answer_question(approval_id, answer=answer)
             await self._tx.send_message(
                 chat_id, "✍️ Ответ принят, продолжаю." if answer else "⏭ Продолжаю без ответа."
             )
-            await self._service.resume_run(run_id)
-            await self._stream_to_chat(chat_id, run_id)
+            await service.resume_run(run_id)
+            await self._stream_to_chat(service, chat_id, run_id)
             return
         if text.startswith("/"):
             await self._tx.send_message(
                 chat_id, "Пришлите задачу текстом — я запущу агентный run и покажу ход."
             )
             return
-        run_id = await self._service.create_run(text, None)
-        await self._stream_to_chat(chat_id, run_id)
+        run_id = await service.create_run(text, None)
+        await self._stream_to_chat(service, chat_id, run_id)
 
     async def _handle_callback(self, callback: dict[str, Any]) -> None:
         callback_id = str(callback["id"])
@@ -142,23 +184,26 @@ class TelegramBot:
         chat_id = int(message.get("chat", {}).get("id", 0))
         data = str(callback.get("data", ""))
         await self._tx.answer_callback(callback_id)
-        if not self._authorized(user_id) or ":" not in data:
+        service = self._resolve(user_id)
+        if service is None or ":" not in data:
             return
         verb, approval_id = data.split(":", 1)
         approved = verb == "approve"
-        run_id = await self._service.decide_approval(
+        run_id = await service.decide_approval(
             approval_id, approved=approved, reason=None if approved else "отклонено в Telegram"
         )
         await self._tx.send_message(
             chat_id, "✅ Одобрено, продолжаю." if approved else "🚫 Отклонено."
         )
-        await self._service.resume_run(run_id)
-        await self._stream_to_chat(chat_id, run_id)
+        await service.resume_run(run_id)
+        await self._stream_to_chat(service, chat_id, run_id)
 
-    async def _stream_to_chat(self, chat_id: int, run_id: str) -> None:
+    async def _stream_to_chat(
+        self, service: GatewayService, chat_id: int, run_id: str
+    ) -> None:
         """Проиграть события run'а в чат до его завершения/приостановки."""
         tools: list[str] = []
-        async for event in self._service.stream(run_id):
+        async for event in service.stream(run_id):
             kind = event.get("type")
             if kind == "tool_call":
                 tools.append(str(event.get("tool")))
@@ -167,11 +212,16 @@ class TelegramBot:
                     chat_id, f"⚡ {event.get('tool')}: {event.get('reason')}"
                 )
             elif kind == "run_finished":
-                await self._report_finish(chat_id, run_id, event, tools)
+                await self._report_finish(service, chat_id, run_id, event, tools)
                 return
 
     async def _report_finish(
-        self, chat_id: int, run_id: str, event: dict[str, Any], tools: list[str]
+        self,
+        service: GatewayService,
+        chat_id: int,
+        run_id: str,
+        event: dict[str, Any],
+        tools: list[str],
     ) -> None:
         state = event.get("state")
         used = f"\n\n🔧 {', '.join(tools)}" if tools else ""
@@ -179,14 +229,16 @@ class TelegramBot:
             answer = str(event.get("final_answer") or "(готово)")
             await self._tx.send_message(chat_id, _clip(answer + used))
         elif state == "waiting_approval":
-            await self._send_pending_for_run(chat_id, run_id)
+            await self._send_pending_for_run(service, chat_id, run_id)
         else:
             error = event.get("error") or state
             await self._tx.send_message(chat_id, f"⚠️ Run {state}: {error}")
 
-    async def _send_pending_for_run(self, chat_id: int, run_id: str) -> None:
+    async def _send_pending_for_run(
+        self, service: GatewayService, chat_id: int, run_id: str
+    ) -> None:
         """Показать ожидающие approval/вопросы run'а нужным UI (§6.5, §12)."""
-        for approval in await self._service.list_pending_approvals():
+        for approval in await service.list_pending_approvals():
             if approval.run_id != run_id:
                 continue
             if approval.action_type == "user.question":
@@ -222,9 +274,6 @@ class TelegramBot:
             ]
         }
         await self._tx.send_message(chat_id, _clip(body), reply_markup=keyboard)
-
-    def _authorized(self, user_id: int) -> bool:
-        return user_id in self._allowed
 
 
 def _clip(text: str) -> str:
