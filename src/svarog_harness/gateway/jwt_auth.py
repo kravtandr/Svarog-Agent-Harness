@@ -50,7 +50,11 @@ def encode_hs256(claims: dict[str, Any], secret: str) -> str:
 
 
 def decode_hs256(token: str, secret: str) -> dict[str, Any]:
-    """Проверить подпись и `exp`, вернуть payload. Иначе — InvalidTokenError."""
+    """Проверить подпись и `exp`, вернуть payload. Иначе — InvalidTokenError.
+
+    `binascii.Error` и `json.JSONDecodeError` — подклассы `ValueError`, поэтому
+    любые ошибки декодирования base64/JSON ловятся одним `except ValueError`.
+    """
     parts = token.split(".")
     if len(parts) != 3:
         raise InvalidTokenError("некорректная структура JWT")
@@ -59,21 +63,18 @@ def decode_hs256(token: str, secret: str) -> dict[str, Any]:
     expected = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
     try:
         given = _b64url_decode(sig_b64)
-    except (ValueError, base64.binascii.Error) as exc:  # type: ignore[attr-defined]
-        raise InvalidTokenError("подпись не декодируется") from exc
-    if not hmac.compare_digest(given, expected):
-        raise InvalidTokenError("подпись не совпадает")
-    try:
+        if not hmac.compare_digest(given, expected):
+            raise InvalidTokenError("подпись не совпадает")
         header = json.loads(_b64url_decode(header_b64))
-        payload = json.loads(_b64url_decode(payload_b64))
-    except (ValueError, base64.binascii.Error) as exc:  # type: ignore[attr-defined]
-        raise InvalidTokenError("JWT не парсится") from exc
+        payload: dict[str, Any] = json.loads(_b64url_decode(payload_b64))
+    except ValueError as exc:
+        raise InvalidTokenError("JWT не декодируется") from exc
     if header.get("alg") != "HS256":
         raise InvalidTokenError(f"неподдерживаемый alg: {header.get('alg')}")
     exp = payload.get("exp")
     if exp is not None and time.time() > float(exp):
         raise InvalidTokenError("токен истёк")
-    return payload  # type: ignore[no-any-return]
+    return payload
 
 
 def mint_tenant_jwt(tenant_id: str, secret: str, *, ttl_sec: int = 3600) -> str:
