@@ -87,6 +87,16 @@ class RememberTool(Tool[RememberArgs]):
             target = resolve_memory_path(self._memory_dir, args.file)
         except MemoryApplyError as exc:
             return str(exc)
+        if args.file.split("/", 1)[0] == "sources" and args.operation in (
+            MemoryOperation.APPEND,
+            MemoryOperation.REPLACE_SECTION,
+        ):
+            # sources/ — raw-слой (ADR-0011): исходники неизменяемы, правки
+            # запрещены. Нужен новый вариант — create нового файла.
+            return (
+                f"'{args.file}' в sources/ — неизменяемый исходник; "
+                f"правки запрещены, создай новый файл через create"
+            )
         if args.operation is MemoryOperation.CREATE and target.exists():
             return (
                 f"файл '{args.file}' уже существует; create перезаписывает файл "

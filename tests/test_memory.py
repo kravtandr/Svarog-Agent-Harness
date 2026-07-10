@@ -384,3 +384,27 @@ async def test_remember_accepts_valid_project_page(tmp_path: Path) -> None:
     )
     assert result.ok, result.error
     assert len(sink) == 1
+
+
+# --- remember: raw-слой sources/ неизменяем (ADR-0011) ---
+
+
+async def test_remember_creates_source(tmp_path: Path) -> None:
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "sources/animateyou/spec.md", "operation": "create", "content": "raw spec\n"}
+    )
+    assert result.ok, result.error
+    assert len(sink) == 1
+
+
+async def test_remember_rejects_append_to_source(tmp_path: Path) -> None:
+    (tmp_path / "sources" / "animateyou").mkdir(parents=True)
+    (tmp_path / "sources/animateyou/spec.md").write_text("raw\n", encoding="utf-8")
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {"file": "sources/animateyou/spec.md", "operation": "append", "content": "правка\n"}
+    )
+    assert not result.ok
+    assert "неизменяем" in result.error
+    assert sink == []

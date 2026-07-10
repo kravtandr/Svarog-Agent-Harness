@@ -66,6 +66,16 @@ def _decision_pages(memory_dir: Path) -> list[tuple[str, str, str]]:
     return out
 
 
+def _source_files(memory_dir: Path) -> list[str]:
+    """Относительные пути файлов raw-слоя sources/ (отсортированы)."""
+    root = memory_dir / "sources"
+    if not root.is_dir():
+        return []
+    return sorted(
+        str(p.relative_to(memory_dir)) for p in root.rglob("*") if p.is_file()
+    )
+
+
 def _project_line(page: dict[str, str]) -> str:
     meta = " · ".join(x for x in (page["status"], page["updated"]) if x)
     tail = f" — {page['summary']}" if page["summary"] else ""
@@ -93,6 +103,12 @@ def render_index(memory_dir: Path) -> str:
         for title, summary, path in decisions:
             tail = f" — {summary}" if summary else ""
             lines.append(f"- [{title}]({path}){tail}")
+    sources = _source_files(memory_dir)
+    if sources:
+        lines += ["", "## Источники"]
+        for rel in sources:
+            label = rel.removeprefix("sources/")
+            lines.append(f"- [{label}]({rel})")
     if (memory_dir / "user" / "profile.md").exists():
         lines += ["", "## Пользователь", "- [Профиль](user/profile.md)"]
     return "\n".join(lines).rstrip("\n") + "\n"

@@ -95,6 +95,18 @@ def test_render_index_empty_projects(tmp_path: Path) -> None:
     assert "_(пока нет проектов)_" in render_index(tmp_path)
 
 
+def test_render_index_lists_sources(tmp_path: Path) -> None:
+    (tmp_path / "sources" / "animateyou").mkdir(parents=True)
+    (tmp_path / "sources/animateyou/spec.md").write_text("raw", encoding="utf-8")
+    index = render_index(tmp_path)
+    assert "## Источники" in index
+    assert "[animateyou/spec.md](sources/animateyou/spec.md)" in index
+
+
+def test_render_index_no_sources_section_when_empty(tmp_path: Path) -> None:
+    assert "## Источники" not in render_index(tmp_path)
+
+
 def test_regenerate_index_writes_file(tmp_path: Path) -> None:
     _create_project(tmp_path, "animateyou", today=date(2026, 7, 10))
     regenerate_index(tmp_path)
