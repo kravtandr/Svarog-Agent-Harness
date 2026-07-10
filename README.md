@@ -4,9 +4,16 @@
 
 <h1 align="center">Svarog Agent Harness</h1>
 
-**Svarog** — open-source, self-hosted, Git-native runtime для ИИ-агентов: скиллы, sandboxed execution, Git-память, refuel loops, approval policies и полный audit trace. Это платформа для сборки агентов, а не готовый агент и не workflow-фреймворк.
+<p align="center">
+  <a href="https://github.com/kravtandr/Svarog-Agent-Harness/actions/workflows/ci.yml"><img src="https://github.com/kravtandr/Svarog-Agent-Harness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/deps-Git%20%2B%20SQLite-green.svg" alt="Only Git + SQLite">
+</p>
 
-> Pre-alpha, но работает end-to-end и разворачивается self-hosted. Публичного контракта API пока нет — детали могут меняться.
+**Svarog** — open-source, self-hosted, Git-native runtime для ИИ-агентов: скиллы, sandboxed execution, Git-память, refuel loops, approval policies, мультиарендность и полный audit trace. Это платформа для сборки агентов, а не готовый агент и не workflow-фреймворк.
+
+> **Pre-alpha, но не наброс.** Работает end-to-end; весь набор unit-тестов и eval-сценарии критериев готовности MVP гоняются в CI; 14 ADR фиксируют архитектурные решения с трейд-оффами. Self-hosted на любом OpenAI-совместимом endpoint — из инфраструктуры только Git + SQLite, без внешних сервисов. Публичного контракта API пока нет — детали могут меняться.
 
 ## Чем Svarog отличается
 
@@ -39,26 +46,31 @@
 
 ## Сравнение с Hermes и OpenClaw
 
-Все три — self-hosted, поэтому различие не в этом. Ниже честно, где Svarog отличается, а где проигрывает.
+Три разных продукта под разные задачи, а не конкуренты лоб-в-лоб: Svarog — **платформа/runtime для сборки агента**, Hermes — готовый широкий агент, OpenClaw — зрелый персональный ассистент. Все три self-hosted. Ниже честно — в чём Svarog сильнее и где объективно уступает.
 
-**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент на Python и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерн заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается архитектурой, а не объёмом фич: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом); **resumable-first** loop и решения, задокументированные в ADR.
+**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент на Python и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерн заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается не объёмом фич, а backbone: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом); **resumable-first** loop; **изоляция арендаторов** (tenant = свой agent-home + роли superuser/standard); и решения, задокументированные в 14 ADR.
 
-**OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — очень популярный self-hosted персональный ассистент на TypeScript/Node: голос, Canvas, ноды для macOS/iOS/Android и охват **20+ каналов** (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, WeChat и др.). У него есть скиллы (`SKILL.md` + реестр ClawHub), sandbox (Docker/SSH) для не-основных сессий и pairing-политика доступа в DM. По охвату каналов, зрелости и DX Svarog ему сильно уступает. Отличие Svarog — не «ассистент на все мессенджеры», а **runtime/платформа для сборки агента** с более строгим backbone: Git-native версионируемая память с тремя flow (у OpenClaw — workspace-файлы и сессии), **governance для скиллов** (proposals + review, а не только реестр) и **Curator**, формальный Policy Engine с типизированным critical-набором и enforcement-инвариантами, resumable state machine с checkpoint'ами, а обязательная инфраструктура — только Git + SQLite.
+**OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — очень популярный self-hosted персональный ассистент на TypeScript/Node: голос, Canvas, ноды для macOS/iOS/Android и охват **20+ каналов** (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, WeChat и др.). У него есть скиллы (`SKILL.md` + реестр ClawHub), sandbox (Docker/SSH) для не-основных сессий и pairing-политика доступа в DM. По охвату каналов, зрелости и DX Svarog ему сильно уступает. Отличие Svarog — не «ассистент на все мессенджеры», а **runtime/платформа для сборки агента** с более строгим backbone: Git-native версионируемая память с тремя flow (у OpenClaw — workspace-файлы и сессии), **governance для скиллов** (proposals + review, а не только реестр) и **Curator**, формальный Policy Engine с типизированным critical-набором и enforcement-инвариантами, resumable state machine с checkpoint'ами; а изоляция пользователей — не pairing в DM, а **полноценные арендаторы** с раздельными памятью/скиллами/секретами/БД и ролями superuser/standard. Обязательная инфраструктура — только Git + SQLite.
 
 | | **Svarog** | **Hermes** | **OpenClaw** |
 |---|---|---|---|
-| Тип | платформа/runtime для агентов | готовый агент | персональный ассистент |
+| Позиционирование | платформа/runtime для сборки агента | готовый широкий агент | зрелый персональный ассистент |
 | Стек | Python | Python (монолит) | TypeScript/Node |
-| Долгосрочная память | Git-native, 3 flow, single-writer | provider-модель + FTS5 по сессиям | workspace-файлы + сессии |
-| Скиллы | `SKILL.md` + governance + Curator | agentskills.io + Curator | `SKILL.md` + реестр ClawHub |
-| Безопасность | enforcement + prompt-injection hardening | эвристики + smart approval | sandbox + pairing-политика DM |
-| Автономия | yolo-first + неотключаемый critical-набор | YOLO с заморозкой | pairing / approval незнакомцев |
-| Resumability | state machine + checkpoints (основа) | checkpoints | сессии |
-| Интерфейсы | CLI + REST/WS + Telegram (один core) | 6 платформ | 20+ каналов, голос, Canvas, mobile |
-| Инфраструктура | только Git + SQLite | монолит | Node-gateway, workspace |
-| Зрелость | pre-alpha | production | очень зрелый, большое сообщество |
+| Долгосрочная память | **Git-native, 3 flow, single-writer, версионируемая** | provider-модель + FTS5 по сессиям | workspace-файлы + сессии |
+| Скиллы | `SKILL.md` + **governance + Curator** | agentskills.io + Curator | `SKILL.md` + реестр ClawHub |
+| Безопасность | **enforcement-инварианты + prompt-injection hardening** | эвристики + smart approval | sandbox + pairing DM |
+| Изоляция арендаторов | **per-tenant agent-home + роли + квоты** | subagents (в пределах процесса) | pairing-политика DM |
+| Автономия | yolo-first + **неотключаемый critical-набор** | YOLO с заморозкой | pairing / approval незнакомцев |
+| Resumability | **state machine + checkpoints (основа)** | checkpoints | сессии |
+| Интерфейсы / охват | CLI + REST/WS + Telegram (один core) | 6 платформ | **20+ каналов, голос, mobile** |
+| Инфраструктура | **только Git + SQLite** | монолит | Node-gateway + workspace |
+| Зрелость / комьюнити | pre-alpha | **production** | **очень зрелый, большое сообщество** |
 
-Итого: за охватом каналов и зрелостью — в OpenClaw, за широтой фич готового агента — в Hermes; Svarog выбирают, когда нужна аудируемая **платформа** с Git-native памятью, контролем безопасности и управляемым самоулучшением, а не готовый ассистент.
+**Что выбрать:**
+
+- **Hermes** — нужен широкий готовый агент на много мессенджеров уже сейчас.
+- **OpenClaw** — нужен зрелый персональный ассистент с голосом/мобильным на 20+ каналов.
+- **Svarog** — нужна аудируемая **платформа**: версионируемая Git-память, security-through-enforcement, resumable-first, изоляция арендаторов и минимум инфраструктуры (Git + SQLite), а не готовый ассистент.
 
 ## Установка (для разработки)
 
