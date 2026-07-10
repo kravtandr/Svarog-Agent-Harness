@@ -48,6 +48,8 @@ class GatewayService:
     cfg: SvarogConfig
     workspace: Path
     events: EventStream = field(default_factory=InProcessEventStream)
+    # Колбэк на создание run'а — TenantHub пишет им run_index run→tenant (ADR-0014).
+    on_run_created: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         self._runner = TaskRunner(self.cfg, self.workspace)
@@ -106,6 +108,9 @@ class GatewayService:
     def _event_hooks(self, holder: _RunHolder, started: asyncio.Future[str]) -> RunHooks:
         def on_started(run: Run) -> None:
             holder.run_id = run.id
+            # run_index run→tenant (ADR-0014): идемпотентно, безопасно и на resume.
+            if self.on_run_created is not None:
+                self.on_run_created(run.id)
             if not started.done():
                 started.set_result(run.id)
 

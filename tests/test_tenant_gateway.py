@@ -6,12 +6,16 @@ db_path/workspace под home) и кросс-тенантные границы �
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import SvarogConfig, TenantRole
 from svarog_harness.gateway import TenantHub
 from svarog_harness.gateway.api import create_app
+from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime.orchestrator import TaskRunner
+from svarog_harness.sandbox import SandboxError
 from svarog_harness.tenant import TenantRegistry
 from svarog_harness.tenant.models import TenantContext
 
@@ -119,3 +123,53 @@ def test_ws_rejects_without_token(tmp_path: Path) -> None:
     except Exception:
         rejected = True
     assert rejected
+
+
+# --- run_index + resume-роутинг ----------------------------------------------
+
+
+def test_run_index_callback_records(tmp_path: Path) -> None:
+    hub, reg = _hub(tmp_path)
+    svc = hub.service_for(TenantContext("alice", TenantRole.STANDARD))
+    assert svc.on_run_created is not None
+    svc.on_run_created("run-1")  # эмулируем on_run_started
+    assert reg.tenant_of_run("run-1") == "alice"
+
+
+def test_active_tenant_ids_from_run_index(tmp_path: Path) -> None:
+    _, reg = _hub(tmp_path)
+    reg.record_run("r1", "alice")
+    reg.record_run("r2", "bob")
+    reg.record_run("r3", "alice")
+    assert set(reg.active_tenant_ids()) == {"alice", "bob"}
+
+
+async def test_hub_resume_unknown_run_returns_false(tmp_path: Path) -> None:
+    hub, _ = _hub(tmp_path)
+    assert await hub.resume_run("no-such-run") is False
+
+
+# --- fail-closed (ADR-0013) ---------------------------------------------------
+
+
+def test_fail_closed_standard_without_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, _ = _hub(tmp_path)
+    alice = hub.service_for(TenantContext("alice", TenantRole.STANDARD))
+    runner = TaskRunner(alice.cfg, alice.workspace)  # cfg.sandbox.type == docker
+    monkeypatch.setattr(orchestrator, "find_docker", lambda: None)
+    with pytest.raises(SandboxError):
+        runner.assert_sandbox_available()
+    monkeypatch.setattr(orchestrator, "find_docker", lambda: "/usr/bin/docker")
+    runner.assert_sandbox_available()  # docker есть — не бросает
+
+
+def test_superuser_local_trusted_needs_no_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, _ = _hub(tmp_path)
+    bob = hub.service_for(TenantContext("bob", TenantRole.SUPERUSER))
+    runner = TaskRunner(bob.cfg, bob.workspace)  # local-trusted
+    monkeypatch.setattr(orchestrator, "find_docker", lambda: None)
+    runner.assert_sandbox_available()  # local-trusted не требует docker

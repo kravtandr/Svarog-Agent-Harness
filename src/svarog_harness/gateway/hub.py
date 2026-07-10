@@ -93,9 +93,31 @@ class TenantHub:
                 role=ctx.role,
                 shared_skills=self.base_cfg.tenancy.shared_skills,
             )
-            svc = GatewayService(resolved.cfg, resolved.workspace)
+            tenant_id = ctx.tenant_id
+            svc = GatewayService(
+                resolved.cfg,
+                resolved.workspace,
+                on_run_created=lambda run_id: self.registry.record_run(run_id, tenant_id),
+            )
             self._services[ctx.tenant_id] = svc
         return svc
+
+    def _service_by_id(self, tenant_id: str) -> GatewayService | None:
+        rec = self.registry.get(tenant_id)
+        if rec is None:
+            return None
+        return self.service_for(TenantContext(tenant_id, rec.role))
+
+    async def resume_run(self, run_id: str) -> bool:
+        """Возобновить run в его тенанте по run_index (ADR-0014). False — владелец неизвестен."""
+        tenant_id = self.registry.tenant_of_run(run_id)
+        if tenant_id is None:
+            return False
+        svc = self._service_by_id(tenant_id)
+        if svc is None:
+            return False
+        await svc.resume_run(run_id)
+        return True
 
     def resolve(
         self, authorization: str | None, *, query_token: str | None = None
@@ -120,15 +142,19 @@ class TenantHub:
         return self.base_cfg.supervisor.auto_resume_refuel
 
     async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
-        """Супервизит ЖИВЫЕ tenant-сервисы каждый интервал.
+        """Per-tenant refuel-супервизор по run_index (ADR-0014 #5).
 
-        Полный scan `run_index` для тенантов без активного сервиса — следующий
-        срез Фазы 2 (ADR-0014 #5): пока refuel-suspended run поднимается, как
-        только его тенант «оживёт» первым запросом.
+        Каждый интервал берёт тенантов, у которых есть зарегистрированные run'ы
+        (`run_index`), материализует их сервис и делает `supervise_once`. Так
+        refuel-suspended run поднимается, даже если тенант ещё не «оживал»
+        входящим запросом. Ошибка одного тенанта не рвёт цикл.
         """
         interval = self.base_cfg.supervisor.interval_sec
         while should_stop is None or not should_stop():
-            for svc in list(self._services.values()):
+            for tenant_id in self.registry.active_tenant_ids():
+                svc = self._service_by_id(tenant_id)
+                if svc is None:
+                    continue
                 with contextlib.suppress(Exception):
                     await svc.supervise_once()
             await asyncio.sleep(interval)

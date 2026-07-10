@@ -24,7 +24,12 @@ from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
-from svarog_harness.sandbox import ExecutionEnvironment, create_environment
+from svarog_harness.sandbox import (
+    ExecutionEnvironment,
+    SandboxError,
+    create_environment,
+    find_docker,
+)
 from svarog_harness.secrets import SecretStore, default_secret_store, injected_env, selected_values
 from svarog_harness.skills import Skill, scan_skills, skill_cards
 from svarog_harness.skills.curator import CuratorStore
@@ -102,6 +107,19 @@ class TaskRunner:
                 return await action(db)
         finally:
             await engine.dispose()
+
+    def assert_sandbox_available(self) -> None:
+        """Fail-closed (ADR-0013/0014): docker-режим без доступного runtime — отказ.
+
+        Для standard-тенанта sandbox.type заклампан в docker (ADR-0013), поэтому
+        отсутствие docker/podman не откатывается на хостовое исполнение, а
+        останавливает run явно и рано — до workspace prep и подключения MCP.
+        """
+        if self._cfg.sandbox.type == "docker" and find_docker() is None:
+            raise SandboxError(
+                "docker/podman недоступен, а sandbox.type=docker (fail-closed): "
+                "запуск отклонён без отката на local-trusted (ADR-0013)"
+            )
 
     def build_environment(self) -> ExecutionEnvironment:
         return create_environment(
@@ -262,6 +280,7 @@ class TaskRunner:
 
     async def run_once(self, task: str, autonomy: AutonomyMode, *, hooks: RunHooks) -> RunOutcome:
         """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit."""
+        self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
         flow = WorkspaceFlow(GitRepo(self._workspace), self._cfg.git)
         prep = await flow.start(task)
         if hooks.on_workspace_prep is not None:
@@ -322,6 +341,7 @@ class TaskRunner:
             if not workspace.is_dir():
                 raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
             runner = TaskRunner(load_config(project_dir=workspace), workspace)
+            runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
             backends = await connect_mcp_servers(runner._cfg.mcp, runner._store)
             environment = runner.build_environment()
             await environment.start()

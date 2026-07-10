@@ -103,6 +103,14 @@ class TenantRegistry:
         value = self._load()["run_index"].get(run_id)
         return value if isinstance(value, str) else None
 
+    def active_tenant_ids(self) -> list[str]:
+        """Тенанты, у которых есть зарегистрированные run'ы (для супервизора)."""
+        seen: dict[str, None] = {}  # dict сохраняет порядок появления
+        for tenant_id in self._load()["run_index"].values():
+            if isinstance(tenant_id, str):
+                seen.setdefault(tenant_id, None)
+        return list(seen)
+
     def list_tenants(self) -> list[TenantRecord]:
         data = self._load()
         return [_record_from_json(tid, raw) for tid, raw in data["tenants"].items()]

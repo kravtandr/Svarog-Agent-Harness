@@ -1166,34 +1166,45 @@ def serve(
     cfg = _load_config_or_exit(project_dir=workspace)
     token_ref = cfg.gateway.token_ref
     token: str | None = None
-    if token_ref is None and not _is_loopback_host(host):
-        console.print(
-            "[red]gateway.token_ref обязателен для сетевого bind[/red] "
-            "(используйте 127.0.0.1 или настройте bearer-token в SecretStore)"
-        )
-        raise typer.Exit(code=1)
-    if token_ref is not None:
-        token = default_secret_store(cfg.secrets.path).get(token_ref)
-        if not token:
+    # В multi-tenant режиме auth всегда per-tenant (bearer из реестра), поэтому
+    # единый gateway.token_ref не нужен и loopback-ограничение не применяется.
+    if not cfg.tenancy.enabled:
+        if token_ref is None and not _is_loopback_host(host):
             console.print(
-                f"[red]секрет '{token_ref}' не найден[/red] в SecretStore/окружении; "
-                f"svarog secrets set {token_ref}"
+                "[red]gateway.token_ref обязателен для сетевого bind[/red] "
+                "(используйте 127.0.0.1 или настройте bearer-token в SecretStore)"
             )
             raise typer.Exit(code=1)
+        if token_ref is not None:
+            token = default_secret_store(cfg.secrets.path).get(token_ref)
+            if not token:
+                console.print(
+                    f"[red]секрет '{token_ref}' не найден[/red] в SecretStore/окружении; "
+                    f"svarog secrets set {token_ref}"
+                )
+                raise typer.Exit(code=1)
     try:
         import uvicorn
 
-        from svarog_harness.gateway import GatewayService
+        from svarog_harness.config.paths import registry_path
+        from svarog_harness.gateway import GatewayService, TenantHub
         from svarog_harness.gateway.api import create_app
+        from svarog_harness.tenant import TenantRegistry
     except ImportError:
         console.print(
             "[red]gateway требует опциональные зависимости:[/red] "
             "uv pip install 'svarog-harness[server]'"
         )
         raise typer.Exit(code=1) from None
-    api = create_app(GatewayService(cfg, workspace), bearer_token=token)
+    if cfg.tenancy.enabled:
+        registry = TenantRegistry(registry_path(cfg))
+        api = create_app(hub=TenantHub(cfg, registry))
+        mode = f"multi-tenant | реестр: {registry_path(cfg)}"
+    else:
+        api = create_app(GatewayService(cfg, workspace), bearer_token=token)
+        mode = f"single-tenant | workspace: {workspace}"
     console.print(
-        f"[green]Svarog gateway[/green] http://{host}:{port} | workspace: {workspace}\n"
+        f"[green]Svarog gateway[/green] http://{host}:{port} | {mode}\n"
         f"[dim]POST /runs · GET /runs/{{id}} · WS /runs/{{id}}/events · "
         f"GET /approvals · POST /approvals/{{id}}[/dim]"
     )

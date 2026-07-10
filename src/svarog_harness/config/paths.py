@@ -66,6 +66,11 @@ def tenant_home(cfg: SvarogConfig, tenant_id: str) -> Path:
     return (cfg.tenancy.home_root.expanduser() / tenant_id).resolve()
 
 
+def registry_path(cfg: SvarogConfig) -> Path:
+    """Файл реестра тенантов — рядом с home_root (`agent-home/tenants.json`)."""
+    return cfg.tenancy.home_root.expanduser().resolve().parent / "tenants.json"
+
+
 def clamp_by_role(cfg: SvarogConfig, role: TenantRole) -> SvarogConfig:
     """Принуждение роли (ADR-0013). Кламп сильнее per-tenant yaml.
 
