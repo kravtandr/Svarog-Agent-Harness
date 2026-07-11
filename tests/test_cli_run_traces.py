@@ -362,3 +362,18 @@ def test_traces_list_empty_db(workspace: Path) -> None:
     result = runner.invoke(cli_main.app, ["traces", "list"])
     assert result.exit_code == 0
     assert "runs пока нет" in result.output
+
+
+def test_run_prints_cost_context_indicator(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0015 фаза 5: индикатор cost/context в консольном режиме."""
+    _patch_provider(
+        monkeypatch,
+        [CompletionResult(content="Готово", usage=Usage(12_000, 5), finish_reason="stop")],
+    )
+    result = runner.invoke(cli_main.app, ["run", "задача"])
+    assert result.exit_code == 0, result.output
+    assert "итерация 1" in result.output
+    # 12000 prompt-токенов из дефолтных 120000 max_context_tokens = 10%.
+    assert "контекст 10%" in result.output

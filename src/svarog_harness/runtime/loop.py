@@ -170,6 +170,7 @@ class AgentLoop:
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
+        on_progress: Callable[[int, int, float, float], None] | None = None,
         parent_run_id: str | None = None,
     ) -> None:
         self._provider = provider
@@ -194,6 +195,9 @@ class AgentLoop:
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_notify = on_notify
+        # Cost/context-индикатор (ADR-0015 фаза 5): (итерация, токены за run,
+        # стоимость, доля контекста 0..1) после каждого ответа провайдера.
+        self._on_progress = on_progress
         self._saved_file_contents: list[str] = []
         # Интерфейсам (gateway/Telegram) нужен run_id сразу после создания run,
         # чтобы подписаться на его события до завершения (§6.1).
@@ -283,6 +287,11 @@ class AgentLoop:
                     tokens_used=state.tokens_used,
                     cost_usd=state.cost_usd,
                 )
+                if self._on_progress is not None:
+                    context_ratio = result.usage.prompt_tokens / self._cfg.max_context_tokens
+                    self._on_progress(
+                        state.iterations, state.tokens_used, state.cost_usd, context_ratio
+                    )
                 state.messages.append(
                     ChatMessage(
                         role="assistant", content=result_content, tool_calls=result.tool_calls

@@ -768,3 +768,43 @@ async def test_successful_progress_resets_fading_counter(db: AsyncSession, tmp_p
     cfg = RuntimeConfig(stagnation_repeats=3)
     outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("почти тупик", AutonomyMode.YOLO)
     assert outcome.state is RunState.COMPLETED
+
+
+# --- ADR-0015 фаза 5: cost/context-индикатор (on_progress) --------------------
+
+
+async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="list_dir", arguments_json="{}"),
+                usage=Usage(1000, 5),
+            ),
+            _final("готово", usage=Usage(2000, 5)),
+        ]
+    )
+    progress: list[tuple[int, int, float, float]] = []
+    cfg = RuntimeConfig(max_context_tokens=10_000)
+    registry = ToolRegistry()
+    for tool in file_tools(tmp_path):
+        registry.register(tool)
+    loop = AgentLoop(
+        provider,
+        registry,
+        TraceRecorder(db),
+        cfg,
+        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+        tmp_path,
+        model_name="test-model",
+        on_progress=lambda i, tok, cost, ratio: progress.append((i, tok, cost, ratio)),
+    )
+    outcome = await loop.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert len(progress) == 2
+    iters = [p[0] for p in progress]
+    assert iters == [1, 2]
+    # Доля контекста — prompt_tokens последнего ответа к max_context_tokens.
+    assert progress[0][3] == pytest.approx(0.1)
+    assert progress[1][3] == pytest.approx(0.2)
+    # Токены накапливаются.
+    assert progress[1][1] == outcome.tokens_used

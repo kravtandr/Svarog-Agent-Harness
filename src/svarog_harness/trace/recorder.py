@@ -286,6 +286,35 @@ class TraceRecorder:
                 return text
         return ""
 
+    async def session_history(
+        self, session_id: str, *, limit_messages: int = 24
+    ) -> list[dict[str, str]]:
+        """Диалог сессии из trace для продолжения/форка chat (ADR-0015 фаза 5).
+
+        По каждому run сессии — пара (user=task, assistant=финальный ответ):
+        ровно то, что chat накапливает в history по ходу живой сессии.
+        Возвращает [{"role", "content"}, ...] — recorder не зависит от llm-слоя.
+        """
+        runs = (
+            (
+                await self._db.execute(
+                    select(Run).where(Run.session_id == session_id).order_by(Run.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        history: list[dict[str, str]] = []
+        for run in runs:
+            answer = await self.last_assistant_text(run)
+            history.append({"role": "user", "content": run.task})
+            history.append({"role": "assistant", "content": answer or "(без ответа)"})
+        return history[-limit_messages:]
+
+    async def rename_session(self, session: Session, title: str) -> None:
+        session.title = title
+        await self._db.commit()
+
     async def get_run(self, run_id: str) -> Run | None:
         return await self._db.get(Run, run_id)
 

@@ -71,6 +71,10 @@ from svarog_harness.trace.lookup import RunNotResumableError
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import CheckOutcome, Verifier, skill_checks
 
+# Автогейт deferred-схем (ADR-0015 фаза 2) при mcp.defer_schemas="auto":
+# от этого числа MCP-tools их схемы уходят за load_tool.
+_DEFER_SCHEMAS_AUTO_THRESHOLD = 10
+
 
 @dataclass
 class RunHooks:
@@ -87,6 +91,7 @@ class RunHooks:
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
+    on_progress: Callable[[int, int, float, float], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
     on_verify_failed: Callable[[int], None] | None = None
     on_commit: Callable[[str, str, bool], None] | None = None
@@ -305,8 +310,16 @@ class TaskRunner:
             on_tool_call=hooks.on_tool_call,
             on_notify=hooks.on_notify,
             on_run_started=hooks.on_run_started,
+            on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,
         )
+
+    def _defer_mcp_schemas(self, mcp_tools: list[MCPTool] | None) -> bool:
+        """Автогейт deferred-схем (ADR-0015 фаза 2): "auto" → 10+ MCP-tools."""
+        flag = self._cfg.mcp.defer_schemas
+        if flag == "auto":
+            return len(mcp_tools or []) >= _DEFER_SCHEMAS_AUTO_THRESHOLD
+        return bool(flag)
 
     def _build_registry(
         self,
@@ -338,13 +351,14 @@ class TaskRunner:
             # Child runs (ADR-0015 фаза 3): только верхнеуровневым runs — детям
             # callback не передаётся, глубина дерева ограничена одним уровнем.
             registry.register(SpawnChildRunTool(child_spawn))
+        defer_schemas = self._defer_mcp_schemas(mcp_tools)
         for mcp_tool in mcp_tools or []:
             # MCP tools проходят через Policy Engine как обычные (§9): по умолчанию
             # require_approval (action_type mcp.*), риск из конфига сервера.
-            # За флагом mcp.defer_schemas (ADR-0015 фаза 2) схема в промпт не
-            # грузится, пока модель не вызовет load_tool.
-            registry.register(mcp_tool, deferred=self._cfg.mcp.defer_schemas)
-        if mcp_tools and self._cfg.mcp.defer_schemas:
+            # При defer_schemas (ADR-0015 фаза 2) схема в промпт не грузится,
+            # пока модель не вызовет load_tool.
+            registry.register(mcp_tool, deferred=defer_schemas)
+        if defer_schemas:
             registry.register(LoadToolTool(registry))
         if skills:
             registry.register(

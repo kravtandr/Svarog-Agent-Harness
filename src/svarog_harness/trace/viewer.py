@@ -1,5 +1,6 @@
 """Просмотр traces для CLI (§6.12): выборка из storage и Rich-рендеринг."""
 
+from dataclasses import dataclass
 from typing import Any
 
 from rich.console import Group, RenderableType
@@ -9,7 +10,7 @@ from rich.text import Text
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.storage.models import CheckResult, Message, Run, RunState, ToolCall
+from svarog_harness.storage.models import CheckResult, Message, Run, RunState, Session, ToolCall
 from svarog_harness.trace.lookup import RunNotFoundError, find_run_by_prefix
 
 # Незавершённые состояния run'а — «занимают слот» для квоты одновременных (ADR-0014).
@@ -31,12 +32,134 @@ async def run_usage_totals(db: AsyncSession) -> tuple[int, float, int]:
     return int(active or 0), float(cost or 0.0), int(tokens or 0)
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    """Строка `sessions list`: сессия + агрегаты по её runs."""
+
+    session: Session
+    runs: int
+    last_task: str
+
+
+async def fetch_sessions(
+    db: AsyncSession, *, limit: int = 20, search: str | None = None
+) -> list[SessionSummary]:
+    """Сессии от свежих к старым; search — подстрока в title или задачах runs."""
+    last_run = (
+        select(Run.task)
+        .where(Run.session_id == Session.id)
+        .order_by(Run.created_at.desc())
+        .limit(1)
+        .correlate(Session)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(Session, func.count(Run.id), func.coalesce(last_run, ""))
+        .join(Run, Run.session_id == Session.id)
+        .group_by(Session.id)
+        .order_by(Session.updated_at.desc())
+    )
+    if search:
+        needle = f"%{search}%"
+        matching_runs = select(Run.session_id).where(Run.task.like(needle)).scalar_subquery()
+        stmt = stmt.where(Session.title.like(needle) | Session.id.in_(matching_runs))
+    stmt = stmt.limit(limit)
+    rows = (await db.execute(stmt)).all()
+    return [SessionSummary(session=s, runs=int(n), last_task=str(t)) for s, n, t in rows]
+
+
+def session_to_dict(summary: SessionSummary) -> dict[str, Any]:
+    return {
+        "id": summary.session.id,
+        "title": summary.session.title,
+        "runs": summary.runs,
+        "last_task": summary.last_task,
+        "created_at": _iso(summary.session.created_at),
+        "updated_at": _iso(summary.session.updated_at),
+    }
+
+
+def render_sessions_table(summaries: list[SessionSummary]) -> Table:
+    table = Table(title="sessions")
+    table.add_column("id", style="cyan")
+    table.add_column("title")
+    table.add_column("runs", justify="right")
+    table.add_column("последняя задача")
+    table.add_column("обновлена")
+    for s in summaries:
+        table.add_row(
+            s.session.id[:8],
+            s.session.title or "—",
+            str(s.runs),
+            s.last_task[:60],
+            s.session.updated_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    return table
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def run_to_dict(run: Run) -> dict[str, Any]:
+    """Плоское JSON-представление run'а (NDJSON-строка `traces list --json`)."""
+    return {
+        "id": run.id,
+        "session_id": run.session_id,
+        "parent_run_id": run.parent_run_id,
+        "state": run.state.value,
+        "task": run.task,
+        "autonomy": run.autonomy,
+        "iterations": run.iterations,
+        "tokens_used": run.tokens_used,
+        "cost_usd": run.cost_usd,
+        "error": run.error,
+        "workspace": run.workspace,
+        "created_at": _iso(run.created_at),
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "meta": run.meta,
+    }
+
+
+def run_detail_to_dict(
+    run: Run, messages: list[Message], tool_calls: list[ToolCall], checks: list[CheckResult]
+) -> dict[str, Any]:
+    """Полный trace одного run (`traces show --json`)."""
+    return {
+        "run": run_to_dict(run),
+        "messages": [
+            {"index": m.index_in_run, "role": m.role, "content": m.content} for m in messages
+        ],
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "tool_name": tc.tool_name,
+                "arguments": tc.arguments,
+                "risk_level": tc.risk_level,
+                "policy_decision": tc.policy_decision,
+                "status": tc.status.value,
+                "result": tc.result,
+                "error": tc.error,
+                "started_at": _iso(tc.started_at),
+                "finished_at": _iso(tc.finished_at),
+            }
+            for tc in tool_calls
+        ],
+        "checks": [
+            {"name": c.check_name, "status": c.status.value, "output": c.output} for c in checks
+        ],
+    }
+
+
 __all__ = [
     "RunNotFoundError",
     "fetch_run",
     "fetch_runs",
     "render_run",
     "render_runs_table",
+    "run_detail_to_dict",
+    "run_to_dict",
     "run_usage_totals",
 ]
 

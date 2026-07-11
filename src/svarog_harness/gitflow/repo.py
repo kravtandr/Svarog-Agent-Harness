@@ -200,6 +200,30 @@ class GitRepo:
         await self._git("worktree", "remove", str(path))
         await self._git("worktree", "prune")
 
+    async def log_with_run_ids(self, limit: int = 200) -> list[tuple[str, str]]:
+        """[(sha, run_id или "")] от HEAD вглубь — по trailer'у Run-Id (Flow C).
+
+        Основа turn-level rewind (ADR-0015 фаза 5): step-коммиты run'а
+        находятся по trailer'у, который ставит commit_step.
+        """
+        code, out, _ = await self._git(
+            "log",
+            f"-{limit}",
+            "--format=%H%x09%(trailers:key=Run-Id,valueonly,separator=%x2C)",
+            check=False,
+        )
+        if code != 0:
+            return []
+        rows: list[tuple[str, str]] = []
+        for line in out.splitlines():
+            sha, _, run_id = line.partition("\t")
+            rows.append((sha.strip(), run_id.strip()))
+        return rows
+
+    async def reset_hard(self, ref: str) -> None:
+        """Откатить текущую ветку и рабочее дерево к ref (turn-level rewind)."""
+        await self._git("reset", "--hard", ref)
+
     async def merge_no_ff(self, ref: str, *, message: str) -> str:
         """Влить ветку в текущую отдельным merge-коммитом; вернуть короткий SHA."""
         await self._git("merge", "--no-ff", ref, "-m", message)

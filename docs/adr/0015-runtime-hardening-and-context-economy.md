@@ -2,9 +2,9 @@
 
 ## Статус
 
-Фазы 0–4 реализованы (0, 1, 3, 4 влиты в `main`; 2 — feat/adr-0015-phase2).
-Механизм фазы 2 готов, но флаг `mcp.defer_schemas` выключен по умолчанию до
-своего гейта (15+ MCP-tools). Фаза 5 — не начата.
+Все фазы (0–5) реализованы. Фаза 2: `mcp.defer_schemas="auto"` — deferred
+включается автоматически при 10+ MCP-tools после discovery. Фаза 5 сделана
+без OTel-экспорта (пункт исключён решением 2026-07-11).
 
 | Фаза / пункт | Статус |
 |---|---|
@@ -19,10 +19,10 @@
 | 1.4 микрокомпакция | ✅ Сделано |
 | 1.5 лимиты индекса памяти | ✅ Сделано |
 | 1.6 детектор затухающей отдачи | ✅ Сделано |
-| Фаза 2 — deferred-схемы tools | ✅ Сделано (флаг выключен до гейта 15+ MCP-tools) |
+| Фаза 2 — deferred-схемы tools | ✅ Сделано (автогейт: "auto" включает при 10+ MCP-tools) |
 | Фаза 3 — child runs | ✅ Сделано (spawn_child_run; durable-очередь сообщений — отложена, см. оговорку) |
 | Фаза 4 — rg-backed coding tools | ✅ Сделано (LSP-plugin — следующий этап, вне фазы) |
-| Фаза 5 — ops/UX | ❌ Не начато |
+| Фаза 5 — ops/UX | ✅ Сделано (без OTel — пункт исключён) |
 
 ### Реализация фазы 0 — заметки о scoping
 
@@ -124,11 +124,33 @@
 * `LoopState.loaded_tools` — единственный носитель загруженного между
   процессами; `resume` восстанавливает через `restore_loaded`, молча
   пропуская имена, исчезнувшие при смене MCP-discovery.
-* Гейт «15+ MCP-tools» кодом не форсится — он операционный: механизм влит,
-  `mcp.defer_schemas: false` по умолчанию, включается конфигом при
-  достижении гейта. `load_tool` регистрируется только при наличии
+* Гейт автоматизирован (2026-07-11): `mcp.defer_schemas: "auto"` (дефолт) —
+  deferred включается при 10+ MCP-tools после discovery; явные true/false
+  отключают автогейт. `load_tool` регистрируется только вместе с
   deferred-tools. Reproducer'ы: `tests/test_deferred_tools.py`,
   `tests/test_mcp.py`.
+
+### Реализация фазы 5 — заметки о scoping
+
+* **Сессии** — `sessions list [--search] [--json]` / `sessions rename`;
+  продолжение и форк — `chat --session <id>` / `chat --fork <id>`: история
+  реконструируется из trace как пары (task, финальный ответ) по runs сессии —
+  ровно то, что chat накапливает вживую (`recorder.session_history`).
+* **Turn-level git rewind** — `svarog rewind <run_id> [--yes]`: step-коммиты
+  находятся по trailer'у `Run-Id` (Flow C), `git reset --hard` на родителя
+  самого старого коммита run'а. Fail-closed границы: грязное дерево — отказ;
+  чужие коммиты поверх — отказ; корневой коммит — отказ.
+* **JSON/NDJSON** — `--json` у `run`/`resume` (итог одним объектом, интерактив
+  approvals выключен, exit-коды сохранены), `traces list`/`sessions list`
+  (NDJSON), `traces show` (полный trace), `doctor`. Единая карта exit-кодов —
+  `_outcome_exit_code`.
+* **`svarog doctor`** — read-only: конфиг, раскладка (§0.3), git, workspace,
+  БД+миграции (alembic current vs head), sandbox/docker, ключ провайдера,
+  память, ripgrep. fail → exit 1; warn — деградация, работать можно.
+* **Cost/context-индикатор** — hook `on_progress(итерация, токены, $,
+  доля контекста)` из loop после каждого ответа провайдера; CLI печатает
+  dim-строку. Данные и так в trace — hook только для живого отображения.
+* OTel-экспорт исключён (см. выше).
 
 ## Контекст
 
@@ -442,15 +464,17 @@ tool-схемы; provider-neutral аналог ToolSearch CC, **без** Anthrop
 
 ---
 
-## Фаза 5 — Ops/UX (вне runtime API) — ❌ НЕ НАЧАТО
+## Фаза 5 — Ops/UX (вне runtime API) — ✅ СДЕЛАНО
 
 Не трогает ядро; React/Ink в runtime не попадает:
 
 * resume/fork/rename/search сессий; turn-level git rewind;
 * JSON/NDJSON-вывод CLI (машиночитаемый); `svarog doctor`;
-* cost/context-индикаторы;
-* экспорт canonical trace в OpenTelemetry (SQLite остаётся источником истины,
-  OTel — производный экспорт, не замена).
+* cost/context-индикаторы.
+
+OTel-экспорт trace исключён из фазы решением 2026-07-11: SQLite —
+единственный canonical trace; экспорт добавится отдельным ADR при реальной
+потребности в наблюдаемости за пределами `traces --json`.
 
 ---
 
@@ -466,7 +490,7 @@ runtime:
 memory:
   index_max_lines: 200                # 1.5
 mcp:
-  defer_schemas: false                # 2; второй эшелон
+  defer_schemas: auto                 # 2; auto → deferred при 10+ MCP-tools
 sandbox:
   separate_git_dir: true              # 0.2; git-объекты вне mount
 ```
@@ -474,8 +498,8 @@ sandbox:
 Все поля — с дефолтами, `extra="forbid"` как везде (§13). Snapshot effective-
 конфига (0.4) и per-workspace lease (0.5) — не yaml-поля, а состояние run/БД.
 
-**Реально в схеме:** все перечисленные поля, включая `mcp.defer_schemas`
-(фаза 2; по умолчанию `false` до гейта 15+ MCP-tools).
+**Реально в схеме:** все перечисленные поля. `mcp.defer_schemas` принимает
+`true | false | "auto"` (дефолт `"auto"` — автогейт на 10+ MCP-tools).
 
 ---
 
@@ -485,10 +509,10 @@ sandbox:
 |---|---|---|---|
 | **0** | Security: 0.1 traversal → 0.2 git/mount → 0.5 lease → 0.4 config-snapshot → 0.3 раскладка | **блокирует всё** | ✅ Сделано |
 | 1 | 1.1 метаданные → 1.2 spill → 1.3 параллель → 1.4 микрокомпакция → 1.5 индекс → 1.6 стагнация | после 0 | ✅ Сделано |
-| 2 | Deferred-схемы | 15+ MCP-tools (включение флага) | ✅ Сделано, флаг выключен |
+| 2 | Deferred-схемы | автогейт: 10+ MCP-tools при "auto" | ✅ Сделано |
 | 3 | Child runs (`parent_run_id`) | после 1 | ✅ Сделано |
 | 4 | rg-backed coding tools | после 1 | ✅ Сделано |
-| 5 | Ops/UX | параллельно, вне ядра | ❌ Не начато |
+| 5 | Ops/UX | параллельно, вне ядра | ✅ Сделано (без OTel) |
 
 Внутри фазы 0 первыми идут 0.1 и 0.2 — они дают host-side code execution и
 чинятся точечно; 0.3–0.5 архитектурнее, но обязательны до server/gateway-
