@@ -36,6 +36,9 @@ class LoopState:
     refuel_pending: bool = False
     # Run-local план для сложных задач. Не является памятью или workspace-файлом.
     plan: list[dict[str, str]] = field(default_factory=list)
+    # Загруженные deferred-схемы tools (ADR-0015 фаза 2): resume восстанавливает
+    # их в реестре, чтобы модель не «забывала» уже раскрытые схемы.
+    loaded_tools: list[str] = field(default_factory=list)
     # Детектор затухающей отдачи (ADR-0015 §1.6): подряд идентичные вызовы
     # (совпадают имя+аргументы+результат) и итерации без прогресса.
     stagnation_last_sig: str = ""
@@ -57,6 +60,7 @@ class LoopState:
             "nudges": self.nudges,
             "refuel_pending": self.refuel_pending,
             "plan": self.plan,
+            "loaded_tools": self.loaded_tools,
             "stagnation_last_sig": self.stagnation_last_sig,
             "stagnation_last_tool": self.stagnation_last_tool,
             "stagnation_call_repeats": self.stagnation_call_repeats,
@@ -86,6 +90,7 @@ class LoopState:
                 for item in raw.get("plan", [])
                 if isinstance(item, dict)
             ],
+            loaded_tools=[str(name) for name in raw.get("loaded_tools", [])],
             stagnation_last_sig=raw.get("stagnation_last_sig", ""),
             stagnation_last_tool=raw.get("stagnation_last_tool", ""),
             stagnation_call_repeats=raw.get("stagnation_call_repeats", 0),

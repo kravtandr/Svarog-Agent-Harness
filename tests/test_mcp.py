@@ -168,3 +168,87 @@ async def test_run_mcp_tool_gated_by_approval(
     # инструмент ещё не исполнялся.
     assert outcome.state.value == "waiting_approval"
     assert backend.calls == []
+
+
+# --- ADR-0015 фаза 2: deferred-схемы MCP-tools за флагом mcp.defer_schemas ---
+
+
+def test_defer_schemas_default_off() -> None:
+    from svarog_harness.config.schema import MCPConfig
+
+    assert MCPConfig().defer_schemas is False
+
+
+class _DefsCapturingProvider(ModelProvider):
+    def __init__(self, turns: list[CompletionResult]) -> None:
+        self.turns = list(turns)
+        self.seen_defs: list[list[ToolDefinition]] = []
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> CompletionResult:
+        self.seen_defs.append(list(tools))
+        return self.turns.pop(0)
+
+
+def _wire_deferred_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    defer: bool,
+) -> tuple[TaskRunner, _DefsCapturingProvider]:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    mcp_section = "mcp:\n  defer_schemas: true\n" if defer else ""
+    (ws / "svarog.yaml").write_text(
+        "models:\n  default: local\n  providers:\n    local:\n"
+        "      base_url: http://localhost:9/v1\n      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"{mcp_section}"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    backend = FakeBackend("weather", [_SPEC])
+
+    async def fake_connect(cfg: object, store: object = None) -> list[MCPBackend]:
+        return [backend]
+
+    monkeypatch.setattr(orchestrator, "connect_mcp_servers", fake_connect)
+    provider = _DefsCapturingProvider(
+        [CompletionResult(content="готово", usage=Usage(10, 5), finish_reason="stop")]
+    )
+    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    return TaskRunner(load_config(project_dir=ws), ws), provider
+
+
+async def test_mcp_schemas_deferred_behind_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, provider = _wire_deferred_run(tmp_path, monkeypatch, defer=True)
+    outcome = await runner.run_once("задача", AutonomyMode.YOLO, hooks=RunHooks())
+    assert outcome.state.value == "completed"
+
+    names = [d.name for d in provider.seen_defs[0]]
+    # Полная схема MCP-tool скрыта; вместо неё — load_tool со сводкой.
+    assert "mcp__weather__echo" not in names
+    assert "load_tool" in names
+    load_def = next(d for d in provider.seen_defs[0] if d.name == "load_tool")
+    assert "mcp__weather__echo — Повторяет текст." in load_def.description
+
+
+async def test_mcp_schemas_full_without_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, provider = _wire_deferred_run(tmp_path, monkeypatch, defer=False)
+    outcome = await runner.run_once("задача", AutonomyMode.YOLO, hooks=RunHooks())
+    assert outcome.state.value == "completed"
+
+    names = [d.name for d in provider.seen_defs[0]]
+    # Флаг выключен (дефолт до гейта 15+ MCP-tools): схемы целиком, load_tool нет.
+    assert "mcp__weather__echo" in names
+    assert "load_tool" not in names
