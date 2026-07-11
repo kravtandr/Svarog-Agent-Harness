@@ -182,6 +182,9 @@ class MCPServerConfig(StrictModel):
 
 class MCPConfig(StrictModel):
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    # ADR-0015 фаза 2: схемы MCP-tools в промпт не грузятся, пока модель не
+    # вызовет load_tool. Выключено до гейта «15+ MCP-tools в конфигурации».
+    defer_schemas: bool = False
 
 
 class CuratorConfig(StrictModel):

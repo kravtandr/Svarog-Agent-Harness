@@ -242,6 +242,9 @@ class AgentLoop:
 
     async def resume(self, run: Run, state: LoopState) -> RunOutcome:
         """Продолжить run из checkpoint (run и state загружает recorder)."""
+        # Восстановить раскрытые deferred-схемы (ADR-0015 фаза 2): реестр
+        # собран заново и без этого «забыл» бы загруженное моделью.
+        self._registry.restore_loaded(state.loaded_tools)
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)
 
@@ -498,6 +501,9 @@ class AgentLoop:
                 ]
 
     async def _save_checkpoint(self, run: Run, state: LoopState) -> None:
+        # Загруженные deferred-схемы (ADR-0015 фаза 2) живут в реестре;
+        # checkpoint — их единственный носитель между процессами.
+        state.loaded_tools = self._registry.loaded_names()
         await self._recorder.save_checkpoint(
             run, iteration=state.iterations, state=self._redact_json(state.to_dict())
         )

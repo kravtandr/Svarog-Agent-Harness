@@ -63,7 +63,7 @@ from svarog_harness.tools.child_tools import (
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.plan_tools import UpdatePlanTool
-from svarog_harness.tools.registry import ToolRegistry
+from svarog_harness.tools.registry import LoadToolTool, ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import AskUserTool
@@ -341,7 +341,11 @@ class TaskRunner:
         for mcp_tool in mcp_tools or []:
             # MCP tools проходят через Policy Engine как обычные (§9): по умолчанию
             # require_approval (action_type mcp.*), риск из конфига сервера.
-            registry.register(mcp_tool)
+            # За флагом mcp.defer_schemas (ADR-0015 фаза 2) схема в промпт не
+            # грузится, пока модель не вызовет load_tool.
+            registry.register(mcp_tool, deferred=self._cfg.mcp.defer_schemas)
+        if mcp_tools and self._cfg.mcp.defer_schemas:
+            registry.register(LoadToolTool(registry))
         if skills:
             registry.register(
                 ReadSkillTool(
