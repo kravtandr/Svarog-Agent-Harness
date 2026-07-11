@@ -1,8 +1,8 @@
 """Точка входа CLI `svarog` (§10.1).
 
-Доступные команды: init, run, resume, chat, push, version;
-traces list/show, approvals list/approve/deny, skills list/check,
-memory show/flush, secrets list/set.
+Доступные команды: init, run, resume, chat, push, rewind, doctor, version;
+traces list/show, sessions list/rename, approvals list/approve/deny,
+skills list/check, memory show/flush, secrets list/set.
 """
 
 import asyncio
@@ -72,13 +72,21 @@ from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
     RunNotResumableError,
+    SessionNotFoundError,
+    find_run_by_prefix,
+    find_session_by_prefix,
 )
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import (
     fetch_run,
     fetch_runs,
+    fetch_sessions,
     render_run,
     render_runs_table,
+    render_sessions_table,
+    run_detail_to_dict,
+    run_to_dict,
+    session_to_dict,
 )
 from svarog_harness.verifier import CheckOutcome
 
@@ -89,6 +97,11 @@ app = typer.Typer(
 )
 traces_app = typer.Typer(help="Просмотр traces выполненных runs.", no_args_is_help=True)
 app.add_typer(traces_app, name="traces")
+sessions_app = typer.Typer(
+    help="Сессии: список, поиск, переименование (продолжение — chat --session).",
+    no_args_is_help=True,
+)
+app.add_typer(sessions_app, name="sessions")
 approvals_app = typer.Typer(help="Approval-запросы: список и решения.", no_args_is_help=True)
 app.add_typer(approvals_app, name="approvals")
 skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
@@ -105,6 +118,32 @@ def main() -> None:
 def version() -> None:
     """Показать версию svarog-harness."""
     console.print(f"svarog-harness {__version__}")
+
+
+_DOCTOR_STYLE = {"ok": "green", "warn": "yellow", "fail": "red"}
+
+
+@app.command()
+def doctor(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Машиночитаемый вывод (JSON-массив проверок)")
+    ] = False,
+) -> None:
+    """Диагностика окружения: конфиг, БД, git, sandbox, ключи, ripgrep (read-only)."""
+    from svarog_harness.cli.doctor import collect_checks
+
+    checks = collect_checks(Path.cwd())
+    if json_output:
+        print(json.dumps([c.to_dict() for c in checks], ensure_ascii=False, indent=2))
+    else:
+        for check in checks:
+            style = _DOCTOR_STYLE[check.status]
+            line = f"[{style}]{check.status:4}[/{style}] {check.name}: {check.detail}"
+            console.print(line)
+            if check.hint and check.status != "ok":
+                console.print(f"      [dim]→ {check.hint}[/dim]")
+    if any(check.status == "fail" for check in checks):
+        raise typer.Exit(code=1)
 
 
 def _ensure_gitignored(target: Path) -> Path | None:
@@ -324,12 +363,21 @@ def _console_hooks() -> RunHooks:
             for message in SkillProposalManager.validation_messages(proposal):
                 console.print(f"[yellow]  - {message}[/yellow]")
 
+    def on_progress(iterations: int, tokens: int, cost: float, context_ratio: float) -> None:
+        # Cost/context-индикатор (ADR-0015 фаза 5): одна dim-строка на итерацию.
+        console.print(
+            f"\n[dim]итерация {iterations} | {tokens} ток. | ${cost:.4f} | "
+            f"контекст {context_ratio:.0%}[/dim]",
+            highlight=False,
+        )
+
     return RunHooks(
         on_skill_skipped=lambda name, reason: console.print(
             f"[yellow]skill пропущен ({name}): {reason}[/yellow]"
         ),
         on_workspace_prep=on_prep,
         on_recovered=on_recovered,
+        on_progress=on_progress,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
         on_tool_call=lambda name, args: console.print(
             f"\n[dim]→ {name} {args}[/dim]", highlight=False
@@ -351,13 +399,13 @@ def _console_hooks() -> RunHooks:
 
 
 async def _run_task(
-    cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode
+    cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode, hooks: RunHooks
 ) -> RunOutcome:
-    return await TaskRunner(cfg, workspace).run_once(task, autonomy, hooks=_console_hooks())
+    return await TaskRunner(cfg, workspace).run_once(task, autonomy, hooks=hooks)
 
 
-async def _resume_task(cfg: SvarogConfig, run_id: str) -> RunOutcome:
-    return await TaskRunner(cfg, Path.cwd().resolve()).resume(run_id, hooks=_console_hooks())
+async def _resume_task(cfg: SvarogConfig, run_id: str, hooks: RunHooks) -> RunOutcome:
+    return await TaskRunner(cfg, Path.cwd().resolve()).resume(run_id, hooks=hooks)
 
 
 @app.command()
@@ -372,6 +420,9 @@ def run(
     supervised: Annotated[
         bool, typer.Option("--supervised", help="Режим автономии supervised")
     ] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Итог одним JSON-объектом, без интерактива")
+    ] = False,
 ) -> None:
     """Выполнить задачу агентом в workspace (один agent run)."""
     workspace = (workspace or Path.cwd()).resolve()
@@ -381,10 +432,12 @@ def run(
     cfg = _load_config_or_exit(project_dir=workspace)
     autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
 
-    console.print(f"[bold]задача:[/bold] {task}")
-    console.print(f"[dim]workspace: {workspace} | автономия: {autonomy.value}[/dim]\n")
+    if not json_output:
+        console.print(f"[bold]задача:[/bold] {task}")
+        console.print(f"[dim]workspace: {workspace} | автономия: {autonomy.value}[/dim]\n")
+    hooks = RunHooks() if json_output else _console_hooks()
     try:
-        outcome = asyncio.run(_run_task(cfg, workspace, task, autonomy))
+        outcome = asyncio.run(_run_task(cfg, workspace, task, autonomy, hooks))
     except ApiKeyError as exc:
         console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -400,8 +453,11 @@ def run(
     except PolicyRulesError as exc:
         console.print(f"[red]ошибка policy-правил:[/red] {exc}")
         raise typer.Exit(code=1) from None
-    outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome, _failed_checks(cfg, outcome))
+    if not json_output:
+        # Машиночитаемый режим не интерактивен: approval решается отдельными
+        # командами `svarog approvals approve/deny` + `resume`.
+        outcome = _interactive_approvals(cfg, outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome), as_json=json_output)
 
 
 _CHAT_HISTORY_LIMIT = 24  # сообщений диалога в контексте, чтобы не раздувать промпт
@@ -418,8 +474,19 @@ def chat(
     supervised: Annotated[
         bool, typer.Option("--supervised", help="Режим автономии supervised")
     ] = False,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="Продолжить сессию по id/префиксу (см. sessions list)"),
+    ] = None,
+    fork: Annotated[
+        str | None,
+        typer.Option("--fork", help="Новая сессия с копией истории указанной (id/префикс)"),
+    ] = None,
 ) -> None:
     """Интерактивная сессия: каждое сообщение — run в общей session (§10.1)."""
+    if session is not None and fork is not None:
+        console.print("[red]--session и --fork взаимоисключающие[/red]")
+        raise typer.Exit(code=1)
     workspace = (workspace or Path.cwd()).resolve()
     if not workspace.is_dir():
         console.print(f"[red]workspace не существует:[/red] {workspace}")
@@ -431,7 +498,10 @@ def chat(
         f"[dim]пустая строка или /quit — выход[/dim]"
     )
     try:
-        asyncio.run(_chat_session(cfg, workspace, autonomy))
+        asyncio.run(_chat_session(cfg, workspace, autonomy, continue_ref=session, fork_ref=fork))
+    except SessionNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
     except ApiKeyError as exc:
         console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -456,7 +526,14 @@ def _read_user_line(prompt: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode) -> None:
+async def _chat_session(
+    cfg: SvarogConfig,
+    workspace: Path,
+    autonomy: AutonomyMode,
+    *,
+    continue_ref: str | None = None,
+    fork_ref: str | None = None,
+) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
     backends = await connect_mcp_servers(cfg.mcp, runner.host_store)  # host-скоуп (ADR-0014 #2)
@@ -470,6 +547,24 @@ async def _chat_session(cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMo
             await runner.recover(recorder, hooks)
             session_id: str | None = None
             history: list[ChatMessage] = []
+            if continue_ref or fork_ref:
+                # Продолжение/форк сессии (ADR-0015 фаза 5): история из trace —
+                # пары (task, финальный ответ) по каждому run сессии.
+                source = await find_session_by_prefix(db, continue_ref or fork_ref or "")
+                raw = await recorder.session_history(source.id, limit_messages=_CHAT_HISTORY_LIMIT)
+                history = [
+                    ChatMessage(
+                        role="user" if m["role"] == "user" else "assistant",
+                        content=m["content"],
+                    )
+                    for m in raw
+                ]
+                if continue_ref:
+                    session_id = source.id
+                    label = f"продолжаю сессию {source.id[:8]}"
+                else:
+                    label = f"форк сессии {source.id[:8]} — новая сессия"
+                console.print(f"[dim]{label} ({len(history)} сообщений истории)[/dim]")
             while True:
                 try:
                     task = (
@@ -530,11 +625,15 @@ def _print_chat_turn(outcome: RunOutcome) -> None:
 @app.command()
 def resume(
     run_id: Annotated[str, typer.Argument(help="id приостановленного run'а или его префикс")],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Итог одним JSON-объектом, без интерактива")
+    ] = False,
 ) -> None:
     """Возобновить suspended run из checkpoint (ADR-0005)."""
     cfg = _load_config_or_exit()
+    hooks = RunHooks() if json_output else _console_hooks()
     try:
-        outcome = asyncio.run(_resume_task(cfg, run_id))
+        outcome = asyncio.run(_resume_task(cfg, run_id, hooks))
     except ConfigDriftError as exc:
         console.print(f"[red]resume отклонён (изменился security-конфиг):[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -550,8 +649,9 @@ def resume(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
-    outcome = _interactive_approvals(cfg, outcome)
-    _report_outcome(outcome, _failed_checks(cfg, outcome))
+    if not json_output:
+        outcome = _interactive_approvals(cfg, outcome)
+    _report_outcome(outcome, _failed_checks(cfg, outcome), as_json=json_output)
 
 
 def _failed_checks(cfg: SvarogConfig, outcome: RunOutcome) -> int:
@@ -619,7 +719,7 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
                 )
 
             asyncio.run(_with_db(cfg, decide))
-        outcome = asyncio.run(_resume_task(cfg, outcome.run_id))
+        outcome = asyncio.run(_resume_task(cfg, outcome.run_id, _console_hooks()))
     return outcome
 
 
@@ -640,7 +740,34 @@ def _answer_question_interactive(cfg: SvarogConfig, approval: Approval) -> None:
     asyncio.run(_with_db(cfg, record))
 
 
-def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
+def _outcome_exit_code(outcome: RunOutcome, failed_checks: int) -> int:
+    """Единая карта exit-кодов для человека и --json (§10.1)."""
+    if outcome.state is RunState.COMPLETED:
+        return 4 if failed_checks else 0
+    if outcome.state in (RunState.SUSPENDED, RunState.WAITING_APPROVAL):
+        return 3
+    if outcome.error and outcome.error.startswith("verifier:"):
+        return 4
+    return 2
+
+
+def _report_outcome(outcome: RunOutcome, failed_checks: int = 0, *, as_json: bool = False) -> None:
+    if as_json:
+        payload = {
+            "run_id": outcome.run_id,
+            "state": outcome.state.value,
+            "final_answer": outcome.final_answer,
+            "error": outcome.error,
+            "iterations": outcome.iterations,
+            "tokens_used": outcome.tokens_used,
+            "cost_usd": outcome.cost_usd,
+            "failed_checks": failed_checks,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        code = _outcome_exit_code(outcome, failed_checks)
+        if code:
+            raise typer.Exit(code=code)
+        return
     console.print()
     stats = (
         f"run {outcome.run_id[:8]} | {outcome.iterations} итераций | "
@@ -679,12 +806,19 @@ def _report_outcome(outcome: RunOutcome, failed_checks: int = 0) -> None:
 @traces_app.command("list")
 def traces_list(
     limit: Annotated[int, typer.Option("--limit", "-n", help="Сколько runs показать")] = 20,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="NDJSON: по одному JSON-объекту на строку")
+    ] = False,
 ) -> None:
     """Показать последние runs."""
     cfg = _load_config_or_exit()
 
     async def action(db: AsyncSession) -> None:
         runs = await fetch_runs(db, limit=limit)
+        if json_output:
+            for run in runs:
+                print(json.dumps(run_to_dict(run), ensure_ascii=False))
+            return
         if not runs:
             console.print('runs пока нет — запустите `svarog run "задача"`')
             return
@@ -696,6 +830,9 @@ def traces_list(
 @traces_app.command("show")
 def traces_show(
     run_id: Annotated[str, typer.Argument(help="id run'а или его уникальный префикс")],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Полный trace одним JSON-объектом")
+    ] = False,
 ) -> None:
     """Показать полный trace одного run."""
     cfg = _load_config_or_exit()
@@ -706,9 +843,115 @@ def traces_show(
         except RunNotFoundError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
+        if json_output:
+            detail = run_detail_to_dict(run, messages, tool_calls, checks)
+            print(json.dumps(detail, ensure_ascii=False, indent=2))
+            return
         console.print(render_run(run, messages, tool_calls, checks))
 
     asyncio.run(_with_db(cfg, action))
+
+
+@sessions_app.command("list")
+def sessions_list(
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Сколько сессий показать")] = 20,
+    search: Annotated[
+        str | None, typer.Option("--search", help="Подстрока в названии или задачах runs")
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="NDJSON: по одному JSON-объекту на строку")
+    ] = False,
+) -> None:
+    """Сессии от свежих к старым (продолжить: chat --session <id>)."""
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> None:
+        summaries = await fetch_sessions(db, limit=limit, search=search)
+        if json_output:
+            for summary in summaries:
+                print(json.dumps(session_to_dict(summary), ensure_ascii=False))
+            return
+        if not summaries:
+            console.print("сессий не найдено")
+            return
+        console.print(render_sessions_table(summaries))
+
+    asyncio.run(_with_db(cfg, action))
+
+
+@sessions_app.command("rename")
+def sessions_rename(
+    session_id: Annotated[str, typer.Argument(help="id сессии или её префикс")],
+    title: Annotated[str, typer.Argument(help="Новое название")],
+) -> None:
+    """Переименовать сессию."""
+    cfg = _load_config_or_exit()
+
+    async def action(db: AsyncSession) -> None:
+        session = await find_session_by_prefix(db, session_id)
+        await TraceRecorder(db).rename_session(session, title)
+        console.print(f"[green]сессия {session.id[:8]} → «{title}»[/green]")
+
+    try:
+        asyncio.run(_with_db(cfg, action))
+    except SessionNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def rewind(
+    run_id: Annotated[str, typer.Argument(help="id run'а или его префикс")],
+    yes: Annotated[bool, typer.Option("--yes", help="Не спрашивать подтверждение")] = False,
+) -> None:
+    """Откатить workspace к состоянию до run'а (turn-level rewind, git reset --hard)."""
+    cfg = _load_config_or_exit()
+    workspace = Path.cwd().resolve()
+    repo = GitRepo(workspace)
+
+    async def resolve_run(db: AsyncSession) -> str:
+        return (await find_run_by_prefix(db, run_id)).id
+
+    async def plan_rewind(full_id: str) -> tuple[str, list[str]]:
+        """(sha цели, отбрасываемые коммиты); границы — только свои step-коммиты."""
+        if not await repo.is_repo():
+            raise GitError("workspace не является git-репозиторием")
+        if await repo.is_dirty():
+            raise GitError(
+                "в workspace незакоммиченные изменения — закоммитьте или уберите их перед rewind"
+            )
+        rows = await repo.log_with_run_ids()
+        indexed = [i for i, (_, rid) in enumerate(rows) if rid == full_id]
+        if not indexed:
+            raise GitError(f"в текущей ветке нет step-коммитов run {full_id[:8]}")
+        oldest = max(indexed)
+        foreign = [sha[:8] for sha, rid in rows[: oldest + 1] if rid != full_id]
+        if foreign:
+            raise GitError(
+                f"поверх step-коммитов run {full_id[:8]} лежат чужие коммиты "
+                f"({', '.join(foreign)}) — rewind отменён, откатите их отдельно"
+            )
+        if oldest + 1 >= len(rows):
+            raise GitError("step-коммит run'а — корневой коммит: откатывать не к чему")
+        target = rows[oldest + 1][0]
+        dropped = [sha[:8] for sha, _ in rows[: oldest + 1]]
+        return target, dropped
+
+    try:
+        full_id = asyncio.run(_with_db(cfg, resolve_run))
+        target, dropped = asyncio.run(plan_rewind(full_id))
+    except (RunNotFoundError, GitError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if not yes:
+        console.print(f"будут отброшены коммиты: {', '.join(dropped)}")
+        typer.confirm("выполнить git reset --hard?", abort=True)
+    asyncio.run(repo.reset_hard(target))
+    console.print(
+        f"[green]workspace откачен[/green] к {target[:8]} "
+        f"(отброшено коммитов: {len(dropped)}, run {full_id[:8]})"
+    )
 
 
 @approvals_app.command("list")
