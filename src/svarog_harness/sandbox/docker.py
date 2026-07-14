@@ -14,13 +14,20 @@ no-new-privileges, pids-limit, tmpfs), long-lived контейнер `sleep infi
 """
 
 import asyncio
+import contextlib
 import os
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from svarog_harness.config.schema import SandboxConfig
-from svarog_harness.sandbox.base import ExecResult, ExecutionEnvironment, SandboxError
+from svarog_harness.sandbox.base import (
+    ExecResult,
+    ExecutionEnvironment,
+    SandboxError,
+    read_stream_tail,
+)
 
 # Явный override пути к docker/podman (аналог HERMES_DOCKER_BINARY).
 _BINARY_ENV_OVERRIDE = "SVAROG_DOCKER_BINARY"
@@ -61,6 +68,8 @@ class DockerEnvironment(ExecutionEnvironment):
         *,
         skills_dir: Path | None = None,
         env: dict[str, str] | None = None,
+        network: str | None = None,
+        extra_mounts: list[tuple[Path, str, bool]] | None = None,
     ) -> None:
         self.workspace = workspace
         self._cfg = cfg
@@ -68,6 +77,12 @@ class DockerEnvironment(ExecutionEnvironment):
         # Явно выданные секреты в окружение контейнера (ADR-0006); слой 1 не даёт
         # им утечь по сети (--network none) — контейнер изолирован.
         self._env = env or {}
+        # ADR-0016 §2: для внешнего агента вместо "none" — internal-only сеть,
+        # где единственный сосед — relay к bridge-серверу Svarog.
+        self._network = network or "none"
+        # (host_path, container_path, read_only): agent-state volume (§5),
+        # managed policy и hook-скрипт (§6) — только явные mounts.
+        self._extra_mounts = extra_mounts or []
         self._name = f"svarog-{uuid.uuid4().hex[:12]}"
         self._docker: str | None = None
         self._container_id: str | None = None
@@ -81,9 +96,10 @@ class DockerEnvironment(ExecutionEnvironment):
             self._name,
             "--label",
             "svarog-agent=1",
-            # Слой 1 (ADR-0002): сеть выключена; allowlist — пост-MVP.
+            # Слой 1 (ADR-0002): по умолчанию сеть выключена; для внешнего
+            # агента (ADR-0016 §2) — internal-only сеть с relay к bridge.
             "--network",
-            "none",
+            self._network,
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -111,6 +127,9 @@ class DockerEnvironment(ExecutionEnvironment):
             args += ["--user", user]
         if self._skills_dir is not None:
             args += ["-v", f"{self._skills_dir}:/skills:ro"]
+        for host_path, container_path, read_only in self._extra_mounts:
+            suffix = ":ro" if read_only else ":rw"
+            args += ["-v", f"{host_path}:{container_path}{suffix}"]
         args += [self._cfg.image, "sleep", "infinity"]
         return args
 
@@ -154,6 +173,64 @@ class DockerEnvironment(ExecutionEnvironment):
         # (SIGKILL может быть и OOM-killer'ом — не выдаем его за timeout).
         return ExecResult(
             exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=exit_code == 124
+        )
+
+    async def stream(
+        self,
+        command: str,
+        *,
+        timeout_sec: float,
+        on_line: Callable[[str], Awaitable[None]],
+    ) -> ExecResult:
+        if self._container_id is None or self._docker is None:
+            raise SandboxError("sandbox-контейнер не запущен: сначала вызовите start()")
+        inner_timeout = max(1, int(timeout_sec))
+        proc = await asyncio.create_subprocess_exec(
+            self._docker,
+            "exec",
+            self._container_id,
+            "timeout",
+            "--kill-after=5",
+            str(inner_timeout),
+            "bash",
+            "-c",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_task = asyncio.create_task(read_stream_tail(proc.stderr))
+        try:
+            # Запас поверх внутреннего coreutils timeout — от зависшего клиента.
+            async with asyncio.timeout(timeout_sec + _CLIENT_TIMEOUT_MARGIN_SEC):
+                while True:
+                    raw = await proc.stdout.readline()
+                    if not raw:
+                        break
+                    await on_line(raw.decode(errors="replace").rstrip("\n"))
+                await proc.wait()
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            return ExecResult(exit_code=124, stdout="", stderr="", timed_out=True)
+        except asyncio.CancelledError:
+            # Suspend (ADR-0016 §7): docker-exec клиент убивается сразу;
+            # процесс в контейнере добьёт cleanup (`rm -f`) в finally run'а.
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            raise
+        exit_code = proc.returncode or 0
+        return ExecResult(
+            exit_code=exit_code,
+            stdout="",
+            stderr=await stderr_task,
+            timed_out=exit_code == 124,  # coreutils timeout внутри контейнера
         )
 
     async def cleanup(self) -> None:
