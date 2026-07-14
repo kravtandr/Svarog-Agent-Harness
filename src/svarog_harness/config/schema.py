@@ -288,20 +288,32 @@ class ExternalExecutorConfig(StrictModel):
     """Внешний агент как data-plane (ADR-0016): адаптер + образ sandbox.
 
     Ключ провайдера (`api_key_ref`) — имя секрета для инжекции НА LLM-прокси
-    (host-side, ADR-0016 §3): в sandbox значение не попадает никогда. Пока
-    прокси не реализован (фаза 1), ключ не используется — сеть sandbox
-    выключена, работать может только scripted/offline агент.
+    (host-side, ADR-0016 §3): в sandbox значение не попадает никогда —
+    агент получает per-run токен bridge вместо ключа.
     """
 
-    adapter: Literal["claude-code"] = "claude-code"
+    adapter: Literal["claude-code", "codex", "opencode"] = "claude-code"
     # Образ sandbox с установленным агентом; версия агента пинится тегом
     # (ADR-0016 §8 — дрейф CLI-контрактов).
     image: str
     auth: Literal["api-key"] = "api-key"
     api_key_ref: str | None = None
+    # Upstream-endpoint провайдера агента; LLM-трафик идёт агент → bridge →
+    # сюда (§3). Для локальных моделей — свой OpenAI-совместимый URL.
+    base_url: str = "https://api.anthropic.com"
+    # Образ relay-sidecar'а (internal-сеть → bridge, §2): нужен python3.
+    relay_image: str = "python:3.12-slim"
+    # Цены за миллион токенов — для cost-бюджета на прокси; 0 = не считаем.
+    input_usd_per_mtok: float = Field(default=0.0, ge=0)
+    output_usd_per_mtok: float = Field(default=0.0, ge=0)
     # Wall-clock лимит целого прогона агента (не одной команды, как
     # sandbox.timeout_sec): по истечении процесс убивается, run → failed.
     timeout_sec: int = Field(default=3600, gt=0)
+    # Tier 2 (ADR-0016 §6): cooperative подключает hook-мост Policy Engine
+    # (managed-настройки + PreToolUse → bridge). containment — только периметр.
+    enforcement: Literal["containment", "cooperative"] = "containment"
+    # Grace-ожидание решения человека до suspend всего run (§7).
+    approval_grace_sec: int = Field(default=120, gt=0)
 
 
 class ExecutorConfig(StrictModel):

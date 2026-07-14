@@ -30,10 +30,16 @@ from svarog_harness.llm.openai_compatible import default_provider
 from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
+from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.agents import adapter_for
+from svarog_harness.runtime.bridge_control import BridgeControl
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
-from svarog_harness.runtime.external import ExternalAgentExecutor
+from svarog_harness.runtime.external import (
+    AGENT_SESSION_META_KEY,
+    EXECUTOR_META_KEY,
+    ExternalAgentExecutor,
+)
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import (
     ExecutionEnvironment,
@@ -54,7 +60,7 @@ from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.locks import LockBackend, default_lock_backend
-from svarog_harness.storage.models import Run, RunState, SkillProposal
+from svarog_harness.storage.models import ApprovalStatus, Run, RunState, SkillProposal, utcnow
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.base import ToolError
 from svarog_harness.tools.child_tools import (
@@ -69,7 +75,7 @@ from svarog_harness.tools.registry import LoadToolTool, ToolRegistry
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import AskUserTool
-from svarog_harness.trace.lookup import RunNotResumableError
+from svarog_harness.trace.lookup import RunNotResumableError, find_run_by_prefix
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import CheckOutcome, Verifier, skill_checks
 
@@ -123,6 +129,17 @@ def _assert_config_unchanged(run: Run, cfg: SvarogConfig, workspace: Path) -> No
             f"(провайдер/MCP/policy/secrets-refs): resume отклонён (fail-closed, §0.4). "
             f"Верните исходный конфиг workspace'а или запустите новый run"
         )
+
+
+def _deadline_passed(deadline_iso: str) -> bool:
+    """Дедлайн ask_user (§6.5) истёк? Невалидная строка — считаем истёкшим."""
+    from datetime import datetime
+
+    try:
+        deadline = datetime.fromisoformat(deadline_iso)
+    except ValueError:
+        return True
+    return utcnow() >= deadline
 
 
 async def _close_backends(backends: list[MCPBackend]) -> None:
@@ -210,7 +227,7 @@ class TaskRunner:
                 + "; ".join(violations),
             )
 
-    def build_environment(self) -> ExecutionEnvironment:
+    def build_environment(self, infra: ExternalAgentInfra | None = None) -> ExecutionEnvironment:
         sandbox_cfg = self._cfg.sandbox
         if self._cfg.executor.type == "external" and self._cfg.executor.external is not None:
             # Внешний агент живёт в образе с установленным агентом; версия
@@ -218,11 +235,30 @@ class TaskRunner:
             sandbox_cfg = sandbox_cfg.model_copy(
                 update={"image": self._cfg.executor.external.image}
             )
+        env = injected_env(self._store, self._cfg.secrets.inject)  # только явно выданные (§12)
+        if infra is not None:
+            # base_url/токен bridge (ADR-0016 §3): ключа провайдера тут НЕТ.
+            env = {**env, **infra.agent_env()}
         return create_environment(
             sandbox_cfg,
             self._workspace,
             skills_dir=first_existing_skills_dir(self._cfg, self._workspace),
-            env=injected_env(self._store, self._cfg.secrets.inject),  # только явно выданные (§12)
+            env=env,
+            network=infra.network_name if infra is not None else None,
+            extra_mounts=infra.extra_mounts if infra is not None else None,
+        )
+
+    def build_agent_infra(self) -> ExternalAgentInfra:
+        """Инфраструктура run'а внешнего агента (ADR-0016 §2-§5)."""
+        external = self._cfg.executor.external
+        assert external is not None  # валидатор ExecutorConfig гарантирует секцию
+        return ExternalAgentInfra(
+            external,
+            self._cfg.runtime,
+            adapter_for(external),
+            self._host_store,  # ключ провайдера резолвится host-side (§3)
+            state_root=self._cfg.storage.db_path.expanduser().parent,
+            docker_mode=self._cfg.sandbox.type == "docker",
         )
 
     def known_secret_values(self) -> frozenset[str]:
@@ -337,12 +373,23 @@ class TaskRunner:
         hooks: RunHooks,
         *,
         parent_run_id: str | None = None,
+        infra: ExternalAgentInfra | None = None,
+        control: BridgeControl | None = None,
     ) -> ExternalAgentExecutor:
         """Data-plane «внешний агент» (ADR-0016): адаптер + sandbox + общий trace."""
         external = self._cfg.executor.external
         assert external is not None  # валидатор ExecutorConfig гарантирует секцию
+        adapter = infra.adapter if infra is not None else adapter_for(external)
+
+        def on_run_started(run: Run) -> None:
+            # Control-plane узнаёт run сразу: approvals/память привязываются к нему.
+            if control is not None:
+                control.set_run(run)
+            if hooks.on_run_started is not None:
+                hooks.on_run_started(run)
+
         return ExternalAgentExecutor(
-            adapter_for(external),
+            adapter,
             environment,
             recorder,
             workspace=self._workspace,
@@ -351,10 +398,81 @@ class TaskRunner:
             secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
-            on_run_started=hooks.on_run_started,
+            on_run_started=on_run_started,
             on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,
+            bridge=infra.bridge if infra is not None else None,
+            tool_output_limit=self._cfg.runtime.tool_output_context_chars,
+            mcp_config=infra.mcp_config_path if infra is not None else None,
+            settings_file=infra.settings_path if infra is not None else None,
+            suspend_signal=control,
         )
+
+    def wire_bridge_control(
+        self,
+        infra: ExternalAgentInfra,
+        autonomy: AutonomyMode,
+        proposal_sink: list[SkillProposalRequest],
+        hooks: RunHooks,
+    ) -> BridgeControl:
+        """Control-plane bridge (ADR-0016 §4/§6): MCP-tools + hook-мост.
+
+        Policy и режим автономии замораживаются здесь, при старте run
+        (ADR-0010) — hook-мост не перечитывает их во время исполнения.
+        """
+        cfg, workspace = self._cfg, self._workspace
+        external = cfg.executor.external
+        assert external is not None
+        policy = PolicyEngine(
+            autonomy=autonomy,
+            policies=cfg.policies,
+            workspace=workspace,
+            rules=load_policy_rules(workspace),
+            skills_dirs=skills_dirs(cfg, workspace),
+        )
+        control = BridgeControl(
+            db_action=self.with_db,
+            policy=policy,
+            memory_dir=memory_dir(cfg),
+            skills=scan_skills(skills_dirs(cfg, workspace)).skills,
+            proposal_sink=proposal_sink,
+            secret_values=self.known_secret_values(),
+            approval_grace_sec=float(external.approval_grace_sec),
+            ask_user_timeout_sec=cfg.runtime.ask_user_timeout_sec,
+            on_notify=hooks.on_notify,
+        )
+        assert infra.bridge is not None
+        infra.bridge.control_handlers.update(control.handlers())
+        return control
+
+    def prepare_agent_launch(self, infra: ExternalAgentInfra) -> None:
+        """Контекст и launch-файлы агента (ADR-0016 §4/§6) до старта контейнера."""
+        cfg, workspace = self._cfg, self._workspace
+        external = cfg.executor.external
+        assert external is not None
+        mem_dir = memory_dir(cfg)
+        memory_text = (
+            read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes) or ""
+            if mem_dir is not None
+            else ""
+        )
+        cards = skill_cards(scan_skills(skills_dirs(cfg, workspace)).skills)
+        infra.prepare_launch(memory_text, cards, cooperative=external.enforcement == "cooperative")
+
+    def assert_external_autonomy_supported(self, autonomy: AutonomyMode) -> None:
+        """Supervised/auto с внешним агентом требует tier 2 (fail-closed, §6)."""
+        external = self._cfg.executor.external
+        if self._cfg.executor.type != "external" or external is None:
+            return
+        if autonomy is AutonomyMode.YOLO:
+            return
+        adapter = adapter_for(external)
+        if external.enforcement != "cooperative" or not adapter.capabilities().hooks:
+            raise SandboxError(
+                f"режим '{autonomy.value}' с внешним агентом требует "
+                "executor.external.enforcement='cooperative' и адаптера с hook-поддержкой "
+                "(fail-closed, ADR-0016 §6): tier 1 не даёт per-tool контроля"
+            )
 
     def _defer_mcp_schemas(self, mcp_tools: list[MCPTool] | None) -> bool:
         """Автогейт deferred-схем (ADR-0015 фаза 2): "auto" → 10+ MCP-tools."""
@@ -496,12 +614,14 @@ class TaskRunner:
                 update={"executor": self._cfg.executor.model_copy(update={"type": "external"})}
             )
         child_runner = TaskRunner(child_cfg, child_ws, role=self._role)
+        child_infra: ExternalAgentInfra | None = None
         if delegate:
-            # Fail-closed гейт (docker-only, ADR-0016 §2) возвращается модели
-            # tool-ошибкой: родитель может выполнить подзадачу нативно, а не
-            # падать целиком; свежесозданный worktree убираем.
+            # Fail-closed гейты (docker-only §2, supervised §6) возвращаются
+            # модели tool-ошибкой: родитель может выполнить подзадачу нативно,
+            # а не падать целиком; свежесозданный worktree убираем.
             try:
                 child_runner.assert_sandbox_available()
+                child_runner.assert_external_autonomy_supported(autonomy)
             except SandboxError as exc:
                 with contextlib.suppress(Exception):
                     await parent_repo.remove_worktree(child_ws)
@@ -510,15 +630,29 @@ class TaskRunner:
             child_runner.assert_sandbox_available()
         # Свой lease на своё дерево (§0.5): parent и child не конфликтуют.
         await recorder.acquire_workspace_lease(str(child_ws))
-        environment = child_runner.build_environment()
+        if delegate:
+            child_infra = child_runner.build_agent_infra()
+            await child_infra.start()
+            child_runner.prepare_agent_launch(child_infra)
+        environment = child_runner.build_environment(child_infra)
         await environment.start()
+        child_proposals: list[SkillProposalRequest] = []
         try:
             # Ребёнок не стримит текст в канал родителя (перемешался бы с его
             # выводом); tool calls и notify пробрасываются для наблюдаемости.
             child_hooks = RunHooks(on_tool_call=hooks.on_tool_call, on_notify=hooks.on_notify)
             if delegate:
+                assert child_infra is not None
+                control = child_runner.wire_bridge_control(
+                    child_infra, autonomy, child_proposals, child_hooks
+                )
                 outcome = await child_runner.build_external_executor(
-                    recorder, environment, child_hooks, parent_run_id=parent_run.id
+                    recorder,
+                    environment,
+                    child_hooks,
+                    parent_run_id=parent_run.id,
+                    infra=child_infra,
+                    control=control,
                 ).run(args.task, autonomy)
             else:
                 loop = child_runner.build_loop(
@@ -534,6 +668,15 @@ class TaskRunner:
                 outcome = await loop.run(args.task, autonomy)
         finally:
             await environment.cleanup()
+            if child_infra is not None:
+                await child_infra.stop()
+
+        if child_proposals:
+            # Proposals делегированного ребёнка — тот же Flow B, что у родителя.
+            async def _drain_child_proposals(db: AsyncSession) -> None:
+                await child_runner.drain_proposals(db, child_proposals, outcome.run_id, hooks)
+
+            await child_runner.with_db(_drain_child_proposals)
 
         committed: str | None = None
         if outcome.state is RunState.COMPLETED:
@@ -577,14 +720,23 @@ class TaskRunner:
             hooks.on_workspace_prep(prep)
 
         external = self._cfg.executor.type == "external"
-        # MCP внешнему агенту не пробрасывается (фаза 2 ADR-0016 — свой
-        # MCP-сервер через bridge): host-side серверы зря не поднимаем.
+        # MCP внешнему агенту не пробрасывается (у него свой MCP-сервер
+        # Svarog через bridge, §4): host-side серверы зря не поднимаем.
         backends = (
             [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
         )  # host-скоуп
-        environment = self.build_environment()
-        await environment.start()
+        infra: ExternalAgentInfra | None = None
+        environment: ExecutionEnvironment | None = None
+        if external:
+            self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
+            # Bridge (LLM-прокси + control) и internal-сеть — до контейнера.
+            infra = self.build_agent_infra()
+            await infra.start()
+            self.prepare_agent_launch(infra)
         try:
+            env = self.build_environment(infra)
+            environment = env
+            await env.start()
             mcp_tools = build_mcp_tools(backends)
 
             async def action(db: AsyncSession) -> RunOutcome:
@@ -595,10 +747,13 @@ class TaskRunner:
                 await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
                 if external:
-                    # Data-plane — внешний агент (ADR-0016 фаза 1, tier 1):
-                    # скиллы/память/MCP не пробрасываются (фаза 2 — bridge),
-                    # drain'ы ниже отработают по пустым sink'ам.
-                    executor = self.build_external_executor(recorder, environment, hooks)
+                    # Data-plane — внешний агент (ADR-0016): память и скиллы
+                    # доступны агенту через MCP-сервер bridge (§4).
+                    assert infra is not None
+                    control = self.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+                    executor = self.build_external_executor(
+                        recorder, env, hooks, infra=infra, control=control
+                    )
                     outcome = await executor.run(task, autonomy)
                 else:
                     excluded = frozenset(await CuratorStore(db).archived_names())
@@ -626,7 +781,7 @@ class TaskRunner:
 
                     loop = self.build_loop(
                         recorder,
-                        environment,
+                        env,
                         autonomy,
                         replace(hooks, on_run_started=_on_run_started),
                         proposal_sink,
@@ -637,7 +792,7 @@ class TaskRunner:
                     outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
-                failed_checks = await self.verify(environment, recorder, outcome, hooks)
+                failed_checks = await self.verify(env, recorder, outcome, hooks)
                 if failed_checks:
                     error = f"verifier: {failed_checks} проверок не прошли"
                     run = await recorder.get_run(outcome.run_id)
@@ -649,8 +804,11 @@ class TaskRunner:
 
             return await self.with_db(action)
         finally:
-            await environment.cleanup()
+            if environment is not None:
+                await environment.cleanup()
             await _close_backends(backends)
+            if infra is not None:
+                await infra.stop()
 
     async def resume(self, run_id: str, *, hooks: RunHooks) -> RunOutcome:
         """Возобновить run из checkpoint (ADR-0005).
@@ -663,6 +821,11 @@ class TaskRunner:
         async def action(db: AsyncSession) -> RunOutcome:
             recorder = TraceRecorder(db)
             await self.recover(recorder, hooks)
+            probe = await find_run_by_prefix(db, run_id)
+            if (probe.meta or {}).get(EXECUTOR_META_KEY) == "external":
+                # Внешний run (ADR-0016 §7): checkpoint'а нет — сессию
+                # поднимает сам агент по agent_session_id.
+                return await self._resume_external(db, recorder, probe, hooks)
             run, raw_state = await recorder.load_resumable(run_id)
             state = LoopState.from_dict(raw_state)
             workspace = state.workspace
@@ -725,6 +888,103 @@ class TaskRunner:
                 await _close_backends(backends)
 
         return await self.with_db(action)
+
+    async def _resume_external(
+        self, db: AsyncSession, recorder: TraceRecorder, run: Run, hooks: RunHooks
+    ) -> RunOutcome:
+        """Resume run'а внешнего агента (ADR-0016 §7).
+
+        Вместо checkpoint'а — сессия агента: prompt-решение (approval /
+        ответ ask_user / «лимиты подняты») инжектируется в `--resume`
+        сессии; ретрай заблокированного действия пропустит decision cache
+        hook-моста по отпечатку вызова.
+        """
+        if run.state not in (RunState.SUSPENDED, RunState.WAITING_APPROVAL):
+            raise RunNotResumableError(
+                f"run {run.id[:8]} в состоянии '{run.state.value}' не возобновляется"
+            )
+        agent_session = (run.meta or {}).get(AGENT_SESSION_META_KEY)
+        if not isinstance(agent_session, str) or not agent_session:
+            raise RunNotResumableError(
+                f"run {run.id[:8]}: нет agent_session_id — сессию внешнего агента "
+                "не восстановить (агент упал до init-события)"
+            )
+        workspace = Path(run.workspace or "").expanduser()
+        if not workspace.is_dir():
+            raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
+        runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
+        runner.assert_sandbox_available()
+        runner.assert_external_autonomy_supported(AutonomyMode(run.autonomy))
+        _assert_config_unchanged(run, runner._cfg, workspace)  # trust gate (§0.4)
+        await recorder.acquire_workspace_lease(str(workspace))
+        prompt = await self._external_resume_prompt(recorder, run)
+        infra = runner.build_agent_infra()
+        await infra.start()
+        runner.prepare_agent_launch(infra)
+        environment = runner.build_environment(infra)
+        await environment.start()
+        try:
+            proposal_sink: list[SkillProposalRequest] = []
+            autonomy = AutonomyMode(run.autonomy)
+            control = runner.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+            control.set_run(run)
+            executor = runner.build_external_executor(
+                recorder, environment, hooks, infra=infra, control=control
+            )
+            outcome = await executor.resume(run, prompt, agent_session=agent_session)
+            await runner.drain_memory(db, hooks)
+            await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
+            failed_checks = await runner.verify(environment, recorder, outcome, hooks)
+            if failed_checks:
+                error = f"verifier: {failed_checks} проверок не прошли"
+                refreshed = await recorder.get_run(outcome.run_id)
+                if refreshed is not None:
+                    await recorder.finish_run(refreshed, RunState.FAILED, error=error)
+                return replace(outcome, state=RunState.FAILED, error=error)
+            return outcome
+        finally:
+            await environment.cleanup()
+            await infra.stop()
+
+    async def _external_resume_prompt(self, recorder: TraceRecorder, run: Run) -> str:
+        """Prompt-решение для сессии агента по последнему approval run'а."""
+        if run.state is RunState.SUSPENDED:
+            return (
+                "Run был приостановлен по лимиту бюджета; лимиты подняты. "
+                "Продолжай прерванную задачу с того места, где остановился."
+            )
+        approval = await recorder.latest_approval(run.id)
+        if approval is None:
+            return "Продолжай прерванную задачу."
+        if approval.status is ApprovalStatus.PENDING:
+            deadline = str(approval.payload.get("deadline", ""))
+            if approval.action_type == "user.question" and _deadline_passed(deadline):
+                await recorder.expire_approval(approval)
+                return (
+                    "Ответа человека на твой вопрос нет (таймаут истёк). "
+                    "Продолжай по своему усмотрению."
+                )
+            raise RunNotResumableError(
+                f"решение по approval {approval.id[:8]} ещё не принято: "
+                f"svarog approvals approve/deny/answer {approval.id[:8]}"
+            )
+        if approval.action_type == "user.question":
+            answer = (approval.reason or "").strip()
+            return (
+                f"Ответ пользователя: {answer}. Продолжай задачу с учётом ответа."
+                if answer
+                else "Пользователь не дал ответа по существу; продолжай по своему усмотрению."
+            )
+        if approval.status is ApprovalStatus.APPROVED:
+            return (
+                "Approval получен — действие одобрено человеком. Повтори "
+                "заблокированное действие (решение закэшировано) и продолжай задачу."
+            )
+        reason = approval.reason or "без причины"
+        return (
+            f"Действие отклонено человеком: {reason}. НЕ повторяй его; "
+            "продолжай задачу с учётом отказа или заверши с объяснением."
+        )
 
     async def verify(
         self,

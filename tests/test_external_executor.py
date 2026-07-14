@@ -1,6 +1,7 @@
 """Тесты внешнего executor'а (ADR-0016 фаза 1): адаптер claude-code,
 стрим → trace, redaction, fail-closed гейты."""
 
+import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
@@ -17,6 +18,7 @@ from svarog_harness.config.schema import AutonomyMode, ExecutorConfig, ExternalE
 from svarog_harness.runtime.agents import adapter_for
 from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
 from svarog_harness.runtime.config_snapshot import config_digest
+from svarog_harness.runtime.executor import AgentLaunch
 from svarog_harness.runtime.external import ExternalAgentExecutor
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.sandbox import SandboxError
@@ -126,12 +128,15 @@ def test_parse_noise_lines_skipped() -> None:
 
 def test_command_flags_and_resume() -> None:
     adapter = ClaudeCodeAdapter()
-    argv = adapter.command("сделай hello.py")
+    argv = adapter.command(AgentLaunch(task="сделай hello.py"))
     assert argv[:3] == ["claude", "-p", "сделай hello.py"]
     assert "stream-json" in argv
     assert "bypassPermissions" in argv  # tier 1: границу держит sandbox
     assert "--resume" not in argv
-    assert adapter.command("t", session="sess-9")[-2:] == ["--resume", "sess-9"]
+    resumed = adapter.command(AgentLaunch(task="t", session="sess-9"))
+    assert resumed[-2:] == ["--resume", "sess-9"]
+    with_mcp = adapter.command(AgentLaunch(task="t", mcp_config="/run/svarog/mcp.json"))
+    assert "--mcp-config" in with_mcp and "--strict-mcp-config" in with_mcp
 
 
 # --- Конфигурация -----------------------------------------------------------
@@ -170,8 +175,10 @@ class _ScriptAdapter(ClaudeCodeAdapter):
     def __init__(self, argv: list[str]) -> None:
         super().__init__()
         self._argv = argv
+        self.launches: list[AgentLaunch] = []
 
-    def command(self, task: str, *, session: str | None = None) -> list[str]:
+    def command(self, launch: AgentLaunch) -> list[str]:
+        self.launches.append(launch)
         return list(self._argv)
 
 
@@ -348,3 +355,148 @@ async def test_external_requires_docker_fail_closed(tmp_path: Path) -> None:
     runner = TaskRunner(load_config(project_dir=ws), ws)
     with pytest.raises(SandboxError, match="external"):
         await runner.run_once("задача", AutonomyMode.YOLO, hooks=RunHooks())
+
+
+# --- Suspend / resume / бюджет (ADR-0016 §3/§7) -------------------------------
+
+
+class _FakeSuspend:
+    """Минимальный SuspendSignal для теста без полного BridgeControl."""
+
+    def __init__(self) -> None:
+        self.suspend = asyncio.Event()
+        self.suspend_reason = "approval abc12345: ждём решения человека"
+
+
+async def test_suspend_signal_interrupts_agent(db: AsyncSession, tmp_path: Path) -> None:
+    """Suspend от control-plane отменяет стрим и переводит run в waiting_approval."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    # Агент печатает init и «зависает» на 30 секунд.
+    script = tmp_path / "hanging_agent.py"
+    script.write_text(
+        "import json, sys, time\n"
+        f"print({json.dumps(json.dumps(_INIT, ensure_ascii=False))})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    signal = _FakeSuspend()
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter([sys.executable, str(script)]),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=60.0,
+        suspend_signal=signal,
+    )
+
+    async def fire_suspend() -> None:
+        await asyncio.sleep(0.3)
+        signal.suspend.set()
+
+    fire = asyncio.create_task(fire_suspend())
+    started = asyncio.get_running_loop().time()
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    await fire
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 10  # агент убит, 30-секундный sleep не дожидались
+    assert outcome.state is RunState.WAITING_APPROVAL
+    assert outcome.error is not None and "ждём решения" in outcome.error
+    run = (await db.execute(select(Run))).scalars().one()
+    assert run.state == RunState.WAITING_APPROVAL
+    assert run.finished_at is None  # нетерминальный переход (ADR-0005)
+
+
+async def test_budget_exceeded_suspends_run(db: AsyncSession, tmp_path: Path) -> None:
+    """Флаг бюджета с прокси переводит run в suspended, usage — с прокси."""
+    from svarog_harness.runtime.bridge import BridgeBudget, BridgeUsage, RunBridge, UpstreamConfig
+
+    bridge = RunBridge(
+        upstream=UpstreamConfig(base_url="http://unused", api_key=None),
+        budget=BridgeBudget(max_tokens=100, max_cost_usd=1.0),
+        loop=asyncio.get_running_loop(),
+    )
+    bridge.usage = BridgeUsage(input_tokens=90, output_tokens=30, requests=2, budget_exceeded=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    argv = _agent_script(tmp_path, [_INIT, _RESULT])
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter(argv),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+        bridge=bridge,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None and "бюджет" in outcome.error
+    # Источник истины usage — прокси, не stream-события агента (§3).
+    assert outcome.tokens_used == 120
+    run = (await db.execute(select(Run))).scalars().one()
+    assert run.finished_at is None
+
+
+async def test_resume_continues_agent_session(db: AsyncSession, tmp_path: Path) -> None:
+    """resume поднимает сессию агента --resume и дописывает тот же run."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    recorder = TraceRecorder(db)
+    adapter = _ScriptAdapter(_agent_script(tmp_path, [_INIT, _RESULT]))
+    executor = ExternalAgentExecutor(
+        adapter,
+        LocalEnvironment(ws),
+        recorder,
+        workspace=ws,
+        timeout_sec=30.0,
+    )
+    run = await recorder.start_run(
+        task="задача", autonomy="yolo", model="external:claude-code", workspace=str(ws)
+    )
+    await recorder.merge_run_meta(
+        run, {"executor": "external", "adapter": "claude-code", "agent_session_id": "sess-old"}
+    )
+    await recorder.set_run_state(run, RunState.WAITING_APPROVAL, error="ждём")
+
+    outcome = await executor.resume(run, "Approval получен — продолжай", agent_session="sess-old")
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.run_id == run.id  # та же Run-запись, без нового run
+    # Сессия агента передана в --resume.
+    assert adapter.launches[-1].session == "sess-old"
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    assert any("Approval получен" in str(m.content) for m in messages if m.role == "user")
+
+
+async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
+    """Supervised с containment-tier — fail-closed отказ (ADR-0016 §6)."""
+    ws = _make_workspace(
+        tmp_path,
+        extra_yaml=("executor:\n  type: external\n  external:\n    image: img:1\n"),
+    )
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    with pytest.raises(SandboxError, match="cooperative"):
+        runner.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
+    # cooperative + claude-code (hooks) — допустим.
+    ws2 = tmp_path / "gate-ws2"
+    ws2.mkdir()
+    (ws2 / "svarog.yaml").write_text(
+        (ws / "svarog.yaml")
+        .read_text(encoding="utf-8")
+        .replace("    image: img:1\n", "    image: img:1\n    enforcement: cooperative\n"),
+        encoding="utf-8",
+    )
+    runner2 = TaskRunner(load_config(project_dir=ws2), ws2)
+    runner2.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
+    # cooperative, но адаптер без hooks (codex) — отказ.
+    ws3 = tmp_path / "gate-ws3"
+    ws3.mkdir()
+    (ws3 / "svarog.yaml").write_text(
+        (ws2 / "svarog.yaml")
+        .read_text(encoding="utf-8")
+        .replace("    image: img:1\n", "    image: img:1\n    adapter: codex\n"),
+        encoding="utf-8",
+    )
+    runner3 = TaskRunner(load_config(project_dir=ws3), ws3)
+    with pytest.raises(SandboxError, match="hook"):
+        runner3.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
