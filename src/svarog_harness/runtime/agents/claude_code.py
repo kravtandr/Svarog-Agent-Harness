@@ -77,6 +77,10 @@ class ClaudeCodeAdapter:
             # выключаем, чтобы агент не тратил время на ретраи.
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_TELEMETRY": "1",
+            # Containment (ADR-0016 §4): нативная auto-память Claude Code
+            # (~/.claude/.../memory) конкурирует с mcp__svarog__remember и
+            # уводит факты мимо Flow A — источник истины по памяти один, Svarog.
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         }
         if auth.mode == "subscription":
             # OAuth-токен подписки (claude setup-token). ANTHROPIC_API_KEY НЕ
@@ -94,8 +98,14 @@ class ClaudeCodeAdapter:
         """~/.claude/CLAUDE.md — глобальная память агента: контекст Svarog
         не попадает в workspace и не коммитится git-flow (ADR-0016 §4)."""
         sections: list[str] = []
-        if memory:
-            sections.append(f"# Память Svarog\n\n{memory}")
+        sections.append(
+            "# Память\n\n"
+            "Единственный источник истины по памяти — Svarog. Нативная auto-память "
+            "Claude Code выключена. Чтобы что-то запомнить между запусками, вызывай "
+            "MCP-tool `mcp__svarog__remember` (прочитать — `mcp__svarog__read_memory`); "
+            "НЕ пиши факты в файлы через Write и НЕ веди свой ~/.claude/…/memory."
+            + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
+        )
         if skill_cards:
             sections.append(
                 "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
