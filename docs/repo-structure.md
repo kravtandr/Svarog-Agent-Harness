@@ -29,8 +29,11 @@ svarog/
       context_builder.py    # слои контекста, budget (§6.3)
       refuel.py             # task_state.md, пересборка контекста (§6.10)
       executor.py           # шов data-plane (ADR-0016): протокол Executor, AgentEvent, AgentAdapter
-      external.py           # ExternalAgentExecutor: внешний агент в sandbox, стрим → trace
-      agents/               # адаптеры внешних агентов: claude_code.py (codex/opencode — фаза 4)
+      external.py           # ExternalAgentExecutor: внешний агент в sandbox, стрим → trace, suspend
+      agents/               # адаптеры внешних агентов: claude_code.py, codex.py, opencode.py
+      bridge.py             # bridge-сервер run'а: LLM-прокси (ключ host-side, метеринг, бюджеты)
+      bridge_control.py     # control-plane bridge: MCP-tools Svarog + hook-мост policy/approvals
+      agent_infra.py        # инфраструктура run'а: bridge + internal-сеть + agent-state + launch-файлы
 
     verifier/               # (§6.11)
       runner.py             # запуск checks, приоритет детерминированных, secret scan дерева
