@@ -75,10 +75,34 @@ async def test_reaper_removes_dead_keeps_live_docker() -> None:
         return name in out.split()
 
     try:
-        run(["run", "-d", "--name", dead, *base, "--label", f"{reaper._PID_LABEL}=999999999",
-             "python:3.12-slim", "sleep", "infinity"])
-        run(["run", "-d", "--name", live, *base, "--label", f"{reaper._PID_LABEL}={os.getpid()}",
-             "python:3.12-slim", "sleep", "infinity"])
+        run(
+            [
+                "run",
+                "-d",
+                "--name",
+                dead,
+                *base,
+                "--label",
+                f"{reaper._PID_LABEL}=999999999",
+                "python:3.12-slim",
+                "sleep",
+                "infinity",
+            ]
+        )
+        run(
+            [
+                "run",
+                "-d",
+                "--name",
+                live,
+                *base,
+                "--label",
+                f"{reaper._PID_LABEL}={os.getpid()}",
+                "python:3.12-slim",
+                "sleep",
+                "infinity",
+            ]
+        )
         run(["network", "create", *base, "--label", f"{reaper._PID_LABEL}=999999999", net])
 
         reaped = await reaper.reap_orphaned_agents(docker)
