@@ -16,9 +16,16 @@ JSON-объекту на строку:
 """
 
 import json
+from pathlib import PurePosixPath
 from typing import Any
 
-from svarog_harness.runtime.executor import AgentEvent
+from svarog_harness.runtime.executor import AdapterCapabilities, AgentEvent, AgentLaunch
+
+# HOME в sandbox-контейнере задан явно (docker.py: -e HOME=/tmp/home).
+_STATE_DIR = PurePosixPath("/tmp/home/.claude")
+# Managed-настройки читаются с высшим приоритетом и не переопределяются
+# project-слоем (.claude/settings.json в workspace) — ADR-0016 §6.
+_MANAGED_SETTINGS = PurePosixPath("/etc/claude-code/managed-settings.json")
 
 
 class ClaudeCodeAdapter:
@@ -29,11 +36,18 @@ class ClaudeCodeAdapter:
     def name(self) -> str:
         return "claude-code"
 
-    def command(self, task: str, *, session: str | None = None) -> list[str]:
+    @property
+    def wire_format(self) -> str:
+        return "anthropic"
+
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(hooks=True, resume=True, mcp=True)
+
+    def command(self, launch: AgentLaunch) -> list[str]:
         argv = [
             self._binary,
             "-p",
-            task,
+            launch.task,
             "--output-format",
             "stream-json",
             # stream-json в headless требует verbose (контракт CLI).
@@ -43,9 +57,57 @@ class ClaudeCodeAdapter:
             "--permission-mode",
             "bypassPermissions",
         ]
-        if session is not None:
-            argv += ["--resume", session]
+        if launch.mcp_config is not None:
+            # strict: только MCP-серверы Svarog, чужие конфиги workspace
+            # игнорируются (агент не может подсунуть свой сервер).
+            argv += ["--mcp-config", launch.mcp_config, "--strict-mcp-config"]
+        if launch.session is not None:
+            argv += ["--resume", launch.session]
         return argv
+
+    def base_url_env(self, base_url: str, api_key: str) -> dict[str, str]:
+        return {
+            "ANTHROPIC_BASE_URL": base_url,
+            # per-run токен bridge; настоящий ключ инжектирует прокси (§3).
+            "ANTHROPIC_API_KEY": api_key,
+            # Телеметрия/автообновления не пройдут через egress-периметр —
+            # выключаем, чтобы агент не тратил время на ретраи.
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_TELEMETRY": "1",
+        }
+
+    def state_dir(self) -> PurePosixPath:
+        return _STATE_DIR
+
+    def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
+        """~/.claude/CLAUDE.md — глобальная память агента: контекст Svarog
+        не попадает в workspace и не коммитится git-flow (ADR-0016 §4)."""
+        sections: list[str] = []
+        if memory:
+            sections.append(f"# Память Svarog\n\n{memory}")
+        if skill_cards:
+            sections.append(
+                "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
+                + skill_cards
+            )
+        if not sections:
+            return {}
+        return {"CLAUDE.md": "\n\n".join(sections) + "\n"}
+
+    def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
+        settings: dict[str, Any] = {"permissions": {"defaultMode": "bypassPermissions"}}
+        if hook_command is not None:
+            # PreToolUse → policy-мост Svarog (tier 2, ADR-0016 §6): matcher *
+            # — каждый вызов инструмента проходит через bridge /hook.
+            settings["hooks"] = {
+                "PreToolUse": [
+                    {"matcher": "*", "hooks": [{"type": "command", "command": hook_command}]}
+                ]
+            }
+        return json.dumps(settings, ensure_ascii=False, indent=2)
+
+    def managed_policy_path(self) -> PurePosixPath | None:
+        return _MANAGED_SETTINGS
 
     def parse_event(self, line: str) -> list[AgentEvent]:
         stripped = line.strip()

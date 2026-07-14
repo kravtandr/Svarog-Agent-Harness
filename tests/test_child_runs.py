@@ -20,6 +20,7 @@ from svarog_harness.llm.provider import (
 )
 from svarog_harness.runtime import orchestrator
 from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
+from svarog_harness.runtime.executor import AgentLaunch
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.storage.models import Run, RunState, ToolCall
 from svarog_harness.tools.base import ToolError
@@ -278,7 +279,7 @@ class _ScriptAgent(ClaudeCodeAdapter):
         super().__init__()
         self._argv = argv
 
-    def command(self, task: str, *, session: str | None = None) -> list[str]:
+    def command(self, launch: AgentLaunch) -> list[str]:
         return list(self._argv)
 
 
