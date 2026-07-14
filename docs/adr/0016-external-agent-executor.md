@@ -18,11 +18,11 @@
 | Фаза 3 — cooperative tier (§6/§7) | ✅ Сделано (managed-settings ro-mount, PreToolUse → общий policy-конвейер, decision cache по отпечатку, grace → suspend → waiting_approval, resume с prompt-решением, chat поверх agent-сессий, supervised-гейт) |
 | Фаза 3.5 — субагентная делегация (`spawn_child_run` → external) | ✅ Сделано (с полной инфрой bridge у ребёнка) |
 | Фаза 4 — адаптеры codex/opencode | ✅ Сделано (golden-JSONL тесты; матрица capabilities: hooks+mcp — только claude-code, поэтому supervised и память/скиллы с codex/opencode fail-closed недоступны) |
+| §3 — subscription-режим прокси (OAuth-токен подписки) | ✅ Сделано (`auth: subscription` + `oauth_token_ref` от `claude setup-token`; прокси pass-through с метерингом/бюджетом; только claude-code) |
 
-**Не покрыто (следующие итерации):** subscription/OAuth-режим прокси
-(§3, реализован только api-key); refuel-supervisor для внешних runs в
+**Не покрыто (следующие итерации):** refuel-supervisor для внешних runs в
 gateway; `svarog doctor`-гейт версии агента в образе; прогон с настоящим
-бинарём Claude Code (нужен образ с агентом и подписка). Контейнерная
+бинарём Claude Code (нужен образ с агентом и подписка/ключ). Контейнерная
 топология §2-§4 проверена живым docker-e2e (`tests/test_external_docker.py`):
 internal-сеть + relay + bridge/MCP из контейнера + auto-commit + cleanup.
 
@@ -175,11 +175,20 @@ Svarog-owned соседа — LLM-прокси (§3) и bridge-socket недос
   SecretStore, host-скоуп `TaskRunner.host_store`) подставляется в
   заголовок **на прокси**. В sandbox ключа нет ни в env, ни в файлах —
   redaction для него не нужна, утечка невозможна по построению.
-* **Subscription/OAuth-режим (opt-in, слабее):** подписочные креды
-  (`claude login` и т.п.) живут в agent-state volume (§5) внутри sandbox;
-  в allowlist прокси добавляются auth-endpoints провайдера. Честный
-  trade-off: креды доступны коду в sandbox, но они и так принадлежат
-  этому агенту и скоупятся провайдером; фиксируется в доке оператора.
+* **Subscription/OAuth-режим (реализован для claude-code, слабее):**
+  `auth: subscription` + `oauth_token_ref` — имя секрета с долгоживущим
+  OAuth-токеном от `claude setup-token` (официальный headless-путь для
+  подписки Pro/Max). Токен уходит агенту как `CLAUDE_CODE_OAUTH_TOKEN`
+  (`ANTHROPIC_API_KEY` намеренно НЕ ставится — по precedence Claude Code он
+  перебил бы OAuth); `ANTHROPIC_BASE_URL` направляет трафик на прокси. Прокси
+  работает **pass-through**: не инжектит и не срезает auth агента — Claude
+  Code сам добавляет OAuth-заголовки — но по-прежнему считает usage и держит
+  бюджет; LLM-путь авторизуется сверкой Bearer с токеном, control-endpoints
+  требуют per-run токен. Честный trade-off: OAuth-токен доступен коду в
+  sandbox (он scoped на эту подписку), в отличие от api-key-режима, где ключ
+  вообще не входит в sandbox. Токен редактируется из trace. Только
+  claude-code (у codex/opencode подписка устроена иначе) — валидатор конфига
+  это принуждает.
 * **Метеринг = enforcement:** прокси считает токены/стоимость по телам
   ответов провайдера. Это единственный источник истины для бюджетов
   (usage-события из стрима агента — только для UX-прогресса). Превышение

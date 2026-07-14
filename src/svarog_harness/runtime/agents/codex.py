@@ -18,7 +18,12 @@ import json
 from pathlib import PurePosixPath
 from typing import Any
 
-from svarog_harness.runtime.executor import AdapterCapabilities, AgentEvent, AgentLaunch
+from svarog_harness.runtime.executor import (
+    AdapterCapabilities,
+    AgentAuth,
+    AgentEvent,
+    AgentLaunch,
+)
 
 _STATE_DIR = PurePosixPath("/tmp/home/.codex")
 
@@ -55,12 +60,13 @@ class CodexAdapter:
         ]
         return argv
 
-    def base_url_env(self, base_url: str, api_key: str) -> dict[str, str]:
+    def base_url_env(self, auth: AgentAuth) -> dict[str, str]:
+        # Codex ходит по OpenAI wire-протоколу; ключ — per-run токен bridge,
+        # настоящий инжектирует прокси (§3). subscription не поддержан
+        # (валидатор конфига это уже отклонил) — только api-key.
         return {
-            # Codex ходит по OpenAI wire-протоколу; ключ — per-run токен
-            # bridge, настоящий инжектирует прокси (§3).
-            "OPENAI_BASE_URL": base_url + "/v1",
-            "OPENAI_API_KEY": api_key,
+            "OPENAI_BASE_URL": auth.base_url + "/v1",
+            "OPENAI_API_KEY": auth.proxy_token,
         }
 
     def state_dir(self) -> PurePosixPath:

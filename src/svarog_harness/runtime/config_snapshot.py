@@ -79,6 +79,7 @@ def effective_config_snapshot(cfg: SvarogConfig, workspace: Path) -> dict[str, o
                 "image": cfg.executor.external.image,
                 "auth": cfg.executor.external.auth,
                 "api_key_ref": cfg.executor.external.api_key_ref,
+                "oauth_token_ref": cfg.executor.external.oauth_token_ref,
             },
         },
     }

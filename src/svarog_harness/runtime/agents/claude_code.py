@@ -19,7 +19,12 @@ import json
 from pathlib import PurePosixPath
 from typing import Any
 
-from svarog_harness.runtime.executor import AdapterCapabilities, AgentEvent, AgentLaunch
+from svarog_harness.runtime.executor import (
+    AdapterCapabilities,
+    AgentAuth,
+    AgentEvent,
+    AgentLaunch,
+)
 
 # HOME в sandbox-контейнере задан явно (docker.py: -e HOME=/tmp/home).
 _STATE_DIR = PurePosixPath("/tmp/home/.claude")
@@ -65,16 +70,22 @@ class ClaudeCodeAdapter:
             argv += ["--resume", launch.session]
         return argv
 
-    def base_url_env(self, base_url: str, api_key: str) -> dict[str, str]:
-        return {
-            "ANTHROPIC_BASE_URL": base_url,
-            # per-run токен bridge; настоящий ключ инжектирует прокси (§3).
-            "ANTHROPIC_API_KEY": api_key,
+    def base_url_env(self, auth: AgentAuth) -> dict[str, str]:
+        env = {
+            "ANTHROPIC_BASE_URL": auth.base_url,
             # Телеметрия/автообновления не пройдут через egress-периметр —
             # выключаем, чтобы агент не тратил время на ретраи.
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_TELEMETRY": "1",
         }
+        if auth.mode == "subscription":
+            # OAuth-токен подписки (claude setup-token). ANTHROPIC_API_KEY НЕ
+            # ставим: по precedence он перебил бы OAuth-токен (docs §auth).
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = auth.credential
+        else:
+            # per-run токен bridge; настоящий ключ инжектирует прокси (§3).
+            env["ANTHROPIC_API_KEY"] = auth.proxy_token
+        return env
 
     def state_dir(self) -> PurePosixPath:
         return _STATE_DIR

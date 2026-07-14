@@ -280,6 +280,14 @@ class TaskRunner:
             refs.append(self._cfg.gateway.token_ref)
         if self._cfg.telegram.token_ref is not None:
             refs.append(self._cfg.telegram.token_ref)
+        # Секреты внешнего агента (ADR-0016): ключ провайдера и OAuth-токен
+        # подписки редактируются из trace и tool-выводов.
+        external = self._cfg.executor.external
+        if external is not None:
+            if external.api_key_ref is not None:
+                refs.append(external.api_key_ref)
+            if external.oauth_token_ref is not None:
+                refs.append(external.oauth_token_ref)
         # Redaction покрывает оба скоупа: host-store перечисляет тот же файл, а
         # selected_values добавляет env-backed refs (provider-ключ и пр.).
         return self._host_store.values() | selected_values(self._host_store, refs)

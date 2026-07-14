@@ -22,7 +22,7 @@ from svarog_harness.runtime.bridge import (
     RunBridge,
     UpstreamConfig,
 )
-from svarog_harness.runtime.executor import AgentAdapter
+from svarog_harness.runtime.executor import AgentAdapter, AgentAuth
 from svarog_harness.sandbox.relay import AgentNetwork
 from svarog_harness.secrets import SecretStore
 
@@ -96,22 +96,29 @@ class ExternalAgentInfra:
         # Пути launch-файлов с точки зрения агента (контейнер или хост).
         self.mcp_config_path: str | None = None
         self.settings_path: str | None = None
+        # subscription: OAuth-токен подписки, уходит агенту (§3).
+        self._subscription_token: str | None = None
 
     async def start(self) -> None:
         cfg = self._external_cfg
         api_key: str | None = None
-        if cfg.api_key_ref is not None:
-            api_key = self._host_store.get(cfg.api_key_ref)
-            if api_key is None:
-                raise ApiKeyError(
-                    f"секрет '{cfg.api_key_ref}' (executor.external.api_key_ref) не найден "
-                    "в SecretStore/окружении: задайте `svarog secrets set` или env"
-                )
+        expected_bearer: str | None = None
+        if cfg.auth == "subscription":
+            # pass-through: агент аутентифицируется своим OAuth-токеном; прокси
+            # его не инжектит, но авторизует LLM-путь сверкой с ним (§3).
+            assert cfg.oauth_token_ref is not None  # гарантирует валидатор
+            self._subscription_token = self._require_secret(
+                cfg.oauth_token_ref, "executor.external.oauth_token_ref"
+            )
+            expected_bearer = self._subscription_token
+        elif cfg.api_key_ref is not None:
+            api_key = self._require_secret(cfg.api_key_ref, "executor.external.api_key_ref")
         self.bridge = RunBridge(
             upstream=UpstreamConfig(
                 base_url=cfg.base_url,
                 api_key=api_key,
                 wire_format=self._adapter.wire_format,
+                expected_bearer=expected_bearer,
             ),
             budget=BridgeBudget(
                 max_tokens=self._runtime_cfg.max_tokens_per_run,
@@ -128,6 +135,15 @@ class ExternalAgentInfra:
         if self._docker_mode:
             self._network = AgentNetwork(relay_image=cfg.relay_image, bridge_port=self.bridge.port)
             await self._network.start()
+
+    def _require_secret(self, ref: str, field: str) -> str:
+        value = self._host_store.get(ref)
+        if value is None:
+            raise ApiKeyError(
+                f"секрет '{ref}' ({field}) не найден в SecretStore/окружении: "
+                "задайте `svarog secrets set` или env"
+            )
+        return value
 
     def prepare_launch(self, memory: str, skill_cards: str, *, cooperative: bool) -> None:
         """Файлы запуска агента (ADR-0016 §4/§6) — до старта контейнера.
@@ -197,7 +213,13 @@ class ExternalAgentInfra:
 
     def agent_env(self) -> dict[str, str]:
         assert self.bridge is not None, "инфраструктура не запущена"
-        env = self._adapter.base_url_env(self.agent_base_url(), self.bridge.token)
+        auth = AgentAuth(
+            base_url=self.agent_base_url(),
+            proxy_token=self.bridge.token,
+            mode=self._external_cfg.auth,
+            credential=self._subscription_token or "",
+        )
+        env = self._adapter.base_url_env(auth)
         # Токен и URL bridge отдельными переменными — их читает hook-скрипт
         # (§6) и любой адаптер без специфичных env.
         env.setdefault("SVAROG_BRIDGE_URL", self.agent_base_url())

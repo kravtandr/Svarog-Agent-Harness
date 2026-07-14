@@ -13,11 +13,14 @@
 * **Hook-endpoint** (`/svarog/hook`, фаза 3) — PreToolUse-мост к Policy
   Engine: allow / deny / approval c grace period → suspend.
 
-Аутентификация: per-run bearer-токен. Агент получает его как «свой API-ключ»
-(x-api-key / Authorization) — прокси меняет его на настоящий upstream-ключ.
-Сервер — stdlib ThreadingHTTPServer в фоновом потоке; асинхронные операции
-Svarog (память, approvals, policy) исполняются в event loop процесса через
-run_coroutine_threadsafe.
+Аутентификация — два режима (ADR-0016 §3): в api-key агент получает per-run
+токен bridge как «свой API-ключ», прокси меняет его на настоящий ключ
+провайдера host-side; в subscription (pass-through) агент аутентифицируется
+своим OAuth-токеном подписки, прокси его не трогает, а LLM-путь авторизует
+сверкой Bearer с ожидаемым токеном. Control-endpoints (/svarog/*) всегда
+требуют per-run токен. Сервер — stdlib ThreadingHTTPServer в фоновом потоке;
+асинхронные операции Svarog (память, approvals, policy) исполняются в event
+loop процесса через run_coroutine_threadsafe.
 """
 
 import asyncio
@@ -50,10 +53,11 @@ class QuietHTTPServer(ThreadingHTTPServer):
         self.server_port = int(port)
 
 
-# Заголовки hop-by-hop и авторизация не форвардятся upstream как есть.
-_STRIP_REQUEST_HEADERS = frozenset(
-    {"host", "authorization", "x-api-key", "content-length", "connection", "accept-encoding"}
-)
+# Заголовки hop-by-hop. В inject-режиме дополнительно срезаем авторизацию
+# агента (её заменяет ключ провайдера); в pass-through (subscription) auth
+# агента форвардится как есть — Claude Code сам аутентифицируется подпиской.
+_STRIP_REQUEST_HEADERS_BASE = frozenset({"host", "content-length", "connection", "accept-encoding"})
+_STRIP_REQUEST_HEADERS_INJECT = _STRIP_REQUEST_HEADERS_BASE | {"authorization", "x-api-key"}
 _STRIP_RESPONSE_HEADERS = frozenset(
     {"content-length", "transfer-encoding", "connection", "content-encoding"}
 )
@@ -101,13 +105,25 @@ ControlHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
 @dataclass
 class UpstreamConfig:
-    """Куда и с каким ключом форвардить LLM-трафик."""
+    """Куда и как форвардить LLM-трафик (ADR-0016 §3).
+
+    inject-режим (`api_key` задан): срезаем auth агента и подставляем ключ
+    провайдера host-side. pass-through (`expected_bearer` задан, `api_key`
+    None): auth агента (OAuth-токен подписки) форвардится как есть, а bridge
+    авторизует LLM-запрос сверкой Bearer с `expected_bearer`.
+    """
 
     base_url: str
     api_key: str | None
     # Формат метеринга: заголовки авторизации и парсер usage.
     wire_format: str = "anthropic"  # anthropic | openai
     timeout_sec: float = 600.0
+    # subscription pass-through: ожидаемый Bearer агента (сам OAuth-токен).
+    expected_bearer: str | None = None
+
+    @property
+    def passthrough(self) -> bool:
+        return self.api_key is None and self.expected_bearer is not None
 
 
 @dataclass
@@ -182,22 +198,27 @@ class RunBridge:
     # --- обработка запросов (в потоке HTTP-сервера) ---
 
     def _handle(self, req: BaseHTTPRequestHandler) -> None:
-        if not self._authorized(req):
-            _respond_json(req, 401, {"error": "bridge: неверный или отсутствующий run-токен"})
-            return
+        # Control-endpoints (/svarog/*) всегда требуют per-run токен bridge.
+        # LLM-путь: в inject-режиме — тот же per-run токен; в subscription
+        # pass-through — OAuth-токен подписки (сам себе авторизация, §3).
         if req.path.startswith("/svarog/"):
+            if not self._presents(req, self.token):
+                _reject(req, 401, "bridge: неверный run-токен")
+                return
             self._handle_control(req)
+            return
+        expected = self.upstream.expected_bearer if self.upstream.passthrough else self.token
+        if expected is None or not self._presents(req, expected):
+            _reject(req, 401, "bridge: неверный или отсутствующий токен")
             return
         self._handle_proxy(req)
 
-    def _authorized(self, req: BaseHTTPRequestHandler) -> bool:
+    def _presents(self, req: BaseHTTPRequestHandler, secret: str) -> bool:
         header = req.headers.get("x-api-key") or ""
         bearer = req.headers.get("authorization") or ""
         if bearer.lower().startswith("bearer "):
             bearer = bearer[7:]
-        return secrets.compare_digest(header, self.token) or secrets.compare_digest(
-            bearer, self.token
-        )
+        return secrets.compare_digest(header, secret) or secrets.compare_digest(bearer, secret)
 
     def _handle_control(self, req: BaseHTTPRequestHandler) -> None:
         name = req.path.removeprefix("/svarog/").split("?", 1)[0]
@@ -223,13 +244,20 @@ class RunBridge:
             _respond_json(req, 429, {"type": "error", "error": {"message": _BUDGET_MESSAGE}})
             return
         body = _read_body(req)
-        headers = {k: v for k, v in req.headers.items() if k.lower() not in _STRIP_REQUEST_HEADERS}
+        strip = (
+            _STRIP_REQUEST_HEADERS_BASE
+            if self.upstream.passthrough
+            else _STRIP_REQUEST_HEADERS_INJECT
+        )
+        headers = {k: v for k, v in req.headers.items() if k.lower() not in strip}
         if self.upstream.api_key is not None:
             # Инжекция ключа host-side (ADR-0016 §3): в sandbox его нет.
             if self.upstream.wire_format == "anthropic":
                 headers["x-api-key"] = self.upstream.api_key
             else:
                 headers["Authorization"] = f"Bearer {self.upstream.api_key}"
+        # pass-through (subscription): auth агента уже в headers (не срезан) —
+        # Claude Code аутентифицируется своим OAuth-токеном сам.
         url = self.upstream.base_url.rstrip("/") + req.path
         try:
             upstream_req = self._client.build_request(
@@ -387,6 +415,13 @@ def _read_json_body(req: BaseHTTPRequestHandler) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _reject(req: BaseHTTPRequestHandler, status: int, message: str) -> None:
+    """Отказ с вычиткой тела: иначе остаток тела на keep-alive соединении
+    сломает разбор следующего запроса (HTTP/1.1)."""
+    _read_body(req)
+    _respond_json(req, status, {"error": message})
 
 
 def _respond_json(req: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
