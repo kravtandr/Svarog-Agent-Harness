@@ -13,7 +13,7 @@
 
 **Svarog** — open-source, self-hosted, Git-native runtime для ИИ-агентов: скиллы, sandboxed execution, Git-память, refuel loops, approval policies, мультиарендность и полный audit trace. Это платформа для сборки агентов, а не готовый агент и не workflow-фреймворк.
 
-> **Pre-alpha** Работает end-to-end; весь набор unit-тестов и eval-сценарии критериев готовности MVP гоняются в CI; 14 ADR фиксируют архитектурные решения с трейд-оффами. Self-hosted на любом OpenAI-совместимом endpoint — из инфраструктуры только Git + SQLite, без внешних сервисов. Публичного контракта API пока нет — детали могут меняться.
+> **Pre-alpha** Работает end-to-end; весь набор unit-тестов и eval-сценарии критериев готовности MVP гоняются в CI; 16 ADR фиксируют архитектурные решения с трейд-оффами. Self-hosted на любом OpenAI-совместимом endpoint — из инфраструктуры только Git + SQLite, без внешних сервисов. Публичного контракта API пока нет — детали могут меняться.
 
 ## Чем Svarog отличается
 
@@ -30,6 +30,7 @@
 * **Один core — много интерфейсов.** CLI, REST/WebSocket и Telegram гоняют один и тот же прогон задачи; approval можно выдать через любой канал, а не только там, где запустили.
 * **Yolo-first, но с неотключаемым тормозом.** По умолчанию агент автономен (основной сценарий — работа без няньки). Approval требуется только для типизированного critical-набора (продовый деплой, выдача секретов, force-push, ослабление политик) — и его нельзя отключить конфигом. Всё остальное — обратимо (ветки, коммиты, rollback) и видно в trace.
 * **Harness, а не workflow-конструктор.** Агент работает циклом `observe → reason → select skill/tool → act → verify`, а не нарисованным графом поведения. Этим Svarog близок к Hermes и OpenClaw (они тоже loop-агенты, а не конструкторы графов вроде LangGraph/n8n) — так что отличие Svarog от **других харнессов** не в самом цикле, а в backbone выше: память, enforcement, изоляция, governance.
+* **Любой кодинг-агент как data-plane, Svarog — control-plane (ADR-0016).** Run может исполнять не нативный цикл, а внешнего агента — **Claude Code / Codex / OpenCode** — внутри sandbox Svarog. Backbone при этом остаётся за Svarog: агент заперт в internal-only сети, LLM-трафик идёт через прокси с метерингом (ключ провайдера не входит в sandbox, бюджеты — enforcement), а память/скиллы/approvals доступны ему только через MCP-мост, policy — PreToolUse-хуком. Claude Code подключается по API-ключу **или личной подписке Pro/Max** (OAuth-токен, расход против плана). Так вы получаете зрелость внешнего агента и governance/изоляцию/аудит Svarog одновременно — а не выбор между ними.
 
 ## Возможности
 
@@ -43,16 +44,16 @@
 * **Надёжность**: resumable runs, refuel, recovery после падения, бюджеты токенов/стоимости, полный audit trace в SQLite.
 * **Секреты**: pluggable SecretStore (файл 0600 / env), инжекция только в sandbox, redaction в trace, обязательный secret scan перед каждым коммитом и push.
 * **Мультиарендность (ADR-0012/0013/0014)**: изолированные тенанты — tenant = свой agent-home (память/скиллы/секреты/БД/workspace); роли **superuser** (доступ к хосту, `local-trusted`) и **standard** (принудительно docker-sandbox, без доступа к хосту и файлам других тенантов, fail-closed без docker); per-tenant auth (bearer-токен или JWT), квоты (одновременность + бюджеты cost/tokens → HTTP 429), провижн `svarog tenant …` и опциональный first-touch. Выключена по умолчанию (`tenancy.enabled`) — single-tenant поведение без изменений.
-* **Внешние агенты как data-plane (ADR-0016)**: run может исполнять Claude Code / Codex / OpenCode внутри sandbox Svarog (`executor.type: external`) или делегировать им подзадачи из нативного цикла (`spawn_child_run`); LLM-трафик идёт через прокси Svarog (ключ провайдера не попадает в sandbox, бюджеты — enforcement), память/скиллы/approvals доступны агенту через MCP-мост, policy-хуки и suspend/resume approvals — для Claude Code.
+* **Внешние агенты как data-plane (ADR-0016)**: run может исполнять Claude Code / Codex / OpenCode внутри sandbox Svarog (`executor.type: external`) или делегировать им подзадачи из нативного цикла (`spawn_child_run`). Агент заперт в internal-only сети — наружу только relay к прокси Svarog: LLM-трафик метерится (ключ провайдера не попадает в sandbox, бюджеты/токены — enforcement → 429 → suspend), а память/скиллы/approvals доступны только через MCP-мост. Claude Code — по API-ключу или **личной подписке Pro/Max** (OAuth-токен); для него же cooperative-tier: policy PreToolUse-хук и suspend/resume approvals (память идёт через `mcp__svarog__remember`, а не в нативную память агента). Образ агента — в репозитории (`docker/agent-claude/`, CLI всегда свежий); осиротевшие при аварии контейнеры подметает GC по PID владельца.
 * **Тестирование агента**: **agent-based user simulation** (`simulation/`) — сценарии × личности для регрессионной проверки поведения агента на реальном LLM (какие tools, зацикливание, маршрутизация результата в файл/память); плюс полный набор unit-тестов и eval-сценарии критериев готовности MVP, гоняемые в CI.
 
-Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0014](docs/adr/).
+Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0016](docs/adr/) (hardening рантайма и экономия контекста — 0015, внешний агент как data-plane — 0016).
 
 ## Сравнение с Hermes и OpenClaw
 
 Три разных продукта под разные задачи, а не конкуренты лоб-в-лоб: Svarog — **платформа/runtime для сборки агента**, Hermes — готовый широкий агент, OpenClaw — зрелый персональный ассистент. Все три self-hosted. Ниже честно — в чём Svarog сильнее и где объективно уступает.
 
-**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент на Python и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерн заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается не объёмом фич, а backbone: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом); **resumable-first** loop; **изоляция арендаторов** (tenant = свой agent-home + роли superuser/standard); и решения, задокументированные в 14 ADR.
+**Hermes** ([NousResearch/hermes-agent](https://github.com/NousResearch)) — зрелый production-агент на Python и один из референсов Svarog: из него перенята сама идея двухслойного Skill Curator, паттерн заморозки автономии при старте run и эвристики опасных bash-команд. Hermes сегодня **шире**: gateway на 6 платформ (Telegram/Discord/Slack/WhatsApp/Signal/CLI), subagents, cron-планировщик, компакция контекста, code-execution RPC, батч-генерация трасс. Svarog отличается не объёмом фич, а backbone: **Git-native память с тремя явно разделёнными flow** (память / скиллы / рабочий код) и single-writer очередью вместо monolithic-состояния; **security-through-enforcement** как основа (инварианты sandbox, секреты только именованными ссылками, secret scan перед каждым коммитом); **resumable-first** loop; **изоляция арендаторов** (tenant = свой agent-home + роли superuser/standard); возможность исполнять run **внешним агентом** (Claude Code/Codex/OpenCode) как data-plane, оставаясь control-plane (ADR-0016); и решения, задокументированные в 16 ADR.
 
 **OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — очень популярный self-hosted персональный ассистент на TypeScript/Node: голос, Canvas, ноды для macOS/iOS/Android и охват **20+ каналов** (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Matrix, WeChat и др.). У него есть скиллы (`SKILL.md` + реестр ClawHub), sandbox (Docker/SSH) для не-основных сессий и pairing-политика доступа в DM. По охвату каналов, зрелости и DX Svarog ему сильно уступает. Отличие Svarog — не «ассистент на все мессенджеры», а **runtime/платформа для сборки агента** с более строгим backbone: Git-native версионируемая память с тремя flow (у OpenClaw — workspace-файлы и сессии), **governance для скиллов** (proposals + review, а не только реестр) и **Curator**, формальный Policy Engine с типизированным critical-набором и enforcement-инвариантами, resumable state machine с checkpoint'ами; а изоляция пользователей — не pairing в DM, а **полноценные арендаторы** с раздельными памятью/скиллами/секретами/БД и ролями superuser/standard. Обязательная инфраструктура — только Git + SQLite.
 
@@ -66,6 +67,7 @@
 | Изоляция арендаторов | **per-tenant agent-home + роли + квоты** | subagents (в пределах процесса) | pairing-политика DM |
 | Автономия | yolo-first + **неотключаемый critical-набор** | YOLO с заморозкой | pairing / approval незнакомцев |
 | Resumability | **state machine + checkpoints (основа)** | checkpoints | сессии |
+| Внешний агент как data-plane | **Claude Code/Codex/OpenCode в sandbox + прокси/MCP/policy (ADR-0016)** | subagents (в пределах процесса) | Docker/SSH для не-основных сессий |
 | Интерфейсы / охват | CLI + REST/WS + Telegram (один core) | 6 платформ | **20+ каналов, голос, mobile** |
 | Инфраструктура | **только Git + SQLite** | монолит | Node-gateway + workspace |
 | Зрелость / комьюнити | pre-alpha | **production** | **очень зрелый, большое сообщество** |
@@ -212,12 +214,36 @@ rules:
     paths: ["infra/**"]      # опционально, по аргументу path
 ```
 
+### Внешний агент как data-plane (ADR-0016)
+
+Svarog может выполнять run не своим нативным циклом, а внешним кодинг-агентом (Claude Code / Codex / OpenCode) внутри собственного sandbox — оставаясь control-plane: прокси LLM с бюджетами, память/скиллы/approvals через MCP-мост, policy-хуки. Соберите образ агента (CLI не пиннится — всегда свежий, см. [`docker/agent-claude/`](docker/agent-claude/)) и включите `executor: external`:
+
+```bash
+docker build -t svarog/agent-claude:latest docker/agent-claude
+# всегда последний CLI вопреки кэшу слоёв:
+docker build --build-arg REFRESH=$(date +%s) -t svarog/agent-claude:latest docker/agent-claude
+```
+
+```yaml
+executor:
+  type: external
+  external:
+    adapter: claude-code            # claude-code | codex | opencode
+    image: svarog/agent-claude:latest
+    auth: subscription              # subscription (Pro/Max, OAuth) | api-key
+    oauth_token_ref: CLAUDE_OAUTH   # секрет со значением из `claude setup-token`
+    enforcement: cooperative        # cooperative (policy-хуки + approvals) | containment
+```
+
+Для подписки положите OAuth-токен в SecretStore под именем из `oauth_token_ref` (`svarog secrets set CLAUDE_OAUTH`, значение — из `claude setup-token`); расход идёт против вашего плана Pro/Max, ключ провайдера в sandbox не попадает. Для API-ключа — `auth: api-key` + `api_key_ref` (ключ инжектируется на прокси, не в контейнер). Дальше — обычный `svarog run` / `chat`: агент работает в изоляции Svarog, память сохраняется через `mcp__svarog__remember`, push по-прежнему только через `svarog push` с policy. Cooperative-tier (policy-хуки + suspend/resume approvals) и MCP-инструменты доступны только для `claude-code`; с `codex`/`opencode` supervised и память/скиллы fail-closed недоступны (containment-only).
+
 ## Документация
 
 | Документ | Содержание |
 |---|---|
 | [TASK.md](TASK.md) | полное ТЗ |
-| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0014 (мультиарендность — 0012/0013/0014) |
+| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0016 (мультиарендность — 0012/0013/0014; hardening рантайма — 0015; внешний агент как data-plane — 0016) |
+| [docker/agent-claude/](docker/agent-claude/) | образ sandbox для внешнего Claude Code (ADR-0016) + инструкция сборки |
 | [docs/repo-structure.md](docs/repo-structure.md) | структура пакета |
 | [docs/first-issues.md](docs/first-issues.md) | backlog M0–M5 |
 | [AGENTS.md](AGENTS.md) | правила работы с репозиторием |
