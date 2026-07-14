@@ -284,6 +284,39 @@ class TenancyConfig(StrictModel):
     jwt_secret_ref: str | None = None
 
 
+class ExternalExecutorConfig(StrictModel):
+    """Внешний агент как data-plane (ADR-0016): адаптер + образ sandbox.
+
+    Ключ провайдера (`api_key_ref`) — имя секрета для инжекции НА LLM-прокси
+    (host-side, ADR-0016 §3): в sandbox значение не попадает никогда. Пока
+    прокси не реализован (фаза 1), ключ не используется — сеть sandbox
+    выключена, работать может только scripted/offline агент.
+    """
+
+    adapter: Literal["claude-code"] = "claude-code"
+    # Образ sandbox с установленным агентом; версия агента пинится тегом
+    # (ADR-0016 §8 — дрейф CLI-контрактов).
+    image: str
+    auth: Literal["api-key"] = "api-key"
+    api_key_ref: str | None = None
+    # Wall-clock лимит целого прогона агента (не одной команды, как
+    # sandbox.timeout_sec): по истечении процесс убивается, run → failed.
+    timeout_sec: int = Field(default=3600, gt=0)
+
+
+class ExecutorConfig(StrictModel):
+    """Выбор data-plane (ADR-0016): нативный AgentLoop или внешний агент."""
+
+    type: Literal["native", "external"] = "native"
+    external: ExternalExecutorConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_external_section(self) -> Self:
+        if self.type == "external" and self.external is None:
+            raise ValueError("executor.type='external' требует секцию executor.external")
+        return self
+
+
 class SvarogConfig(BaseSettings):
     """Корень конфигурации: merge user- и project-уровней + env-переменные.
 
@@ -313,6 +346,7 @@ class SvarogConfig(BaseSettings):
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
 
     @classmethod
     def settings_customise_sources(

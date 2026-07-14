@@ -358,6 +358,15 @@ class TraceRecorder:
         run.heartbeat_at = utcnow()  # lease heartbeat (ADR-0015 §0.5)
         await self._db.commit()
 
+    async def merge_run_meta(self, run: Run, extra: dict[str, object]) -> None:
+        """Дописать ключи в Run.meta (executor/adapter/agent_session_id, ADR-0016).
+
+        JSON-колонка отслеживает только переприсваивание — мутировать словарь
+        на месте нельзя.
+        """
+        run.meta = {**run.meta, **extra}
+        await self._db.commit()
+
     async def finish_run(self, run: Run, state: RunState, *, error: str | None = None) -> None:
         run.state = state
         run.error = error
