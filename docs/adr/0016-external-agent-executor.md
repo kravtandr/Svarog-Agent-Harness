@@ -2,7 +2,7 @@
 
 ## Статус
 
-Принято; фаза 1 реализована частично.
+Принято; фазы 1-4 реализованы.
 
 | Фаза / пункт | Статус |
 |---|---|
@@ -10,14 +10,20 @@
 | 1. Адаптер `claude-code` (stream-json → AgentEvent, golden-тесты) | ✅ Сделано |
 | 1. Стриминг sandbox (`ExecutionEnvironment.stream`, docker+local) | ✅ Сделано |
 | 1. `ExternalAgentExecutor`: стрим → trace, redaction, heartbeat | ✅ Сделано |
-| 1. Fail-closed гейты (docker-only; supervised — с фазой 3) | ✅ Сделано |
-| 1. Internal-network + LLM-прокси (§3) | ⏳ Не сделано — сеть sandbox пока `none`, реальный агент не достучится до API (safe-by-default) |
-| 1. Agent-state volume (§5) | ⏳ Не сделано |
-| 1. §1.2-персистенция больших tool_result | ⏳ Не сделано (пишутся целиком) |
-| Фаза 2 — bridge-socket + MCP-сервер | ⏳ Не сделано |
-| Фаза 3 — cooperative tier, suspend-resume approvals | ⏳ Не сделано |
-| Фаза 3.5 — субагентная делегация (`spawn_child_run` → external) | ✅ Сделано |
-| Фаза 4 — адаптеры codex/opencode | ⏳ Не сделано |
+| 1. Fail-closed гейты (docker-only, supervised) | ✅ Сделано |
+| 1. Internal-network + relay + LLM-прокси (§2/§3) | ✅ Сделано (bridge на хосте, relay-sidecar в internal-сети; метеринг anthropic/openai, бюджет → 429 → suspended) |
+| 1. Agent-state volume (§5) | ✅ Сделано (`<control-plane>/agent-state/<adapter>` → state_dir адаптера) |
+| 1. §1.2-персистенция больших tool_result | ✅ Сделано |
+| Фаза 2 — MCP-сервер + контекст (§4) | ✅ Сделано (HTTP-MCP на bridge: remember/read_memory/read_skill/create_skill_proposal/ask_user/request_approval; CLAUDE.md/AGENTS.md в state volume) — транспорт HTTP-bridge вместо unix-socket: bind-mount сокетов не работает на Docker Desktop |
+| Фаза 3 — cooperative tier (§6/§7) | ✅ Сделано (managed-settings ro-mount, PreToolUse → общий policy-конвейер, decision cache по отпечатку, grace → suspend → waiting_approval, resume с prompt-решением, chat поверх agent-сессий, supervised-гейт) |
+| Фаза 3.5 — субагентная делегация (`spawn_child_run` → external) | ✅ Сделано (с полной инфрой bridge у ребёнка) |
+| Фаза 4 — адаптеры codex/opencode | ✅ Сделано (golden-JSONL тесты; матрица capabilities: hooks+mcp — только claude-code, поэтому supervised и память/скиллы с codex/opencode fail-closed недоступны) |
+
+**Не покрыто (следующие итерации):** subscription/OAuth-режим прокси
+(§3, реализован только api-key); refuel-supervisor для внешних runs в
+gateway; `svarog doctor`-гейт версии агента в образе; e2e-прогон с реальным
+Claude Code в docker (проверено контрактными тестами и скриптовыми
+агентами — реальный контейнерный прогон требует стенда с docker).
 
 ## Контекст
 
