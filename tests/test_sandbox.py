@@ -62,6 +62,9 @@ def test_docker_run_args_enforce_layer1(tmp_path: Path) -> None:
     assert f"{tmp_path}:/workspace:rw" in args
     assert f"{skills}:/skills:ro" in args
     assert value_of("--user") == f"{os.getuid()}:{os.getgid()}"
+    # Метки владельца для reaper осиротевших контейнеров (ADR-0016 §2).
+    assert "svarog-agent=1" in args
+    assert f"svarog-owner-pid={os.getpid()}" in args
     # Команда контейнера: образ + sleep infinity.
     assert args[-3:] == [SandboxConfig().image, "sleep", "infinity"]
 

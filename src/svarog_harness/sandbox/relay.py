@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.sandbox.docker import find_docker
+from svarog_harness.sandbox.reaper import owner_label_args
 
 _DOCKER_TIMEOUT_SEC = 120.0
 # Порт relay внутри internal-сети (фиксированный: агент получает URL вида
@@ -88,7 +89,7 @@ class AgentNetwork:
         self._network = f"svarog-agent-{suffix}"
         self._relay_name = f"svarog-relay-{suffix}"
         code, _, err = await self._run(
-            ["network", "create", "--internal", "--label", "svarog-agent=1", self._network]
+            ["network", "create", "--internal", *owner_label_args(), self._network]
         )
         if code != 0:
             raise SandboxError(f"не удалось создать internal-сеть агента: {err.strip()}")
@@ -99,8 +100,7 @@ class AgentNetwork:
                 "--rm",
                 "--name",
                 self._relay_name,
-                "--label",
-                "svarog-agent=1",
+                *owner_label_args(),
                 "--network",
                 self._network,
                 # Linux: host-gateway объявляет адрес хоста; Docker Desktop

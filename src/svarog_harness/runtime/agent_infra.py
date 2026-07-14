@@ -23,6 +23,8 @@ from svarog_harness.runtime.bridge import (
     UpstreamConfig,
 )
 from svarog_harness.runtime.executor import AgentAdapter, AgentAuth
+from svarog_harness.sandbox.docker import find_docker
+from svarog_harness.sandbox.reaper import reap_orphaned_agents
 from svarog_harness.sandbox.relay import AgentNetwork
 from svarog_harness.secrets import SecretStore
 
@@ -133,6 +135,11 @@ class ExternalAgentInfra:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._extra_mounts = [(self._state_dir, str(self._adapter.state_dir()), False)]
         if self._docker_mode:
+            # Подмести ресурсы прошлых run'ов, чей родитель умер без teardown
+            # (SIGKILL/OOM): контейнер+relay+сеть переживают процесс (ADR-0016 §2).
+            docker = find_docker()
+            if docker is not None:
+                await reap_orphaned_agents(docker)
             self._network = AgentNetwork(relay_image=cfg.relay_image, bridge_port=self.bridge.port)
             await self._network.start()
 
