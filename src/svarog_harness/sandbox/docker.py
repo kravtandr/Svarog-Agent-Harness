@@ -14,13 +14,20 @@ no-new-privileges, pids-limit, tmpfs), long-lived контейнер `sleep infi
 """
 
 import asyncio
+import contextlib
 import os
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from svarog_harness.config.schema import SandboxConfig
-from svarog_harness.sandbox.base import ExecResult, ExecutionEnvironment, SandboxError
+from svarog_harness.sandbox.base import (
+    ExecResult,
+    ExecutionEnvironment,
+    SandboxError,
+    read_stream_tail,
+)
 
 # Явный override пути к docker/podman (аналог HERMES_DOCKER_BINARY).
 _BINARY_ENV_OVERRIDE = "SVAROG_DOCKER_BINARY"
@@ -154,6 +161,55 @@ class DockerEnvironment(ExecutionEnvironment):
         # (SIGKILL может быть и OOM-killer'ом — не выдаем его за timeout).
         return ExecResult(
             exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=exit_code == 124
+        )
+
+    async def stream(
+        self,
+        command: str,
+        *,
+        timeout_sec: float,
+        on_line: Callable[[str], Awaitable[None]],
+    ) -> ExecResult:
+        if self._container_id is None or self._docker is None:
+            raise SandboxError("sandbox-контейнер не запущен: сначала вызовите start()")
+        inner_timeout = max(1, int(timeout_sec))
+        proc = await asyncio.create_subprocess_exec(
+            self._docker,
+            "exec",
+            self._container_id,
+            "timeout",
+            "--kill-after=5",
+            str(inner_timeout),
+            "bash",
+            "-c",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_task = asyncio.create_task(read_stream_tail(proc.stderr))
+        try:
+            # Запас поверх внутреннего coreutils timeout — от зависшего клиента.
+            async with asyncio.timeout(timeout_sec + _CLIENT_TIMEOUT_MARGIN_SEC):
+                while True:
+                    raw = await proc.stdout.readline()
+                    if not raw:
+                        break
+                    await on_line(raw.decode(errors="replace").rstrip("\n"))
+                await proc.wait()
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            return ExecResult(exit_code=124, stdout="", stderr="", timed_out=True)
+        exit_code = proc.returncode or 0
+        return ExecResult(
+            exit_code=exit_code,
+            stdout="",
+            stderr=await stderr_task,
+            timed_out=exit_code == 124,  # coreutils timeout внутри контейнера
         )
 
     async def cleanup(self) -> None:
