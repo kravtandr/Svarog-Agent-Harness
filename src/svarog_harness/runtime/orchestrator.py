@@ -640,12 +640,15 @@ class TaskRunner:
         await recorder.acquire_workspace_lease(str(child_ws))
         if delegate:
             child_infra = child_runner.build_agent_infra()
-            await child_infra.start()
-            child_runner.prepare_agent_launch(child_infra)
-        environment = child_runner.build_environment(child_infra)
-        await environment.start()
+        environment: ExecutionEnvironment | None = None
         child_proposals: list[SkillProposalRequest] = []
         try:
+            if child_infra is not None:
+                # start/prepare внутри try: сбой не осиротит bridge/сеть ребёнка.
+                await child_infra.start()
+                child_runner.prepare_agent_launch(child_infra)
+            environment = child_runner.build_environment(child_infra)
+            await environment.start()
             # Ребёнок не стримит текст в канал родителя (перемешался бы с его
             # выводом); tool calls и notify пробрасываются для наблюдаемости.
             child_hooks = RunHooks(on_tool_call=hooks.on_tool_call, on_notify=hooks.on_notify)
@@ -675,7 +678,8 @@ class TaskRunner:
                 )
                 outcome = await loop.run(args.task, autonomy)
         finally:
-            await environment.cleanup()
+            if environment is not None:
+                await environment.cleanup()
             if child_infra is not None:
                 await child_infra.stop()
 
@@ -737,11 +741,14 @@ class TaskRunner:
         environment: ExecutionEnvironment | None = None
         if external:
             self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
-            # Bridge (LLM-прокси + control) и internal-сеть — до контейнера.
             infra = self.build_agent_infra()
-            await infra.start()
-            self.prepare_agent_launch(infra)
         try:
+            if infra is not None:
+                # Bridge (LLM-прокси + control) и internal-сеть — до контейнера;
+                # внутри try, чтобы сбой prepare_launch не осиротил уже поднятые
+                # bridge/сеть (finally гарантированно вызовет infra.stop()).
+                await infra.start()
+                self.prepare_agent_launch(infra)
             env = self.build_environment(infra)
             environment = env
             await env.start()

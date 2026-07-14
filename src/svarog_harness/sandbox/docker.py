@@ -28,6 +28,7 @@ from svarog_harness.sandbox.base import (
     SandboxError,
     read_stream_tail,
 )
+from svarog_harness.sandbox.reaper import owner_label_args
 
 # Явный override пути к docker/podman (аналог HERMES_DOCKER_BINARY).
 _BINARY_ENV_OVERRIDE = "SVAROG_DOCKER_BINARY"
@@ -94,8 +95,9 @@ class DockerEnvironment(ExecutionEnvironment):
             "-d",
             "--name",
             self._name,
-            "--label",
-            "svarog-agent=1",
+            # Метки владельца (PID + boot): осиротевший контейнер подметёт
+            # следующий внешний run, если родитель умер без teardown (reaper.py).
+            *owner_label_args(),
             # Слой 1 (ADR-0002): по умолчанию сеть выключена; для внешнего
             # агента (ADR-0016 §2) — internal-only сеть с relay к bridge.
             "--network",
