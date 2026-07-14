@@ -14,7 +14,14 @@ def create_environment(
     *,
     skills_dir: Path | None = None,
     env: dict[str, str] | None = None,
+    network: str | None = None,
+    extra_mounts: list[tuple[Path, str, bool]] | None = None,
 ) -> ExecutionEnvironment:
+    # network/extra_mounts — периметр внешнего агента (ADR-0016 §2/§5):
+    # internal-сеть с relay и agent-state volume; для local-trusted не
+    # применимы (процесс и так на хосте).
     if cfg.type == "local-trusted":
         return LocalEnvironment(workspace, env=env)
-    return DockerEnvironment(workspace, cfg, skills_dir=skills_dir, env=env)
+    return DockerEnvironment(
+        workspace, cfg, skills_dir=skills_dir, env=env, network=network, extra_mounts=extra_mounts
+    )

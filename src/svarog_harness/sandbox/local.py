@@ -79,4 +79,13 @@ class LocalEnvironment(ExecutionEnvironment):
             with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
             return ExecResult(exit_code=124, stdout="", stderr="", timed_out=True)
+        except asyncio.CancelledError:
+            # Управляемая отмена (suspend, ADR-0016 §7): процесс не переживает её.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            await proc.wait()
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            raise
         return ExecResult(exit_code=proc.returncode or 0, stdout="", stderr=await stderr_task)
