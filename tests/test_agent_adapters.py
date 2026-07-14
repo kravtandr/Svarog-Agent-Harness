@@ -208,6 +208,25 @@ def test_claude_subscription_env() -> None:
     # ANTHROPIC_API_KEY НЕ ставится — иначе перебил бы OAuth (precedence).
     assert "ANTHROPIC_API_KEY" not in sub
     assert sub["ANTHROPIC_BASE_URL"] == "http://bridge:8080"
+    # Containment: нативная auto-память отключена в обоих режимах, чтобы факты
+    # шли через mcp__svarog__remember, а не в ~/.claude/…/memory (регрессия S4).
+    assert api["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert sub["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+
+def test_claude_context_steers_memory_to_mcp() -> None:
+    """Регрессия S4: инжектируемый контекст велит писать память через MCP-tool,
+    а не в файлы; присутствует всегда, память подставляется, когда есть."""
+    from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
+
+    adapter = ClaudeCodeAdapter()
+    empty = adapter.context_files(memory="", skill_cards="")
+    assert "mcp__svarog__remember" in empty["CLAUDE.md"]
+
+    full = adapter.context_files(memory="- forge-01 — рабочий ноутбук", skill_cards="")
+    body = full["CLAUDE.md"]
+    assert "mcp__svarog__remember" in body
+    assert "forge-01" in body
 
 
 def test_capability_matrix() -> None:
