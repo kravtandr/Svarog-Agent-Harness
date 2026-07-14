@@ -30,8 +30,10 @@ from svarog_harness.llm.openai_compatible import default_provider
 from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
+from svarog_harness.runtime.agents import adapter_for
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
+from svarog_harness.runtime.external import ExternalAgentExecutor
 from svarog_harness.runtime.loop import AgentLoop, RunOutcome
 from svarog_harness.sandbox import (
     ExecutionEnvironment,
@@ -187,6 +189,13 @@ class TaskRunner:
                 "docker/podman недоступен, а sandbox.type=docker (fail-closed): "
                 "запуск отклонён без отката на local-trusted (ADR-0013)"
             )
+        # Внешний агент (ADR-0016 §2): границу безопасности держит только
+        # sandbox-периметр, поэтому local-trusted для него не существует.
+        if self._cfg.executor.type == "external" and self._cfg.sandbox.type != "docker":
+            raise SandboxError(
+                "executor.type='external' требует sandbox.type='docker' (fail-closed, "
+                "ADR-0016): внешний агент исполняется только внутри контейнера"
+            )
 
     def _warn_layout_tradeoff(self, hooks: RunHooks) -> None:
         """Local-trusted: пересечение workspace с control-plane не блокирует run
@@ -202,8 +211,15 @@ class TaskRunner:
             )
 
     def build_environment(self) -> ExecutionEnvironment:
+        sandbox_cfg = self._cfg.sandbox
+        if self._cfg.executor.type == "external" and self._cfg.executor.external is not None:
+            # Внешний агент живёт в образе с установленным агентом; версия
+            # пинится тегом (ADR-0016 §8 — дрейф CLI-контрактов).
+            sandbox_cfg = sandbox_cfg.model_copy(
+                update={"image": self._cfg.executor.external.image}
+            )
         return create_environment(
-            self._cfg.sandbox,
+            sandbox_cfg,
             self._workspace,
             skills_dir=first_existing_skills_dir(self._cfg, self._workspace),
             env=injected_env(self._store, self._cfg.secrets.inject),  # только явно выданные (§12)
@@ -314,6 +330,32 @@ class TaskRunner:
             parent_run_id=parent_run_id,
         )
 
+    def build_external_executor(
+        self,
+        recorder: TraceRecorder,
+        environment: ExecutionEnvironment,
+        hooks: RunHooks,
+        *,
+        parent_run_id: str | None = None,
+    ) -> ExternalAgentExecutor:
+        """Data-plane «внешний агент» (ADR-0016): адаптер + sandbox + общий trace."""
+        external = self._cfg.executor.external
+        assert external is not None  # валидатор ExecutorConfig гарантирует секцию
+        return ExternalAgentExecutor(
+            adapter_for(external),
+            environment,
+            recorder,
+            workspace=self._workspace,
+            timeout_sec=float(external.timeout_sec),
+            config_hash=config_digest(self._cfg, self._workspace),  # снимок (§0.4)
+            secret_values=self.known_secret_values(),
+            on_text_delta=hooks.on_text_delta,
+            on_tool_call=hooks.on_tool_call,
+            on_run_started=hooks.on_run_started,
+            on_progress=hooks.on_progress,
+            parent_run_id=parent_run_id,
+        )
+
     def _defer_mcp_schemas(self, mcp_tools: list[MCPTool] | None) -> bool:
         """Автогейт deferred-схем (ADR-0015 фаза 2): "auto" → 10+ MCP-tools."""
         flag = self._cfg.mcp.defer_schemas
@@ -414,6 +456,15 @@ class TaskRunner:
                 "spawn_child_run требует git-workspace хотя бы с одним коммитом: "
                 "изоляция ребёнка — отдельный git-worktree (ADR-0015 фаза 3)"
             )
+        # Делегация внешнему агенту (ADR-0016 фаза 3.5): data-plane ребёнка —
+        # ExternalAgentExecutor; секция external должна быть настроена заранее.
+        delegate = args.executor == "external"
+        if delegate and self._cfg.executor.external is None:
+            raise ToolError(
+                "делегация внешнему агенту (executor='external') требует секции "
+                "executor.external в svarog.yaml (ADR-0016 фаза 3.5); выполните "
+                "подзадачу нативно или попросите оператора настроить секцию"
+            )
         suffix = uuid.uuid4().hex[:8]
         branch = f"svarog/child-{suffix}"
         ws = self._workspace.expanduser().resolve()
@@ -439,10 +490,24 @@ class TaskRunner:
                 ),
             }
         )
-        child_runner = TaskRunner(
-            self._cfg.model_copy(update={"runtime": child_runtime}), child_ws, role=self._role
-        )
-        child_runner.assert_sandbox_available()
+        child_cfg = self._cfg.model_copy(update={"runtime": child_runtime})
+        if delegate:
+            child_cfg = child_cfg.model_copy(
+                update={"executor": self._cfg.executor.model_copy(update={"type": "external"})}
+            )
+        child_runner = TaskRunner(child_cfg, child_ws, role=self._role)
+        if delegate:
+            # Fail-closed гейт (docker-only, ADR-0016 §2) возвращается модели
+            # tool-ошибкой: родитель может выполнить подзадачу нативно, а не
+            # падать целиком; свежесозданный worktree убираем.
+            try:
+                child_runner.assert_sandbox_available()
+            except SandboxError as exc:
+                with contextlib.suppress(Exception):
+                    await parent_repo.remove_worktree(child_ws)
+                raise ToolError(str(exc)) from exc
+        else:
+            child_runner.assert_sandbox_available()
         # Свой lease на своё дерево (§0.5): parent и child не конфликтуют.
         await recorder.acquire_workspace_lease(str(child_ws))
         environment = child_runner.build_environment()
@@ -451,17 +516,22 @@ class TaskRunner:
             # Ребёнок не стримит текст в канал родителя (перемешался бы с его
             # выводом); tool calls и notify пробрасываются для наблюдаемости.
             child_hooks = RunHooks(on_tool_call=hooks.on_tool_call, on_notify=hooks.on_notify)
-            loop = child_runner.build_loop(
-                recorder,
-                environment,
-                autonomy,
-                child_hooks,
-                None,
-                excluded_skills=excluded_skills,
-                mcp_tools=None,
-                parent_run_id=parent_run.id,
-            )
-            outcome = await loop.run(args.task, autonomy)
+            if delegate:
+                outcome = await child_runner.build_external_executor(
+                    recorder, environment, child_hooks, parent_run_id=parent_run.id
+                ).run(args.task, autonomy)
+            else:
+                loop = child_runner.build_loop(
+                    recorder,
+                    environment,
+                    autonomy,
+                    child_hooks,
+                    None,
+                    excluded_skills=excluded_skills,
+                    mcp_tools=None,
+                    parent_run_id=parent_run.id,
+                )
+                outcome = await loop.run(args.task, autonomy)
         finally:
             await environment.cleanup()
 
@@ -506,7 +576,12 @@ class TaskRunner:
         if hooks.on_workspace_prep is not None:
             hooks.on_workspace_prep(prep)
 
-        backends = await connect_mcp_servers(self._cfg.mcp, self._host_store)  # host-скоуп
+        external = self._cfg.executor.type == "external"
+        # MCP внешнему агенту не пробрасывается (фаза 2 ADR-0016 — свой
+        # MCP-сервер через bridge): host-side серверы зря не поднимаем.
+        backends = (
+            [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
+        )  # host-скоуп
         environment = self.build_environment()
         await environment.start()
         try:
@@ -519,40 +594,47 @@ class TaskRunner:
                 # том же рабочем дереве отклоняется, пока первый жив (heartbeat).
                 await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
-                excluded = frozenset(await CuratorStore(db).archived_names())
-                # Child runs (ADR-0015 фаза 3): родительский Run становится
-                # известен через on_run_started — держим его в holder'е для
-                # callback'а spawn_child_run.
-                parent_runs: list[Run] = []
+                if external:
+                    # Data-plane — внешний агент (ADR-0016 фаза 1, tier 1):
+                    # скиллы/память/MCP не пробрасываются (фаза 2 — bridge),
+                    # drain'ы ниже отработают по пустым sink'ам.
+                    executor = self.build_external_executor(recorder, environment, hooks)
+                    outcome = await executor.run(task, autonomy)
+                else:
+                    excluded = frozenset(await CuratorStore(db).archived_names())
+                    # Child runs (ADR-0015 фаза 3): родительский Run становится
+                    # известен через on_run_started — держим его в holder'е для
+                    # callback'а spawn_child_run.
+                    parent_runs: list[Run] = []
 
-                def _on_run_started(run: Run) -> None:
-                    parent_runs.append(run)
-                    if hooks.on_run_started is not None:
-                        hooks.on_run_started(run)
+                    def _on_run_started(run: Run) -> None:
+                        parent_runs.append(run)
+                        if hooks.on_run_started is not None:
+                            hooks.on_run_started(run)
 
-                async def spawn(args: SpawnChildRunArgs) -> str:
-                    if not parent_runs:
-                        raise ToolError("родительский run ещё не зарегистрирован")
-                    return await self.spawn_child_run(
+                    async def spawn(args: SpawnChildRunArgs) -> str:
+                        if not parent_runs:
+                            raise ToolError("родительский run ещё не зарегистрирован")
+                        return await self.spawn_child_run(
+                            recorder,
+                            parent_runs[-1],
+                            autonomy,
+                            args,
+                            hooks,
+                            excluded_skills=excluded,
+                        )
+
+                    loop = self.build_loop(
                         recorder,
-                        parent_runs[-1],
+                        environment,
                         autonomy,
-                        args,
-                        hooks,
+                        replace(hooks, on_run_started=_on_run_started),
+                        proposal_sink,
                         excluded_skills=excluded,
+                        mcp_tools=mcp_tools,
+                        child_spawn=spawn,
                     )
-
-                loop = self.build_loop(
-                    recorder,
-                    environment,
-                    autonomy,
-                    replace(hooks, on_run_started=_on_run_started),
-                    proposal_sink,
-                    excluded_skills=excluded,
-                    mcp_tools=mcp_tools,
-                    child_spawn=spawn,
-                )
-                outcome = await loop.run(task, autonomy)
+                    outcome = await loop.run(task, autonomy)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 failed_checks = await self.verify(environment, recorder, outcome, hooks)
