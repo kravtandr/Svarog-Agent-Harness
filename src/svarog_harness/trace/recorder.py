@@ -213,6 +213,29 @@ class TraceRecorder:
         approval.reason = answer
         await self._db.commit()
 
+    async def latest_approval(self, run_id: str) -> Approval | None:
+        """Последний approval run'а — resume внешнего агента строит по нему
+        prompt-решение (ADR-0016 §7)."""
+        result = await self._db.execute(
+            select(Approval)
+            .where(Approval.run_id == run_id)
+            .order_by(Approval.created_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def last_agent_session(self, session_id: str) -> str | None:
+        """agent_session_id последнего run'а Session — chat-непрерывность
+        внешнего агента (ADR-0016 фаза 3)."""
+        result = await self._db.execute(
+            select(Run).where(Run.session_id == session_id).order_by(Run.created_at.desc())
+        )
+        for run in result.scalars():
+            value = (run.meta or {}).get("agent_session_id")
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     async def expire_approval(self, approval: Approval) -> None:
         """Пометить вопрос/approval истёкшим по таймауту (§6.5)."""
         approval.status = ApprovalStatus.EXPIRED
@@ -356,6 +379,15 @@ class TraceRecorder:
         run.tokens_used = tokens_used
         run.cost_usd = cost_usd
         run.heartbeat_at = utcnow()  # lease heartbeat (ADR-0015 §0.5)
+        await self._db.commit()
+
+    async def merge_run_meta(self, run: Run, extra: dict[str, object]) -> None:
+        """Дописать ключи в Run.meta (executor/adapter/agent_session_id, ADR-0016).
+
+        JSON-колонка отслеживает только переприсваивание — мутировать словарь
+        на месте нельзя.
+        """
+        run.meta = {**run.meta, **extra}
         await self._db.commit()
 
     async def finish_run(self, run: Run, state: RunState, *, error: str | None = None) -> None:

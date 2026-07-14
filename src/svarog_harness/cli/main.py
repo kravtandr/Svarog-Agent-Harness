@@ -536,9 +536,19 @@ async def _chat_session(
 ) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
-    backends = await connect_mcp_servers(cfg.mcp, runner.host_store)  # host-скоуп (ADR-0014 #2)
+    external = cfg.executor.type == "external"
+    if external:
+        runner.assert_external_autonomy_supported(autonomy)  # fail-closed (ADR-0016 §6)
+    backends = (
+        [] if external else await connect_mcp_servers(cfg.mcp, runner.host_store)
+    )  # host-скоуп (ADR-0014 #2)
     mcp_tools = build_mcp_tools(backends)
-    environment = runner.build_environment()
+    infra = None
+    if external:
+        infra = runner.build_agent_infra()
+        await infra.start()
+        runner.prepare_agent_launch(infra)
+    environment = runner.build_environment(infra)
     await environment.start()
     try:
 
@@ -575,17 +585,34 @@ async def _chat_session(
                 if not task or task in {"/quit", "/exit"}:
                     break
                 proposal_sink: list[SkillProposalRequest] = []
-                excluded = frozenset(await CuratorStore(db).archived_names())
-                loop = runner.build_loop(
-                    recorder,
-                    environment,
-                    autonomy,
-                    hooks,
-                    proposal_sink,
-                    excluded_skills=excluded,
-                    mcp_tools=mcp_tools,
-                )
-                outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
+                if external:
+                    # Chat поверх agent-сессий (ADR-0016 фаза 3): контекст
+                    # диалога живёт в сессии агента — продолжаем её --resume.
+                    assert infra is not None
+                    control = runner.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+                    agent_session = (
+                        await recorder.last_agent_session(session_id)
+                        if session_id is not None
+                        else None
+                    )
+                    executor = runner.build_external_executor(
+                        recorder, environment, hooks, infra=infra, control=control
+                    )
+                    outcome = await executor.run(
+                        task, autonomy, session_id=session_id, agent_session=agent_session
+                    )
+                else:
+                    excluded = frozenset(await CuratorStore(db).archived_names())
+                    loop = runner.build_loop(
+                        recorder,
+                        environment,
+                        autonomy,
+                        hooks,
+                        proposal_sink,
+                        excluded_skills=excluded,
+                        mcp_tools=mcp_tools,
+                    )
+                    outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await runner.drain_memory(db, hooks)
                 await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 if session_id is None:
@@ -604,6 +631,8 @@ async def _chat_session(
         for backend in backends:
             with contextlib.suppress(Exception):
                 await backend.close()
+        if infra is not None:
+            await infra.stop()
 
 
 def _print_chat_turn(outcome: RunOutcome) -> None:

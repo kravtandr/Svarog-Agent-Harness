@@ -284,6 +284,77 @@ class TenancyConfig(StrictModel):
     jwt_secret_ref: str | None = None
 
 
+class ExternalExecutorConfig(StrictModel):
+    """Внешний агент как data-plane (ADR-0016): адаптер + образ sandbox.
+
+    Два режима аутентификации (ADR-0016 §3):
+
+    * `api-key` — ключ провайдера (`api_key_ref`) инжектируется НА LLM-прокси
+      (host-side): в sandbox значение не попадает никогда, агент получает
+      per-run токен bridge вместо ключа. Прокси в inject-режиме.
+    * `subscription` — подписка Claude (Pro/Max) через долгоживущий OAuth-токен
+      `claude setup-token` (`oauth_token_ref`). Токен передаётся агенту как
+      `CLAUDE_CODE_OAUTH_TOKEN`, Claude Code сам добавляет OAuth-заголовки, а
+      прокси работает pass-through (не инжектит, не срезает auth) — но
+      по-прежнему считает usage и держит бюджет. Trade-off: OAuth-токен
+      доступен коду в sandbox (он scoped на эту подписку). Только claude-code.
+    """
+
+    adapter: Literal["claude-code", "codex", "opencode"] = "claude-code"
+    # Образ sandbox с установленным агентом; версия агента пинится тегом
+    # (ADR-0016 §8 — дрейф CLI-контрактов).
+    image: str
+    auth: Literal["api-key", "subscription"] = "api-key"
+    api_key_ref: str | None = None
+    # Имя секрета с OAuth-токеном подписки (claude setup-token) — для
+    # auth='subscription'. В sandbox уходит как CLAUDE_CODE_OAUTH_TOKEN.
+    oauth_token_ref: str | None = None
+    # Upstream-endpoint провайдера агента; LLM-трафик идёт агент → bridge →
+    # сюда (§3). Для локальных моделей — свой OpenAI-совместимый URL.
+    base_url: str = "https://api.anthropic.com"
+    # Образ relay-sidecar'а (internal-сеть → bridge, §2): нужен python3.
+    relay_image: str = "python:3.12-slim"
+    # Цены за миллион токенов — для cost-бюджета на прокси; 0 = не считаем.
+    input_usd_per_mtok: float = Field(default=0.0, ge=0)
+    output_usd_per_mtok: float = Field(default=0.0, ge=0)
+    # Wall-clock лимит целого прогона агента (не одной команды, как
+    # sandbox.timeout_sec): по истечении процесс убивается, run → failed.
+    timeout_sec: int = Field(default=3600, gt=0)
+    # Tier 2 (ADR-0016 §6): cooperative подключает hook-мост Policy Engine
+    # (managed-настройки + PreToolUse → bridge). containment — только периметр.
+    enforcement: Literal["containment", "cooperative"] = "containment"
+    # Grace-ожидание решения человека до suspend всего run (§7).
+    approval_grace_sec: int = Field(default=120, gt=0)
+
+    @model_validator(mode="after")
+    def _check_auth(self) -> Self:
+        if self.auth == "subscription":
+            if self.adapter != "claude-code":
+                raise ValueError(
+                    "auth='subscription' поддерживается только адаптером claude-code "
+                    "(OAuth-подписка — механизм Claude Code)"
+                )
+            if self.oauth_token_ref is None:
+                raise ValueError(
+                    "auth='subscription' требует oauth_token_ref — имя секрета с токеном "
+                    "`claude setup-token` (ADR-0016 §3)"
+                )
+        return self
+
+
+class ExecutorConfig(StrictModel):
+    """Выбор data-plane (ADR-0016): нативный AgentLoop или внешний агент."""
+
+    type: Literal["native", "external"] = "native"
+    external: ExternalExecutorConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_external_section(self) -> Self:
+        if self.type == "external" and self.external is None:
+            raise ValueError("executor.type='external' требует секцию executor.external")
+        return self
+
+
 class SvarogConfig(BaseSettings):
     """Корень конфигурации: merge user- и project-уровней + env-переменные.
 
@@ -313,6 +384,7 @@ class SvarogConfig(BaseSettings):
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
 
     @classmethod
     def settings_customise_sources(

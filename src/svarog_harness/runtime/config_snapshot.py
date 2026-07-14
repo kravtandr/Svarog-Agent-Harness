@@ -68,6 +68,20 @@ def effective_config_snapshot(cfg: SvarogConfig, workspace: Path) -> dict[str, o
             "rules": rules,
         },
         "secrets_refs": sorted(cfg.secrets.inject),
+        # Data-plane run'а (ADR-0016): подмена native↔external или адаптера/образа
+        # между стартом и resume — изменение исполняющей стороны, fail-closed.
+        "executor": {
+            "type": cfg.executor.type,
+            "external": None
+            if cfg.executor.external is None
+            else {
+                "adapter": cfg.executor.external.adapter,
+                "image": cfg.executor.external.image,
+                "auth": cfg.executor.external.auth,
+                "api_key_ref": cfg.executor.external.api_key_ref,
+                "oauth_token_ref": cfg.executor.external.oauth_token_ref,
+            },
+        },
     }
 
 

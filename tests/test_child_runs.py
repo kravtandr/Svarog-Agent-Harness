@@ -19,6 +19,8 @@ from svarog_harness.llm.provider import (
     Usage,
 )
 from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
+from svarog_harness.runtime.executor import AgentLaunch
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.storage.models import Run, RunState, ToolCall
 from svarog_harness.tools.base import ToolError
@@ -265,3 +267,177 @@ async def test_child_budget_clamped_down_and_worktree_kept_on_suspend(
     assert "suspended" in spawn_call.error
     assert "worktree сохранён" in spawn_call.error
     assert child.workspace is not None and Path(child.workspace).is_dir()
+
+
+# --- Делегация внешнему агенту (ADR-0016 фаза 3.5) --------------------------
+
+
+class _ScriptAgent(ClaudeCodeAdapter):
+    """Парсер настоящий (claude-code); команда — локальный скрипт-агент."""
+
+    def __init__(self, argv: list[str]) -> None:
+        super().__init__()
+        self._argv = argv
+
+    def command(self, launch: AgentLaunch) -> list[str]:
+        return list(self._argv)
+
+
+def _external_agent_script(tmp_path: Path) -> list[str]:
+    """Скрипт-агент: создаёт файл в cwd (worktree ребёнка) и печатает стрим."""
+    import json as _json
+    import sys as _sys
+
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "sess-d1"},
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "пишу файл"}]},
+            "session_id": "sess-d1",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "agent.txt создан внешним агентом",
+            "num_turns": 2,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 50, "output_tokens": 20},
+            "session_id": "sess-d1",
+        },
+    ]
+    script = tmp_path / "fake_external_agent.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        'pathlib.Path("agent.txt").write_text("от внешнего агента", encoding="utf-8")\n'
+        f"for obj in json.loads({_json.dumps(_json.dumps(events, ensure_ascii=False))}):\n"
+        "    print(json.dumps(obj, ensure_ascii=False))\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    return [_sys.executable, str(script)]
+
+
+async def test_delegate_child_to_external_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Нативный цикл — оркестратор, внешний агент — исполнитель подзадачи."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _make_workspace(tmp_path, extra_yaml="executor:\n  external:\n    image: img:1\n")
+    _patch_provider(
+        monkeypatch,
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="p1",
+                    name="spawn_child_run",
+                    arguments_json='{"task": "сделай agent.txt", "executor": "external"}',
+                )
+            ),
+            _final("родитель готов"),
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator, "adapter_for", lambda cfg: _ScriptAgent(_external_agent_script(tmp_path))
+    )
+    # Fail-closed гейт docker-only тестируется отдельно; здесь исполняем локально.
+    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    outcome = await runner.run_once("делегируй", AutonomyMode.YOLO, hooks=RunHooks())
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "родитель готов"
+
+    async def fetch(db: AsyncSession) -> tuple[list[Run], list[ToolCall]]:
+        runs = list((await db.execute(select(Run).order_by(Run.created_at))).scalars())
+        calls = list((await db.execute(select(ToolCall))).scalars())
+        return runs, calls
+
+    runs, calls = await runner.with_db(fetch)
+    parent = next(r for r in runs if r.parent_run_id is None)
+    child = next(r for r in runs if r.parent_run_id is not None)
+    # Ребёнок — внешний run со ссылкой на родителя, trace един.
+    assert child.parent_run_id == parent.id
+    assert child.state is RunState.COMPLETED
+    assert child.meta["executor"] == "external"
+    assert child.meta["adapter"] == "claude-code"
+    assert child.meta["agent_session_id"] == "sess-d1"
+    assert child.tokens_used == 70
+    # Работа агента — на ветке ребёнка (host-flow commit), worktree убран.
+    assert child.workspace is not None and not Path(child.workspace).exists()
+    branches = _git(ws, "branch", "--list", "svarog/child-*")
+    branch = branches.strip().lstrip("* ").strip()
+    assert _git(ws, "show", f"{branch}:agent.txt") == "от внешнего агента"
+    # Результат ребёнка вернулся родителю tool-результатом.
+    spawn_call = next(c for c in calls if c.tool_name == "spawn_child_run")
+    assert "agent.txt создан внешним агентом" in spawn_call.result["output"]
+
+
+async def test_delegate_requires_external_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без executor.external делегация — tool-ошибка, родитель продолжает."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _make_workspace(tmp_path)
+    _patch_provider(
+        monkeypatch,
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="p1",
+                    name="spawn_child_run",
+                    arguments_json='{"task": "подзадача", "executor": "external"}',
+                )
+            ),
+            _final("сделаю сам"),
+        ],
+    )
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    outcome = await runner.run_once("делегируй", AutonomyMode.YOLO, hooks=RunHooks())
+    assert outcome.state is RunState.COMPLETED
+
+    async def fetch(db: AsyncSession) -> ToolCall:
+        calls = list((await db.execute(select(ToolCall))).scalars())
+        return next(c for c in calls if c.tool_name == "spawn_child_run")
+
+    spawn_call = await runner.with_db(fetch)
+    assert spawn_call.error is not None
+    assert "executor.external" in spawn_call.error
+    # Worktree не создавался — проверка конфига идёт до него.
+    assert not (ws.parent / ".worktrees").exists()
+
+
+async def test_delegate_fail_closed_without_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """local-trusted + делегация: fail-closed гейт возвращается tool-ошибкой,
+    свежесозданный worktree убирается."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = _make_workspace(tmp_path, extra_yaml="executor:\n  external:\n    image: img:1\n")
+    _patch_provider(
+        monkeypatch,
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="p1",
+                    name="spawn_child_run",
+                    arguments_json='{"task": "подзадача", "executor": "external"}',
+                )
+            ),
+            _final("сделаю сам"),
+        ],
+    )
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    outcome = await runner.run_once("делегируй", AutonomyMode.YOLO, hooks=RunHooks())
+    assert outcome.state is RunState.COMPLETED
+
+    async def fetch(db: AsyncSession) -> ToolCall:
+        calls = list((await db.execute(select(ToolCall))).scalars())
+        return next(c for c in calls if c.tool_name == "spawn_child_run")
+
+    spawn_call = await runner.with_db(fetch)
+    assert spawn_call.error is not None
+    assert "docker" in spawn_call.error
+    leftovers = (
+        list((ws.parent / ".worktrees").glob("*")) if (ws.parent / ".worktrees").exists() else []
+    )
+    assert leftovers == []

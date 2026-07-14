@@ -80,9 +80,25 @@ class PolicyEngine:
 
     def evaluate(self, tool: Tool[Any], arguments: dict[str, Any]) -> PolicyDecision:
         """Решение для вызова tool с данными аргументами."""
-        action_type = tool.action_type or tool.name
-        risk = tool.risk_level
-        path = str(arguments.get("path", ""))
+        return self._evaluate_call(tool.action_type or tool.name, tool.risk_level, arguments)
+
+    def evaluate_agent_tool(
+        self, action_type: str, arguments: dict[str, Any], *, risk: RiskLevel = RiskLevel.HIGH
+    ) -> PolicyDecision:
+        """Инструмент внешнего агента без Tool-инстанса (ADR-0016 §6).
+
+        Hook-мост bridge прогоняет каждый вызов инструмента агента через
+        ТОТ ЖЕ конвейер, что нативные tools: skills-deny, deny-правила
+        проекта, bash-эвристики, критический набор, риск × автономия.
+        Незнакомый инструмент — fail-closed HIGH.
+        """
+        return self._evaluate_call(action_type, risk, arguments)
+
+    def _evaluate_call(
+        self, action_type: str, risk: RiskLevel, arguments: dict[str, Any]
+    ) -> PolicyDecision:
+        # file_path — имя аргумента файловых инструментов внешних агентов.
+        path = str(arguments.get("path", "") or arguments.get("file_path", ""))
 
         # 1. Встроенный deny: прямые изменения skills — только через proposals (Flow B).
         if action_type in _FILE_WRITE_ACTIONS and self._path_in_skills(path):
