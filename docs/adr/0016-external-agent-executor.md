@@ -333,10 +333,12 @@ tier 2 — адаптер без hook-моста (`capabilities().hooks == False
   событии стрима; cancel/suspend → `docker stop`;
   `recover_interrupted_runs` по протухшему heartbeat находит упавший run,
   а agent-state volume (§5) даёт материал для resume.
-* **Дрейф CLI-контрактов:** версия агента пинится в образе sandbox;
-  на каждый адаптер — golden-JSONL contract-тесты (записанные фикстуры
-  стрима, без сети); `svarog doctor` проверяет, что версия агента в
-  образе входит в поддерживаемый адаптером диапазон.
+* **Дрейф CLI-контрактов:** версия агента в образе sandbox **намеренно не
+  пинится** — образ (`docker/agent-claude/`) всегда тянет свежий CLI. Защита
+  от дрейфа — не пиннинг, а golden-JSONL contract-тесты на каждый адаптер
+  (записанные фикстуры стрима, без сети): при смене stream-формата/флагов они
+  краснеют и адаптер подтягивается. `svarog doctor` дополнительно проверяет
+  наличие/работоспособность CLI в образе.
 * Verifier (§6.11) не меняется: после завершения — тесты/линтеры/secret
   scan рабочего дерева, приоритет над самооценкой агента; exit code 4.
 * Refuel Svarog для external-executor выключен (у агентов своя
@@ -379,7 +381,7 @@ executor:
   type: native            # native | external; default native
   external:
     adapter: claude-code   # claude-code | codex | opencode
-    image: svarog/agent-claude:1.2.3    # версия агента пинится тегом
+    image: svarog/agent-claude:latest   # docker/agent-claude/ — CLI всегда свежий
     auth: api-key                       # api-key | subscription
     api_key_ref: CLAUDE_CODE_KEY        # секрет → инжекция НА ПРОКСИ (§3)
     enforcement: cooperative            # containment | cooperative
@@ -403,7 +405,7 @@ volume и метеринг прокси — per-tenant.
 | Hook-planting в `.git` workspace | уже закрыто host-git hardening'ом ADR-0015 §0.2 (§2) |
 | Bridge-socket как поверхность атаки | даёт не больше нативных tools; policy + provenance + rate-limit (§4) |
 | Мегабайтные tool_result во trace | персистенция больших результатов ADR-0015 §1.2 (§8) |
-| Дрейф stream-формата/флагов CLI | пин версии в образе + golden-JSONL тесты + doctor-gate (§8) |
+| Дрейф stream-формата/флагов CLI | golden-JSONL contract-тесты + doctor-gate (§8); CLI намеренно не пиннится (всегда свежий) |
 | Supervised без hook-поддержки | fail-closed отказ по capabilities (§6) |
 | Exfiltration в тело LLM-запроса | принципиально не закрывается; сужен до аккаунта провайдера (§3) |
 
