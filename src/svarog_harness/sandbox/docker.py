@@ -68,6 +68,8 @@ class DockerEnvironment(ExecutionEnvironment):
         *,
         skills_dir: Path | None = None,
         env: dict[str, str] | None = None,
+        network: str | None = None,
+        extra_mounts: list[tuple[Path, str, bool]] | None = None,
     ) -> None:
         self.workspace = workspace
         self._cfg = cfg
@@ -75,6 +77,12 @@ class DockerEnvironment(ExecutionEnvironment):
         # Явно выданные секреты в окружение контейнера (ADR-0006); слой 1 не даёт
         # им утечь по сети (--network none) — контейнер изолирован.
         self._env = env or {}
+        # ADR-0016 §2: для внешнего агента вместо "none" — internal-only сеть,
+        # где единственный сосед — relay к bridge-серверу Svarog.
+        self._network = network or "none"
+        # (host_path, container_path, read_only): agent-state volume (§5),
+        # managed policy и hook-скрипт (§6) — только явные mounts.
+        self._extra_mounts = extra_mounts or []
         self._name = f"svarog-{uuid.uuid4().hex[:12]}"
         self._docker: str | None = None
         self._container_id: str | None = None
@@ -88,9 +96,10 @@ class DockerEnvironment(ExecutionEnvironment):
             self._name,
             "--label",
             "svarog-agent=1",
-            # Слой 1 (ADR-0002): сеть выключена; allowlist — пост-MVP.
+            # Слой 1 (ADR-0002): по умолчанию сеть выключена; для внешнего
+            # агента (ADR-0016 §2) — internal-only сеть с relay к bridge.
             "--network",
-            "none",
+            self._network,
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -118,6 +127,9 @@ class DockerEnvironment(ExecutionEnvironment):
             args += ["--user", user]
         if self._skills_dir is not None:
             args += ["-v", f"{self._skills_dir}:/skills:ro"]
+        for host_path, container_path, read_only in self._extra_mounts:
+            suffix = ":ro" if read_only else ":rw"
+            args += ["-v", f"{host_path}:{container_path}{suffix}"]
         args += [self._cfg.image, "sleep", "infinity"]
         return args
 
@@ -204,6 +216,15 @@ class DockerEnvironment(ExecutionEnvironment):
             with contextlib.suppress(asyncio.CancelledError):
                 await stderr_task
             return ExecResult(exit_code=124, stdout="", stderr="", timed_out=True)
+        except asyncio.CancelledError:
+            # Suspend (ADR-0016 §7): docker-exec клиент убивается сразу;
+            # процесс в контейнере добьёт cleanup (`rm -f`) в finally run'а.
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            raise
         exit_code = proc.returncode or 0
         return ExecResult(
             exit_code=exit_code,
