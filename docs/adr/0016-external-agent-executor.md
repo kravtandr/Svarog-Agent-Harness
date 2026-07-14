@@ -21,9 +21,10 @@
 
 **Не покрыто (следующие итерации):** subscription/OAuth-режим прокси
 (§3, реализован только api-key); refuel-supervisor для внешних runs в
-gateway; `svarog doctor`-гейт версии агента в образе; e2e-прогон с реальным
-Claude Code в docker (проверено контрактными тестами и скриптовыми
-агентами — реальный контейнерный прогон требует стенда с docker).
+gateway; `svarog doctor`-гейт версии агента в образе; прогон с настоящим
+бинарём Claude Code (нужен образ с агентом и подписка). Контейнерная
+топология §2-§4 проверена живым docker-e2e (`tests/test_external_docker.py`):
+internal-сеть + relay + bridge/MCP из контейнера + auto-commit + cleanup.
 
 ## Контекст
 
