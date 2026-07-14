@@ -147,6 +147,24 @@ def test_external_type_requires_section() -> None:
         ExecutorConfig(type="external")
 
 
+def test_subscription_requires_oauth_ref() -> None:
+    with pytest.raises(ValidationError, match="oauth_token_ref"):
+        ExternalExecutorConfig(image="img:1", auth="subscription")
+
+
+def test_subscription_only_claude_code() -> None:
+    with pytest.raises(ValidationError, match="claude-code"):
+        ExternalExecutorConfig(
+            image="img:1", adapter="codex", auth="subscription", oauth_token_ref="TOK"
+        )
+
+
+def test_subscription_valid_config() -> None:
+    cfg = ExternalExecutorConfig(image="img:1", auth="subscription", oauth_token_ref="CLAUDE_OAUTH")
+    assert cfg.auth == "subscription"
+    assert cfg.api_key_ref is None
+
+
 def test_adapter_registry() -> None:
     adapter = adapter_for(ExternalExecutorConfig(image="img:1"))
     assert adapter.name == "claude-code"

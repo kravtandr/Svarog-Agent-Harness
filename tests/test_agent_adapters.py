@@ -5,7 +5,7 @@ import json
 
 from svarog_harness.config.schema import ExternalExecutorConfig
 from svarog_harness.runtime.agents import CodexAdapter, OpencodeAdapter, adapter_for
-from svarog_harness.runtime.executor import AgentLaunch
+from svarog_harness.runtime.executor import AgentAuth, AgentLaunch
 
 # --- Codex -------------------------------------------------------------------
 
@@ -184,6 +184,30 @@ def test_opencode_command_and_resume() -> None:
 
 
 # --- Матрица capabilities (§1/§6) ---------------------------------------------
+
+
+def test_claude_subscription_env() -> None:
+    from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
+
+    adapter = ClaudeCodeAdapter()
+    api = adapter.base_url_env(
+        AgentAuth(base_url="http://bridge:8080", proxy_token="run-tok", mode="api-key")
+    )
+    assert api["ANTHROPIC_API_KEY"] == "run-tok"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in api
+
+    sub = adapter.base_url_env(
+        AgentAuth(
+            base_url="http://bridge:8080",
+            proxy_token="run-tok",
+            mode="subscription",
+            credential="sk-ant-oat01-real",
+        )
+    )
+    assert sub["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-real"
+    # ANTHROPIC_API_KEY НЕ ставится — иначе перебил бы OAuth (precedence).
+    assert "ANTHROPIC_API_KEY" not in sub
+    assert sub["ANTHROPIC_BASE_URL"] == "http://bridge:8080"
 
 
 def test_capability_matrix() -> None:

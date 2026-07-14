@@ -70,6 +70,21 @@ class AdapterCapabilities:
 
 
 @dataclass(frozen=True)
+class AgentAuth:
+    """Как агент аутентифицируется к LLM-прокси Svarog (ADR-0016 §3).
+
+    api-key: агент шлёт per-run токен bridge (`proxy_token`), прокси меняет
+    его на ключ провайдера host-side. subscription: агент аутентифицируется
+    своим OAuth-токеном подписки (`credential`), прокси pass-through.
+    """
+
+    base_url: str
+    proxy_token: str
+    mode: str = "api-key"  # api-key | subscription
+    credential: str = ""  # subscription: OAuth-токен подписки
+
+
+@dataclass(frozen=True)
 class AgentLaunch:
     """Параметры одного headless-запуска агента.
 
@@ -117,11 +132,12 @@ class AgentAdapter(Protocol):
         """
         ...
 
-    def base_url_env(self, base_url: str, api_key: str) -> dict[str, str]:
+    def base_url_env(self, auth: AgentAuth) -> dict[str, str]:
         """Env, направляющий агента на LLM-прокси Svarog (ADR-0016 §3).
 
-        api_key — per-run токен bridge, НЕ ключ провайдера: прокси меняет
-        его на настоящий ключ host-side.
+        В api-key режиме `auth.proxy_token` — per-run токен bridge (прокси
+        меняет его на ключ host-side); в subscription — `auth.credential`
+        отдаётся агенту как его OAuth-токен подписки.
         """
         ...
 

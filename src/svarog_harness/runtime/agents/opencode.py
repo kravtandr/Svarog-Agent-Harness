@@ -12,7 +12,12 @@ import json
 from pathlib import PurePosixPath
 from typing import Any
 
-from svarog_harness.runtime.executor import AdapterCapabilities, AgentEvent, AgentLaunch
+from svarog_harness.runtime.executor import (
+    AdapterCapabilities,
+    AgentAuth,
+    AgentEvent,
+    AgentLaunch,
+)
 
 # Домашний каталог контейнера (docker.py: HOME=/tmp/home): OpenCode держит
 # конфиг в ~/.config/opencode, состояние в ~/.local/share/opencode —
@@ -43,12 +48,13 @@ class OpencodeAdapter:
             argv += ["--session", launch.session]
         return argv
 
-    def base_url_env(self, base_url: str, api_key: str) -> dict[str, str]:
+    def base_url_env(self, auth: AgentAuth) -> dict[str, str]:
         # Провайдер задаётся конфигом OpenCode в образе/стейте; для
         # OpenAI-совместимого провайдера направляем на bridge (§3).
+        # subscription не поддержан — только api-key (валидатор конфига).
         return {
-            "OPENAI_BASE_URL": base_url + "/v1",
-            "OPENAI_API_KEY": api_key,
+            "OPENAI_BASE_URL": auth.base_url + "/v1",
+            "OPENAI_API_KEY": auth.proxy_token,
         }
 
     def state_dir(self) -> PurePosixPath:

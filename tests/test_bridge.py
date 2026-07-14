@@ -113,12 +113,15 @@ def _bridge(
     upstream_url: str,
     *,
     api_key: str | None = "real-provider-key",
+    expected_bearer: str | None = None,
     max_tokens: int = 1_000_000,
     handlers: dict[str, Any] | None = None,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> RunBridge:
     return RunBridge(
-        upstream=UpstreamConfig(base_url=upstream_url, api_key=api_key),
+        upstream=UpstreamConfig(
+            base_url=upstream_url, api_key=api_key, expected_bearer=expected_bearer
+        ),
         budget=BridgeBudget(max_tokens=max_tokens, max_cost_usd=100.0),
         loop=loop or asyncio.get_event_loop_policy().new_event_loop(),
         control_handlers=handlers or {},
@@ -201,6 +204,81 @@ async def test_proxy_budget_enforcement(upstream: _Upstream) -> None:
         assert first.status_code == 200  # 125 токенов — уже сверх 110
         assert second.status_code == 429  # enforcement, а не кооперация
         assert bridge.usage.budget_exceeded
+    finally:
+        bridge.stop()
+
+
+async def test_subscription_passthrough_forwards_agent_auth(upstream: _Upstream) -> None:
+    """subscription: OAuth-токен агента форвардится как есть, ключ не инжектится,
+    usage считается, а bridge авторизует LLM-путь сверкой с токеном (§3)."""
+    oauth = "sk-ant-oat01-fake-subscription-token"
+    bridge = _bridge(
+        upstream.url, api_key=None, expected_bearer=oauth, loop=asyncio.get_running_loop()
+    )
+    assert bridge.upstream.passthrough
+    bridge.start()
+    try:
+        async with httpx.AsyncClient() as client:
+            # Агент шлёт свой OAuth-токен (+ beta-заголовок, добавленный Claude Code).
+            ok = await client.post(
+                f"{bridge.local_url()}/v1/messages",
+                headers={
+                    "Authorization": f"Bearer {oauth}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+                json={"model": "m", "messages": []},
+            )
+            # Неверный токен — 401, до провайдера не доходит.
+            bad = await client.post(
+                f"{bridge.local_url()}/v1/messages",
+                headers={"Authorization": "Bearer wrong"},
+                json={},
+            )
+        assert ok.status_code == 200
+        assert bad.status_code == 401
+        seen = upstream.seen_headers[-1]
+        # OAuth-токен и beta-заголовок агента дошли до провайдера БЕЗ подмены;
+        # ключ провайдера не инжектировался (его в subscription-режиме нет).
+        assert seen["authorization"] == f"Bearer {oauth}"
+        assert seen["anthropic-beta"] == "oauth-2025-04-20"
+        assert "x-api-key" not in seen
+        # Метеринг работает и в pass-through.
+        assert bridge.usage.output_tokens == 25
+        assert len(upstream.seen_headers) == 1  # bad-запрос до провайдера не дошёл
+    finally:
+        bridge.stop()
+
+
+async def test_subscription_control_still_needs_run_token(upstream: _Upstream) -> None:
+    """Control-endpoints требуют per-run токен даже в subscription-режиме."""
+    oauth = "sk-ant-oat01-fake"
+
+    async def echo(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    bridge = _bridge(
+        upstream.url,
+        api_key=None,
+        expected_bearer=oauth,
+        handlers={"echo": echo},
+        loop=asyncio.get_running_loop(),
+    )
+    bridge.start()
+    try:
+        async with httpx.AsyncClient() as client:
+            # OAuth-токен подписки НЕ даёт доступа к control-плоскости.
+            with_oauth = await client.post(
+                f"{bridge.local_url()}/svarog/echo",
+                headers={"Authorization": f"Bearer {oauth}"},
+                json={},
+            )
+            with_run_token = await client.post(
+                f"{bridge.local_url()}/svarog/echo",
+                headers={"Authorization": f"Bearer {bridge.token}"},
+                json={},
+            )
+        assert with_oauth.status_code == 401
+        assert with_run_token.json() == {"ok": True}
     finally:
         bridge.stop()
 
@@ -483,6 +561,33 @@ async def test_infra_local_mode_lifecycle(tmp_path: Path, monkeypatch: pytest.Mo
     finally:
         await infra.stop()
     assert not Path(infra.mcp_config_path).exists()  # launch-файлы одноразовые
+
+
+async def test_infra_subscription_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_OAUTH", "sk-ant-oat01-real-subscription")
+    cfg = ExternalExecutorConfig(image="img:1", auth="subscription", oauth_token_ref="CLAUDE_OAUTH")
+    infra = ExternalAgentInfra(
+        cfg,
+        RuntimeConfig(),
+        ClaudeCodeAdapter(),
+        EnvSecretStore(),
+        state_root=tmp_path / ".svarog",
+        docker_mode=False,
+    )
+    await infra.start()
+    try:
+        assert infra.bridge is not None
+        # Прокси в pass-through: ключа провайдера нет, ожидаемый Bearer = токен.
+        assert infra.bridge.upstream.passthrough
+        assert infra.bridge.upstream.api_key is None
+        assert infra.bridge.upstream.expected_bearer == "sk-ant-oat01-real-subscription"
+        env = infra.agent_env()
+        # Агент получает OAuth-токен подписки; ANTHROPIC_API_KEY НЕ ставится.
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-real-subscription"
+        assert "ANTHROPIC_API_KEY" not in env
+        assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    finally:
+        await infra.stop()
 
 
 async def test_infra_missing_api_key_fail_closed(tmp_path: Path) -> None:
