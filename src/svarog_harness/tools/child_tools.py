@@ -13,6 +13,7 @@ spawn_child_run — глубина дерева ограничена одним 
 """
 
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +38,14 @@ class SpawnChildRunArgs(BaseModel):
     )
     max_cost_usd: float | None = Field(
         default=None, gt=0, description="Бюджет стоимости ребёнка (клампится вниз к родительскому)"
+    )
+    executor: Literal["native", "external"] = Field(
+        default="native",
+        description=(
+            "Исполнитель подзадачи: native — вложенный agent loop; external — "
+            "делегировать внешнему кодинг-агенту (ADR-0016 фаза 3.5; доступно "
+            "только если в конфиге настроен executor.external, иначе tool-ошибка)"
+        ),
     )
 
 
