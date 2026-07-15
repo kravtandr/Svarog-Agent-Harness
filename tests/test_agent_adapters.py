@@ -4,7 +4,12 @@
 import json
 
 from svarog_harness.config.schema import ExternalExecutorConfig
-from svarog_harness.runtime.agents import CodexAdapter, OpencodeAdapter, adapter_for
+from svarog_harness.runtime.agents import (
+    CLIENT_GATE_TIMEOUT_MARGIN_SEC,
+    CodexAdapter,
+    OpencodeAdapter,
+    adapter_for,
+)
 from svarog_harness.runtime.executor import AgentAuth, AgentLaunch
 
 # --- Codex -------------------------------------------------------------------
@@ -240,3 +245,14 @@ def test_capability_matrix() -> None:
     assert all(a.capabilities().resume for a in (claude, codex, opencode))
     assert claude.wire_format == "anthropic"
     assert codex.wire_format == "openai" and opencode.wire_format == "openai"
+
+
+def test_claude_hook_timeout_exceeds_grace() -> None:
+    # Клиентский лимит PreToolUse-хука обязан переживать grace-ожидание
+    # approval (§7), иначе хук умирает раньше suspend и гейт не срабатывает.
+    cfg = ExternalExecutorConfig(image="i", adapter="claude-code", approval_grace_sec=900)
+    adapter = adapter_for(cfg)
+    managed = json.loads(adapter.managed_policy(None, "python3 /run/svarog/hook.py") or "{}")
+    hook = managed["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["timeout"] == 900 + CLIENT_GATE_TIMEOUT_MARGIN_SEC
+    assert hook["timeout"] > cfg.approval_grace_sec

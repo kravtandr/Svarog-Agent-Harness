@@ -16,6 +16,7 @@ from pathlib import Path
 
 from svarog_harness.config.schema import ExternalExecutorConfig, RuntimeConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError
+from svarog_harness.runtime.agents import CLIENT_GATE_TIMEOUT_MARGIN_SEC
 from svarog_harness.runtime.bridge import (
     BridgeBudget,
     ControlHandler,
@@ -231,6 +232,11 @@ class ExternalAgentInfra:
         # (§6) и любой адаптер без специфичных env.
         env.setdefault("SVAROG_BRIDGE_URL", self.agent_base_url())
         env.setdefault("SVAROG_BRIDGE_TOKEN", self.bridge.token)
+        # Клиентские таймауты человеческих гейтов (§7) — дольше grace, иначе
+        # клиент агента бросает вызов до suspend и run завершается completed.
+        gate_sec = self._external_cfg.approval_grace_sec + CLIENT_GATE_TIMEOUT_MARGIN_SEC
+        env.setdefault("SVAROG_HOOK_TIMEOUT", str(gate_sec))
+        env.setdefault("MCP_TOOL_TIMEOUT", str(gate_sec * 1000))  # Claude Code ждёт мс
         return env
 
     @property

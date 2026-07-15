@@ -536,6 +536,10 @@ async def _chat_session(
 ) -> None:
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
+    if sys.stdin.isatty():
+        # Живой промпт approval/ask_user прямо в чате (§7): решение уходит в
+        # БД, гейт продолжает агента без suspend/resume.
+        hooks.on_approval_requested = lambda approval: _prompt_gate_decision(cfg, approval)
     external = cfg.executor.type == "external"
     if external:
         runner.assert_external_autonomy_supported(autonomy)  # fail-closed (ADR-0016 §6)
@@ -709,6 +713,46 @@ def _show_approval(approval: Approval) -> None:
         console.print(f"  причина: {payload['reason']}")
 
 
+def _record_decision(
+    cfg: SvarogConfig, approval_id: str, *, approved: bool, reason: str | None, decided_by: str
+) -> None:
+    """Записать решение approval собственной короткой DB-сессией."""
+
+    async def decide(db: AsyncSession) -> None:
+        recorder = TraceRecorder(db)
+        found = await recorder.find_approval_by_prefix(approval_id)
+        await recorder.decide_approval(
+            found, approved=approved, decided_by=decided_by, reason=reason
+        )
+
+    asyncio.run(_with_db(cfg, decide))
+
+
+def _confirm_approval(cfg: SvarogConfig, approval: Approval, *, decided_by: str) -> None:
+    """Показать действие и записать вердикт человека из терминала."""
+    _show_approval(approval)
+    approved = typer.confirm("одобрить действие?", default=False)
+    reason = None
+    if not approved:
+        reason = typer.prompt("причина отказа", default="", show_default=False) or None
+    _record_decision(cfg, approval.id, approved=approved, reason=reason, decided_by=decided_by)
+
+
+def _prompt_gate_decision(cfg: SvarogConfig, approval: Approval) -> None:
+    """Живой промпт гейта прямо в chat (§7) — как permission-prompt Claude Code.
+
+    Вызывается bridge'ом в worker-потоке во время grace-ожидания: блокирующий
+    stdin здесь допустим, решение пишется в БД той же механикой, что у
+    `svarog approvals` из второго терминала, — poll гейта подхватит его и
+    агент продолжит без suspend/resume.
+    """
+    console.print()
+    if approval.action_type == "user.question":
+        _answer_question_interactive(cfg, approval)
+        return
+    _confirm_approval(cfg, approval, decided_by="chat")
+
+
 def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome:
     """Промпт решения прямо в терминале, затем resume — пока run не завершится.
 
@@ -729,25 +773,7 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
             if approval.action_type == "user.question":
                 _answer_question_interactive(cfg, approval)
                 continue
-            _show_approval(approval)
-            approved = typer.confirm("одобрить действие?", default=False)
-            reason = None
-            if not approved:
-                reason = typer.prompt("причина отказа", default="", show_default=False) or None
-
-            async def decide(
-                db: AsyncSession,
-                approval_id: str = approval.id,
-                verdict: bool = approved,
-                why: str | None = reason,
-            ) -> None:
-                recorder = TraceRecorder(db)
-                found = await recorder.find_approval_by_prefix(approval_id)
-                await recorder.decide_approval(
-                    found, approved=verdict, decided_by="cli", reason=why
-                )
-
-            asyncio.run(_with_db(cfg, decide))
+            _confirm_approval(cfg, approval, decided_by="cli")
         outcome = asyncio.run(_resume_task(cfg, outcome.run_id, _console_hooks()))
     return outcome
 
