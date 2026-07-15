@@ -22,6 +22,7 @@ approval.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import uuid
@@ -94,6 +95,7 @@ class BridgeControl:
         approval_grace_sec: float = 120.0,
         ask_user_timeout_sec: int = 3600,
         on_notify: Callable[[str, str], None] | None = None,
+        on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
     ) -> None:
         self._db_action = db_action
         self._policy = policy
@@ -104,6 +106,9 @@ class BridgeControl:
         self._grace_sec = approval_grace_sec
         self._ask_user_timeout_sec = ask_user_timeout_sec
         self._on_notify = on_notify
+        # Живой промпт решения (§7): интерфейс сам записывает решение в БД,
+        # poll-цикл _human_gate подхватывает его без suspend.
+        self._on_approval_prompt = on_approval_prompt
         self.run_id: str | None = None
         # Suspend-сигнал (§7): executor отменяет стрим и переводит run в
         # waiting_approval; reason — что именно ждём.
@@ -307,15 +312,31 @@ class BridgeControl:
                 return "bridge: run ещё не зарегистрирован", True
             if self._on_notify is not None:
                 self._on_notify("approval.requested", f"{action_type} → {approval.id[:8]}")
+        prompt_task: asyncio.Task[None] | None = None
+        if self._on_approval_prompt is not None:
+            # Fire-and-forget: промпт блокируется на stdin в worker-потоке и
+            # пишет решение в БД сам; здесь его не ждём — poll ниже увидит
+            # решение, а grace-таймаут сработает и при молчании человека.
+            prompt_task = asyncio.ensure_future(self._on_approval_prompt(approval))
         deadline = asyncio.get_running_loop().time() + self._grace_sec
         approval_id = approval.id
-        while asyncio.get_running_loop().time() < deadline:
-            status, reason = await self._approval_status(approval_id)
-            if status is ApprovalStatus.APPROVED:
-                return f"{approved_prefix}{reason or ''}".strip() or "одобрено", False
-            if status is ApprovalStatus.DENIED:
-                return f"отклонено человеком: {reason or 'без причины'}", True
-            await asyncio.sleep(_POLL_INTERVAL_SEC)
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                status, reason = await self._approval_status(approval_id)
+                if status is ApprovalStatus.APPROVED:
+                    return f"{approved_prefix}{reason or ''}".strip() or "одобрено", False
+                if status is ApprovalStatus.DENIED:
+                    return f"отклонено человеком: {reason or 'без причины'}", True
+                await asyncio.sleep(_POLL_INTERVAL_SEC)
+        finally:
+            if prompt_task is not None:
+                # Поток stdin отменой не прервать; cancel лишь отвязывает
+                # task — позднее решение попадёт в decision cache (§7).
+                # Сбой промпта (EOF/закрытый stdin) гейт не роняет: решение
+                # остаётся доступным асинхронно через `svarog approvals`.
+                prompt_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await prompt_task
         # Grace истёк — просим executor приостановить run (§7); агенту
         # возвращаем понятный отказ с маркером.
         self.suspend_reason = f"{pending_reason} (approval {approval_id[:8]})"

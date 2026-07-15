@@ -7,6 +7,7 @@ CLI, gateway (REST/WS) и Telegram гоняют один и тот же end-to-e
 Так gateway не дублирует ядро (repo-structure: `cli`/`gateway` → `runtime`).
 """
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
@@ -60,7 +61,14 @@ from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.locks import LockBackend, default_lock_backend
-from svarog_harness.storage.models import ApprovalStatus, Run, RunState, SkillProposal, utcnow
+from svarog_harness.storage.models import (
+    Approval,
+    ApprovalStatus,
+    Run,
+    RunState,
+    SkillProposal,
+    utcnow,
+)
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.base import ToolError
 from svarog_harness.tools.child_tools import (
@@ -106,6 +114,31 @@ class RunHooks:
     on_commit_blocked: Callable[[str], None] | None = None
     on_memory: Callable[[str | None, str | None], None] | None = None
     on_proposal: Callable[[SkillProposal], None] | None = None
+    # Живой промпт решения approval/ask_user во время гейта (§7): вызывается
+    # в worker-потоке (может блокироваться на stdin) и сам записывает решение
+    # в БД — poll-цикл гейта подхватит его без suspend. None — только notify,
+    # решение асинхронно через `svarog approvals` или suspend→resume.
+    on_approval_requested: Callable[[Approval], None] | None = None
+
+
+def _approval_prompt_async(
+    handler: Callable[[Approval], None] | None,
+) -> Callable[[Approval], Awaitable[None]] | None:
+    """Обернуть блокирующий промпт решения в worker-поток для bridge (§7).
+
+    Промпт читает stdin и пишет решение в БД собственной короткой сессией —
+    как `svarog approvals` из второго терминала, только внутри процесса.
+    """
+    if handler is None:
+        return None
+
+    async def prompt(approval: Approval) -> None:
+        # Best-effort: сбой промпта (EOF stdin, Ctrl+C в prompt) не роняет
+        # гейт — решение остаётся доступным через `svarog approvals`.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(handler, approval)
+
+    return prompt
 
 
 class ConfigDriftError(Exception):
@@ -448,6 +481,7 @@ class TaskRunner:
             approval_grace_sec=float(external.approval_grace_sec),
             ask_user_timeout_sec=cfg.runtime.ask_user_timeout_sec,
             on_notify=hooks.on_notify,
+            on_approval_prompt=_approval_prompt_async(hooks.on_approval_requested),
         )
         assert infra.bridge is not None
         infra.bridge.control_handlers.update(control.handlers())

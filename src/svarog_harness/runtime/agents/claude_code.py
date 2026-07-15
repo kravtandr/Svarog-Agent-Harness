@@ -34,8 +34,12 @@ _MANAGED_SETTINGS = PurePosixPath("/etc/claude-code/managed-settings.json")
 
 
 class ClaudeCodeAdapter:
-    def __init__(self, binary: str = "claude") -> None:
+    def __init__(self, binary: str = "claude", hook_timeout_sec: int | None = None) -> None:
         self._binary = binary
+        # Клиентский лимит PreToolUse-хука. Дефолт Claude Code — 60с: короче
+        # grace-ожидания approval (§7), хук умирает раньше suspend. None —
+        # оставить дефолт CLI (containment-режим без человеческих гейтов).
+        self._hook_timeout_sec = hook_timeout_sec
 
     @property
     def name(self) -> str:
@@ -120,11 +124,10 @@ class ClaudeCodeAdapter:
         if hook_command is not None:
             # PreToolUse → policy-мост Svarog (tier 2, ADR-0016 §6): matcher *
             # — каждый вызов инструмента проходит через bridge /hook.
-            settings["hooks"] = {
-                "PreToolUse": [
-                    {"matcher": "*", "hooks": [{"type": "command", "command": hook_command}]}
-                ]
-            }
+            hook: dict[str, Any] = {"type": "command", "command": hook_command}
+            if self._hook_timeout_sec is not None:
+                hook["timeout"] = self._hook_timeout_sec
+            settings["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [hook]}]}
         return json.dumps(settings, ensure_ascii=False, indent=2)
 
     def managed_policy_path(self) -> PurePosixPath | None:

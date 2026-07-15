@@ -358,6 +358,7 @@ def _control(
     rules: list[PolicyRule] | None = None,
     grace_sec: float = 0.05,
     memory_dir: Path | None = None,
+    on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
 ) -> BridgeControl:
     policy = PolicyEngine(
         autonomy=autonomy,
@@ -372,6 +373,7 @@ def _control(
         skills=[],
         proposal_sink=[],
         approval_grace_sec=grace_sec,
+        on_approval_prompt=on_approval_prompt,
     )
 
 
@@ -488,6 +490,52 @@ async def test_hook_decision_cache_after_resume(db: AsyncSession, tmp_path: Path
     assert "опасно" in decision["reason"]
 
 
+async def test_approval_prompt_resolves_gate_live(db: AsyncSession, tmp_path: Path) -> None:
+    """Живой промпт (§7): колбэк решает approval во время grace — без suspend."""
+    recorder = TraceRecorder(db)
+    prompted: list[Approval] = []
+
+    async def prompt(approval: Approval) -> None:
+        prompted.append(approval)
+        fresh = await recorder.find_approval_by_prefix(approval.id)
+        await recorder.decide_approval(fresh, approved=True, decided_by="chat")
+
+    control = _control(
+        tmp_path, autonomy=AutonomyMode.SUPERVISED, grace_sec=5.0, on_approval_prompt=prompt
+    )
+    control.run_id = await _start_run(db, str(tmp_path))
+    decision = await control.handle_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
+    )
+    assert decision["decision"] == "allow"
+    assert not control.suspend.is_set()
+    assert len(prompted) == 1
+    assert prompted[0].action_type == "bash.exec"
+
+
+async def test_approval_prompt_failure_falls_back_to_grace(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Сбой промпта не роняет гейт: grace дорабатывает и просит suspend."""
+
+    async def broken_prompt(_: Approval) -> None:
+        raise RuntimeError("stdin закрыт")
+
+    control = _control(
+        tmp_path,
+        autonomy=AutonomyMode.SUPERVISED,
+        grace_sec=0.05,
+        on_approval_prompt=broken_prompt,
+    )
+    control.run_id = await _start_run(db, str(tmp_path))
+    decision = await control.handle_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
+    )
+    assert decision["decision"] == "deny"
+    assert "SVAROG-PENDING" in decision["reason"]
+    assert control.suspend.is_set()
+
+
 async def test_ask_user_answered_within_grace(db: AsyncSession, tmp_path: Path) -> None:
     control = _control(tmp_path, grace_sec=5.0)
     run_id = await _start_run(db, str(tmp_path))
@@ -549,6 +597,10 @@ async def test_infra_local_mode_lifecycle(tmp_path: Path, monkeypatch: pytest.Mo
         assert "sk-fake" not in json.dumps(env)
         assert env["ANTHROPIC_API_KEY"] == infra.bridge.token if infra.bridge else False
         assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+        # Клиентские таймауты человеческих гейтов — дольше grace (§7):
+        # клиент не должен бросить вызов до suspend.
+        assert int(env["SVAROG_HOOK_TIMEOUT"]) > cfg.approval_grace_sec
+        assert int(env["MCP_TOOL_TIMEOUT"]) == int(env["SVAROG_HOOK_TIMEOUT"]) * 1000
         # Контекст — в state volume, launch-файлы записаны.
         claude_md = infra.state_dir / "CLAUDE.md"
         assert "память проекта" in claude_md.read_text(encoding="utf-8")
