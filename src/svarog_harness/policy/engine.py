@@ -180,6 +180,18 @@ class PolicyEngine:
             )
             return PolicyDecision(PolicyAction.REQUIRE_APPROVAL, action_type, risk, reason)
 
+        # HIGH-риск в supervised требует approval безусловно — до notify-правил.
+        # Пользовательские rules могут только ужесточать (allow запрещён схемой,
+        # см. scaffold._SECURITY_POLICY), поэтому notify не должен тихо понижать
+        # то, что и так обязано быть require_approval по risk × autonomy.
+        if risk is RiskLevel.HIGH and self._autonomy is AutonomyMode.SUPERVISED:
+            return PolicyDecision(
+                PolicyAction.REQUIRE_APPROVAL,
+                action_type,
+                risk,
+                extra_reason or "high-риск в режиме supervised",
+            )
+
         notify_rule = self._match_rule("notify", action_type, path)
         if notify_rule is not None or self._match_profile("notify", action_type):
             reason = (notify_rule.reason if notify_rule and notify_rule.reason else None) or (
@@ -188,7 +200,9 @@ class PolicyEngine:
             return PolicyDecision(PolicyAction.NOTIFY, action_type, risk, reason)
 
         # MCP-инструменты по умолчанию требуют approval, пока администратор не
-        # ослабит их профилем/правилом notify (§9); risk остаётся high.
+        # ослабит их профилем/правилом notify (§9); risk остаётся high. Ветка
+        # HIGH×supervised выше уже перехватила supervised-случай — здесь
+        # остаются non-supervised режимы, где это осмысленное ослабление.
         if action_type.startswith("mcp."):
             return PolicyDecision(
                 PolicyAction.REQUIRE_APPROVAL,
@@ -198,13 +212,6 @@ class PolicyEngine:
             )
 
         if risk is RiskLevel.HIGH:
-            if self._autonomy is AutonomyMode.SUPERVISED:
-                return PolicyDecision(
-                    PolicyAction.REQUIRE_APPROVAL,
-                    action_type,
-                    risk,
-                    extra_reason or "high-риск в режиме supervised",
-                )
             return PolicyDecision(
                 PolicyAction.NOTIFY, action_type, risk, extra_reason or "high-риск: notify"
             )
