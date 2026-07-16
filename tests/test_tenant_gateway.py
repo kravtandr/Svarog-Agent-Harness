@@ -34,7 +34,10 @@ def _base_cfg(tmp_path: Path) -> SvarogConfig:
         f"tenancy:\n  enabled: true\n  home_root: {tmp_path / 'homes'}\n",
         encoding="utf-8",
     )
-    return load_config(project_dir=ws)
+    # user_config_path -> несуществующий файл: тест должен быть герметичен и не
+    # зависеть от ~/.svarog/svarog.yaml разработчика (иначе executor/sandbox
+    # оттуда просачивается в merge и ломает local-trusted-сценарии).
+    return load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml")
 
 
 def _hub(tmp_path: Path) -> tuple[TenantHub, TenantRegistry]:

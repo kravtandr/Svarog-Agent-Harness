@@ -172,7 +172,7 @@ def test_adapter_registry() -> None:
 
 def test_config_digest_covers_executor(tmp_path: Path) -> None:
     ws = _make_workspace(tmp_path)
-    native = load_config(project_dir=ws)
+    native = load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml")
     external = native.model_copy(
         update={
             "executor": ExecutorConfig(
@@ -370,7 +370,7 @@ async def test_external_requires_docker_fail_closed(tmp_path: Path) -> None:
         tmp_path,
         extra_yaml="executor:\n  type: external\n  external:\n    image: img:1\n",
     )
-    runner = TaskRunner(load_config(project_dir=ws), ws)
+    runner = TaskRunner(load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml"), ws)
     with pytest.raises(SandboxError, match="external"):
         await runner.run_once("задача", AutonomyMode.YOLO, hooks=RunHooks())
 
@@ -492,7 +492,7 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
         tmp_path,
         extra_yaml=("executor:\n  type: external\n  external:\n    image: img:1\n"),
     )
-    runner = TaskRunner(load_config(project_dir=ws), ws)
+    runner = TaskRunner(load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml"), ws)
     with pytest.raises(SandboxError, match="cooperative"):
         runner.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
     # cooperative + claude-code (hooks) — допустим.
@@ -504,7 +504,9 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
         .replace("    image: img:1\n", "    image: img:1\n    enforcement: cooperative\n"),
         encoding="utf-8",
     )
-    runner2 = TaskRunner(load_config(project_dir=ws2), ws2)
+    runner2 = TaskRunner(
+        load_config(project_dir=ws2, user_config_path=tmp_path / "no-user.yaml"), ws2
+    )
     runner2.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
     # cooperative, но адаптер без hooks (codex) — отказ.
     ws3 = tmp_path / "gate-ws3"
@@ -515,6 +517,8 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
         .replace("    image: img:1\n", "    image: img:1\n    adapter: codex\n"),
         encoding="utf-8",
     )
-    runner3 = TaskRunner(load_config(project_dir=ws3), ws3)
+    runner3 = TaskRunner(
+        load_config(project_dir=ws3, user_config_path=tmp_path / "no-user.yaml"), ws3
+    )
     with pytest.raises(SandboxError, match="hook"):
         runner3.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
