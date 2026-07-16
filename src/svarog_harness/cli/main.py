@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.config.loader import ConfigError, load_config
-from svarog_harness.config.paths import WorkspaceLayoutError, memory_dir, skills_dirs
+from svarog_harness.config.paths import (
+    WorkspaceLayoutError,
+    assert_workspace_isolated,
+    memory_dir,
+    skills_dirs,
+)
 from svarog_harness.config.schema import AutonomyMode, SecretsConfig, SvarogConfig
 from svarog_harness.gitflow import (
     GitError,
@@ -508,6 +513,9 @@ def chat(
     except SandboxError as exc:
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
+    except WorkspaceLayoutError as exc:
+        console.print(f"[red]ошибка раскладки workspace:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
 
 def _read_user_line(prompt: str) -> str:
@@ -534,6 +542,7 @@ async def _chat_session(
     continue_ref: str | None = None,
     fork_ref: str | None = None,
 ) -> None:
+    assert_workspace_isolated(cfg, workspace)  # раскладка (ADR-0015 §0.3), как в run_once/resume
     runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
     if sys.stdin.isatty():

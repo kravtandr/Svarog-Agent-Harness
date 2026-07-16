@@ -82,3 +82,30 @@ def test_memory_curate_clean(tmp_path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "находок нет" in result.output
+
+
+def test_chat_rejects_workspace_overlapping_control_plane(tmp_path, monkeypatch) -> None:
+    # Регрессия: `chat` обходил assert_workspace_isolated (ADR-0015 §0.3),
+    # который `run`/`resume` уже проверяют — memory внутри workspace под
+    # docker-sandbox должна отклоняться так же, как в run_once.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        "memory:\n  path: ./memory\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(ws)
+
+    result = runner.invoke(app, ["chat", "--workspace", str(ws)])
+
+    assert result.exit_code == 1, result.output
+    assert "раскладки workspace" in result.output
