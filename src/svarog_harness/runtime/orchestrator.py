@@ -769,8 +769,10 @@ class TaskRunner:
 
         session_id/history — серия runs одной сессии (§10.1): gateway-chat
         (ADR-0017 §2) гоняет каждое сообщение отдельным run'ом в общем
-        workspace. Для внешнего агента (ADR-0016) сессию ведёт сам агент —
-        session_id здесь работает только с нативным loop.
+        workspace. Нативный loop получает history в контекст; внешний агент
+        (ADR-0016) контекст диалога держит в собственной сессии — run
+        продолжает её через agent_session_id предыдущего run'а Session
+        (history для него игнорируется, как в CLI-chat).
         """
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
         assert_workspace_isolated(self._cfg, self._workspace)  # раскладка (ADR-0015 §0.3)
@@ -781,11 +783,6 @@ class TaskRunner:
             hooks.on_workspace_prep(prep)
 
         external = self._cfg.executor.type == "external"
-        if external and session_id is not None:
-            raise ValueError(
-                "session_id поддерживается только нативным loop: сессию внешнего "
-                "агента ведёт сам агент (ADR-0016), gateway-chat для него — пост-MVP"
-            )
         # MCP внешнему агенту не пробрасывается (у него свой MCP-сервер
         # Svarog через bridge, §4): host-side серверы зря не поднимаем.
         backends = (
@@ -823,7 +820,16 @@ class TaskRunner:
                     executor = self.build_external_executor(
                         recorder, env, hooks, infra=infra, control=control
                     )
-                    outcome = await executor.run(task, autonomy)
+                    # Chat-непрерывность (ADR-0016 фаза 3, как в CLI-chat):
+                    # новый run продолжает сессию агента предыдущего run'а Session.
+                    agent_session = (
+                        await recorder.last_agent_session(session_id)
+                        if session_id is not None
+                        else None
+                    )
+                    outcome = await executor.run(
+                        task, autonomy, session_id=session_id, agent_session=agent_session
+                    )
                 else:
                     excluded = frozenset(await CuratorStore(db).archived_names())
                     # Child runs (ADR-0015 фаза 3): родительский Run становится
