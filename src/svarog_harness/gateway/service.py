@@ -688,7 +688,11 @@ class GatewayService:
         workspace = Path(run.workspace) if run.workspace else self.workspace
         committed = uncommitted = ""
         repo = GitRepo(workspace)
-        if workspace.is_dir() and await repo.is_repo() and await repo.has_commits():
+        if (
+            workspace.is_dir()
+            and await self._workspace_owns_repo(repo)
+            and await repo.has_commits()
+        ):
             _, uncommitted, _ = await repo._git("diff", "HEAD", check=False)
             shas = [sha for sha, rid in await repo.log_with_run_ids() if run.id in rid.split(",")]
             if shas:
@@ -697,6 +701,16 @@ class GatewayService:
                 base_ref = base.strip() if code == 0 else _EMPTY_TREE
                 _, committed, _ = await repo._git("diff", base_ref, newest, check=False)
         return RunDiffView(run_id=run.id, committed=committed, uncommitted=uncommitted)
+
+    @staticmethod
+    async def _workspace_owns_repo(repo: GitRepo) -> bool:
+        """Диф считается только по репо, чей корень — сам workspace (та же
+        граница, что у Flow C): named workspace внутри git-корня сервиса не
+        должен показывать родительский репозиторий (ADR-0017)."""
+        if not await repo.is_repo():
+            return False
+        top = await repo.toplevel()
+        return top is not None and top.resolve() == repo.path.expanduser().resolve()
 
     async def sweep_workspaces(self) -> list[Path]:
         """Retention-GC терминальных task-workspace'ов (named не трогает)."""
