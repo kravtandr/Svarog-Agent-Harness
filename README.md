@@ -89,6 +89,13 @@ uv run svarog version
 
 Требования: Python 3.12+ (uv поставит сам), [uv](https://docs.astral.sh/uv/).
 
+## Режимы работы
+
+Svarog работает в двух режимах, на одном и том же core (§10):
+
+* **Локальный CLI** (готово, описан ниже) — `svarog` запускается прямо на вашей машине, как `claude`/`codex`: вы вызываете его из терминала, он исполняет run в своём sandbox и завершается. Один agent-home (память/скиллы/БД) может обслуживать запуски из любой рабочей папки — см. «Запуск из любой папки» ниже.
+* **Cloud-агент** (в разработке) — постоянно работающий инстанс Svarog на сервере, к которому клиенты подключаются удалённо и присылают задачи, а исполняет их сам сервер. Технический фундамент уже есть (`svarog serve` — REST/WebSocket gateway, §10.4; мультиарендность ADR-0012/0013/0014), но управляемого cloud-режима как отдельного продукта пока нет — см. «Дорожная карта».
+
 ## Быстрый старт
 
 Проще всего развернуть agent-home одной командой:
@@ -112,6 +119,29 @@ uv run svarog chat      # чат запускается из каталога с
 ```bash
 uv --project /path/to/Svarog-Agent-Harness run svarog chat --workspace /path/to/agent-home
 ```
+
+### Запуск из любой папки (без `cd agent-home`)
+
+`svarog.yaml` грузится из `<workspace>/svarog.yaml` (workspace по умолчанию — `Path.cwd()`) и **user-level** `~/.svarog/svarog.yaml`, если он есть (§13, приоритет: user → project → env). Чтобы `svarog chat`/`run` работали как `claude` — из любого проекта, без `cd agent-home` и без `--workspace` — держите agent-home-конфиг в user-level файле с **абсолютными** путями к `memory`/`skills`/`storage.db_path` (относительные `./memory` резолвятся от cwd, а не от расположения файла, поэтому в user-конфиге они обязаны быть абсолютными):
+
+```yaml
+# ~/.svarog/svarog.yaml
+models: { … }               # как в agent-home/svarog.yaml
+memory:
+  path: /абсолютный/путь/agent-home/memory
+skills:
+  paths: [/абсолютный/путь/agent-home/skills]
+storage:
+  db_path: /абсолютный/путь/agent-home/.svarog/svarog.db
+```
+
+И alias в shell rc (`~/.bash_profile`/`~/.zshrc`):
+
+```bash
+alias svarog='uv --project /path/to/Svarog-Agent-Harness run svarog'
+```
+
+После этого `cd` в любой проект и `svarog chat` — workspace = текущая папка, control-plane (память/скиллы/БД) фиксирован в agent-home, `assert_workspace_isolated` (ADR-0015 §0.3) не ругается, потому что произвольный проект с ним не пересекается. Нюанс: `policies/*.yaml` читается из `<workspace>/policies/`, а не из agent-home — кастомные project-level правила (deny/require_approval/notify) при запуске из папки без своего `policies/` не действуют; неотключаемый critical-набор и risk×autonomy (§3.6) от workspace не зависят и продолжают работать.
 
 Без интерактива всё задаётся флагами:
 
@@ -244,6 +274,7 @@ executor:
 | [TASK.md](TASK.md) | полное ТЗ |
 | [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0016 (мультиарендность — 0012/0013/0014; hardening рантайма — 0015; внешний агент как data-plane — 0016) |
 | [docker/agent-claude/](docker/agent-claude/) | образ sandbox для внешнего Claude Code (ADR-0016) + инструкция сборки |
+| [docker/agent-opencode/](docker/agent-opencode/) | образ sandbox для внешнего OpenCode (ADR-0016) + инструкция сборки |
 | [docs/repo-structure.md](docs/repo-structure.md) | структура пакета |
 | [docs/first-issues.md](docs/first-issues.md) | backlog M0–M5 |
 | [AGENTS.md](AGENTS.md) | правила работы с репозиторием |
@@ -266,6 +297,7 @@ uv run pytest evals    # eval-сценарии критериев готовно
 
 ### Продукт и бизнес-логика
 
+* **Cloud-режим** — управляемый постоянно работающий инстанс Svarog, к которому клиенты подключаются удалённо (поверх уже готовых `svarog serve`/мультиарендности); сейчас Svarog — только локальный CLI-процесс (см. «Режимы работы»), cloud-режим как продукт ещё не спроектирован.
 * **Web UI** (§10.3) — trace viewer, approval inbox, skill browser, diff viewer, memory browser поверх уже готового REST/WS gateway. Сейчас единственный «человеческий» UI — CLI и Telegram.
 * **Гранулярный RBAC** (§16) — базовая мультиарендность (изолированные тенанты, роли superuser/standard, per-tenant auth/квоты) уже реализована (ADR-0012/0013/0014); остаётся детальный RBAC внутри тенанта — роли owner/admin/developer/operator/viewer/agent (право approve, редактирование policies) — и scale-бэкенд (shared-Postgres с `tenant_id` вместо N SQLite).
 * **Semantic retrieval** (Vector DB, §6.7/§14) — Qdrant-backend для памяти, скиллов и документов; ускоряет и Curator слой 2 (сейчас он сравнивает пары LLM-ом без embeddings).
