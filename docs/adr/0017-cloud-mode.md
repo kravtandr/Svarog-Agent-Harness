@@ -280,7 +280,11 @@ gateway:
   итерации с сохранением checkpoint; run без живой ноги терминализируется
   сразу, его pending-approvals закрываются отказом), `GET /whoami`,
   сессии `POST/GET /sessions` + `POST /sessions/{id}/messages` (workspace
-  сессии в Session.meta, история — `session_history`), NDJSON-стрим
+  сессии в Session.meta; контекст — по типу executor'а: нативному loop
+  передаётся history из `session_history`, внешний агент (ADR-0016)
+  продолжает собственную сессию по `agent_session_id` предыдущего run'а —
+  как CLI-chat, но новый run поднимает свой sandbox на каждое сообщение,
+  цена за resumable-семантику gateway), NDJSON-стрим
   `GET /runs/{id}/events/stream` (вместо WS-attach: клиенту достаточно
   httpx, без новых зависимостей). Клиент: `cli/remote.py` — `svarog login`
   (профиль `remote:` в user-конфиге + токен в user-SecretStore) и

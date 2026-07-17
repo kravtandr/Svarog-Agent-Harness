@@ -264,3 +264,178 @@ async def test_events_ndjson_stream(
     assert events[-1]["type"] == "run_finished"
     assert events[-1]["state"] == "completed"
     assert any(e.get("type") == "text" for e in events)
+
+
+# --- сессии с внешним executor'ом (ADR-0016 × ADR-0017) --------------------
+
+
+def _write_external_config(ws: Path, tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: claude-code\n"
+        "    image: agent:test\n"
+        "    api_key_ref: PROVIDER_KEY\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+
+
+class _FakeInfra:
+    network_name = None
+    extra_mounts = None
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+
+async def test_run_once_external_continues_agent_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_once с session_id у внешнего executor'а: не отказ, а продолжение
+    сессии агента — executor получает session_id и agent_session_id
+    предыдущего run'а Session (как CLI-chat, ADR-0016 фаза 3)."""
+    from svarog_harness.config.schema import AutonomyMode
+    from svarog_harness.runtime.loop import RunOutcome
+    from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+    from svarog_harness.sandbox.local import LocalEnvironment
+    from svarog_harness.storage.models import RunState
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_external_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+
+    # Docker/bridge не поднимаем: интеграция executor↔container покрыта
+    # test_external_executor/test_external_docker, здесь — шов session-прокидки.
+    monkeypatch.setattr(runner, "assert_sandbox_available", lambda: None)
+    monkeypatch.setattr(runner, "assert_external_autonomy_supported", lambda a: None)
+    monkeypatch.setattr(runner, "build_agent_infra", _FakeInfra)
+    monkeypatch.setattr(runner, "prepare_agent_launch", lambda infra: None)
+    monkeypatch.setattr(runner, "build_environment", lambda infra=None: LocalEnvironment(ws))
+    monkeypatch.setattr(runner, "wire_bridge_control", lambda *a, **k: None)
+
+    captured: dict[str, object] = {}
+
+    def fake_build_executor(
+        recorder: TraceRecorder, env: object, hooks: object, **kwargs: object
+    ) -> object:
+        class _FakeExecutor:
+            async def run(
+                self,
+                task: str,
+                autonomy: AutonomyMode,
+                *,
+                session_id: str | None = None,
+                parent_run_id: str | None = None,
+                agent_session: str | None = None,
+            ) -> RunOutcome:
+                captured["session_id"] = session_id
+                captured["agent_session"] = agent_session
+                run = await recorder.start_run(
+                    task=task,
+                    autonomy=autonomy.value,
+                    model="agent",
+                    session_id=session_id,
+                    workspace=str(ws),
+                )
+                await recorder.finish_run(run, RunState.COMPLETED)
+                return RunOutcome(run.id, RunState.COMPLETED, "ок", 1, 0, 0.0)
+
+        return _FakeExecutor()
+
+    monkeypatch.setattr(runner, "build_external_executor", fake_build_executor)
+
+    # Предыстория: сессия и завершённый run внешнего агента с agent_session_id.
+    async def seed(db: object) -> str:
+        recorder = TraceRecorder(db)  # type: ignore[arg-type]
+        session = await recorder.create_session(title="чат")
+        prev = await recorder.start_run(
+            task="первое", autonomy="yolo", model="agent", session_id=session.id
+        )
+        await recorder.merge_run_meta(prev, {"agent_session_id": "agent-abc"})
+        await recorder.finish_run(prev, RunState.COMPLETED)
+        return session.id
+
+    session_id = await runner.with_db(seed)
+
+    outcome = await runner.run_once(
+        "продолжи", AutonomyMode.YOLO, hooks=RunHooks(), session_id=session_id
+    )
+    assert outcome.state is RunState.COMPLETED
+    assert captured == {"session_id": session_id, "agent_session": "agent-abc"}
+
+
+async def test_send_message_external_skips_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """send_message при внешнем executor'е не собирает history (контекст —
+    в сессии агента), но передаёт session_id в run_once."""
+    from types import SimpleNamespace
+
+    from svarog_harness.runtime.loop import RunOutcome
+    from svarog_harness.runtime.orchestrator import TaskRunner
+    from svarog_harness.storage.models import RunState
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_external_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = GatewayService(load_config(project_dir=ws), ws)
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_once(
+        self: TaskRunner,
+        task: str,
+        autonomy: object,
+        *,
+        hooks: object,
+        session_id: str | None = None,
+        history: object = None,
+    ) -> RunOutcome:
+        captured["session_id"] = session_id
+        captured["history"] = history
+
+        async def action(db: object) -> str:
+            recorder = TraceRecorder(db)  # type: ignore[arg-type]
+            run = await recorder.start_run(
+                task=task,
+                autonomy=str(getattr(autonomy, "value", autonomy)),
+                model="agent",
+                session_id=session_id,
+                workspace=str(self._workspace),
+            )
+            await recorder.finish_run(run, RunState.COMPLETED)
+            return run.id
+
+        run_id = await self.with_db(action)
+        hooks.on_run_started(SimpleNamespace(id=run_id))  # type: ignore[attr-defined]
+        return RunOutcome(run_id, RunState.COMPLETED, "ок", 1, 0, 0.0)
+
+    monkeypatch.setattr(TaskRunner, "run_once", fake_run_once)
+
+    view = await service.create_session(title="чат")
+    run_id = await service.send_message(view.session_id, "привет", None)
+    for _ in range(200):
+        if (await service.get_run(run_id)).state == "completed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert captured["session_id"] == view.session_id
+    assert captured["history"] is None  # history не собирается для external

@@ -474,12 +474,21 @@ class GatewayService:
         )
 
     async def send_message(self, session_id: str, text: str, autonomy: AutonomyMode | None) -> str:
-        """Сообщение чата → отдельный run в workspace сессии с её историей."""
+        """Сообщение чата → отдельный run в workspace сессии с её историей.
+
+        Контекст диалога — по типу executor'а (как в CLI-chat): нативному loop
+        передаётся history из trace; внешний агент (ADR-0016) продолжает
+        собственную сессию по agent_session_id, history ему не нужна —
+        run_once сам резолвит agent_session по session_id.
+        """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
+        external = self.cfg.executor.type == "external"
 
         async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:
             session = await find_session_by_prefix(db, session_id)
+            if external:
+                return session, []
             raw = await TraceRecorder(db).session_history(
                 session.id, limit_messages=_SESSION_HISTORY_LIMIT
             )
@@ -493,10 +502,16 @@ class GatewayService:
             )
         if await self._workspace_busy(workspace):
             raise WorkspaceBusyError(f"в сессии {session.id[:8]} ещё выполняется предыдущий run")
-        history = [
-            ChatMessage(role="user" if m["role"] == "user" else "assistant", content=m["content"])
-            for m in raw
-        ]
+        history = (
+            None
+            if external
+            else [
+                ChatMessage(
+                    role="user" if m["role"] == "user" else "assistant", content=m["content"]
+                )
+                for m in raw
+            ]
+        )
         mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(
