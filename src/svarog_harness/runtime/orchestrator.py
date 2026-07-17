@@ -182,6 +182,30 @@ async def _close_backends(backends: list[MCPBackend]) -> None:
             await backend.close()
 
 
+@dataclass
+class SessionResources:
+    """Тёплый sandbox серии runs одной сессии (ADR-0017, gateway-chat).
+
+    Владелец — сессия gateway, а не отдельный run: run_once с resources не
+    строит и не убирает env/infra/MCP, экономя старт контейнера на каждое
+    сообщение. Для внешнего агента bridge (и его budget) живёт всю серию —
+    семантика CLI-chat.
+    """
+
+    environment: ExecutionEnvironment
+    infra: ExternalAgentInfra | None
+    backends: list[MCPBackend]
+
+    async def close(self) -> None:
+        """Идемпотентно закрыть всё; ошибки одного шага не блокируют остальные."""
+        with contextlib.suppress(Exception):
+            await self.environment.cleanup()
+        await _close_backends(self.backends)
+        if self.infra is not None:
+            with contextlib.suppress(Exception):
+                await self.infra.stop()
+
+
 class TaskRunner:
     """Гоняет задачи в фиксированном workspace по одной конфигурации."""
 
@@ -756,6 +780,38 @@ class TaskRunner:
         parts.append(f"результат:\n{outcome.final_answer}")
         return "\n".join(parts)
 
+    async def prepare_session_resources(self, autonomy: AutonomyMode) -> "SessionResources":
+        """Тёплый sandbox для серии runs одной сессии (ADR-0017, gateway-chat).
+
+        Те же шаги построения, что в run_once, но env/infra/MCP остаются жить
+        между сообщениями — как в CLI-chat. Следствие для внешнего агента:
+        budget bridge (max_tokens/cost per run) действует на всю серию, а не
+        на одно сообщение — тот же trade-off, что у CLI-chat. Закрытие — на
+        вызывающем (`SessionResources.close`).
+        """
+        self.assert_sandbox_available()  # fail-closed (ADR-0013)
+        external = self._cfg.executor.type == "external"
+        backends = [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
+        infra: ExternalAgentInfra | None = None
+        environment: ExecutionEnvironment | None = None
+        try:
+            if external:
+                self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
+                infra = self.build_agent_infra()
+                await infra.start()
+                self.prepare_agent_launch(infra)
+            environment = self.build_environment(infra)
+            await environment.start()
+            return SessionResources(environment=environment, infra=infra, backends=backends)
+        except BaseException:
+            # Частично поднятое не осиротает: закрываем всё, что успели.
+            if environment is not None:
+                await environment.cleanup()
+            await _close_backends(backends)
+            if infra is not None:
+                await infra.stop()
+            raise
+
     async def run_once(
         self,
         task: str,
@@ -764,6 +820,7 @@ class TaskRunner:
         hooks: RunHooks,
         session_id: str | None = None,
         history: list[ChatMessage] | None = None,
+        resources: "SessionResources | None" = None,
     ) -> RunOutcome:
         """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit.
 
@@ -773,6 +830,9 @@ class TaskRunner:
         (ADR-0016) контекст диалога держит в собственной сессии — run
         продолжает её через agent_session_id предыдущего run'а Session
         (history для него игнорируется, как в CLI-chat).
+
+        resources — тёплый sandbox сессии (prepare_session_resources): env/
+        infra/MCP не строятся и не убираются этим run'ом, ими владеет сессия.
         """
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
         assert_workspace_isolated(self._cfg, self._workspace)  # раскладка (ADR-0015 §0.3)
@@ -783,26 +843,36 @@ class TaskRunner:
             hooks.on_workspace_prep(prep)
 
         external = self._cfg.executor.type == "external"
+        owned = resources is None  # владеем ли env/infra/MCP этим прогоном
         # MCP внешнему агенту не пробрасывается (у него свой MCP-сервер
         # Svarog через bridge, §4): host-side серверы зря не поднимаем.
-        backends = (
-            [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
-        )  # host-скоуп
-        infra: ExternalAgentInfra | None = None
+        if resources is None:
+            backends = (
+                [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
+            )
+            infra: ExternalAgentInfra | None = None
+        else:
+            backends = resources.backends  # host-скоуп
+            infra = resources.infra
         environment: ExecutionEnvironment | None = None
-        if external:
+        if owned and external:
             self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
             infra = self.build_agent_infra()
         try:
-            if infra is not None:
-                # Bridge (LLM-прокси + control) и internal-сеть — до контейнера;
-                # внутри try, чтобы сбой prepare_launch не осиротил уже поднятые
-                # bridge/сеть (finally гарантированно вызовет infra.stop()).
-                await infra.start()
-                self.prepare_agent_launch(infra)
-            env = self.build_environment(infra)
-            environment = env
-            await env.start()
+            if resources is None:
+                if infra is not None:
+                    # Bridge (LLM-прокси + control) и internal-сеть — до контейнера;
+                    # внутри try, чтобы сбой prepare_launch не осиротил уже поднятые
+                    # bridge/сеть (finally гарантированно вызовет infra.stop()).
+                    await infra.start()
+                    self.prepare_agent_launch(infra)
+                env = self.build_environment(infra)
+                environment = env
+                await env.start()
+            else:
+                if external:
+                    self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
+                env = resources.environment
             mcp_tools = build_mcp_tools(backends)
 
             async def action(db: AsyncSession) -> RunOutcome:
@@ -879,11 +949,12 @@ class TaskRunner:
 
             return await self.with_db(action)
         finally:
-            if environment is not None:
-                await environment.cleanup()
-            await _close_backends(backends)
-            if infra is not None:
-                await infra.stop()
+            if owned:
+                if environment is not None:
+                    await environment.cleanup()
+                await _close_backends(backends)
+                if infra is not None:
+                    await infra.stop()
 
     def _runner_for_resume(self, workspace: Path) -> "TaskRunner":
         """Runner для resume в workspace checkpoint'а.

@@ -283,8 +283,11 @@ gateway:
   сессии в Session.meta; контекст — по типу executor'а: нативному loop
   передаётся history из `session_history`, внешний агент (ADR-0016)
   продолжает собственную сессию по `agent_session_id` предыдущего run'а —
-  как CLI-chat, но новый run поднимает свой sandbox на каждое сообщение,
-  цена за resumable-семантику gateway), NDJSON-стрим
+  как CLI-chat; **тёплый sandbox сессии** — env/infra/MCP поднимаются на
+  первое сообщение и живут между сообщениями (`SessionResources` +
+  `cloud.warm_session_ttl_sec`, idle-GC в supervise-цикле, drop при падении
+  ноги/удалении workspace/shutdown; для внешнего агента budget bridge при
+  этом действует на серию — семантика CLI-chat)), NDJSON-стрим
   `GET /runs/{id}/events/stream` (вместо WS-attach: клиенту достаточно
   httpx, без новых зависимостей). Клиент: `cli/remote.py` — `svarog login`
   (профиль `remote:` в user-конфиге + токен в user-SecretStore) и

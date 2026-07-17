@@ -53,7 +53,7 @@ from svarog_harness.gitflow.provision import (
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
-from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
 from svarog_harness.storage.models import Run, RunState, Session
@@ -82,6 +82,20 @@ _SESSION_HISTORY_LIMIT = 24
 
 class CancelNotAllowedError(Exception):
     """Run уже терминален — отменять нечего (ADR-0017 §2)."""
+
+
+@dataclass
+class _WarmSlot:
+    """Тёплый sandbox сессии: env/infra/MCP живут между сообщениями (ADR-0017).
+
+    Runner хранится вместе с ресурсами: env смонтирован на его workspace,
+    и все сообщения сессии обязаны идти через один и тот же runner.
+    """
+
+    workspace: Path
+    runner: TaskRunner
+    resources: SessionResources
+    last_used: float
 
 
 @dataclass
@@ -116,6 +130,10 @@ class GatewayService:
         self._inflight: set[str] = set()
         # Retention-GC task-workspace'ов (ADR-0017): троттлинг по monotonic.
         self._last_gc = 0.0
+        # Тёплые sandbox'ы сессий gateway-chat: session_id → слот; создание
+        # сериализовано локом (двойной слот = утёкший контейнер).
+        self._warm: dict[str, _WarmSlot] = {}
+        self._warm_lock = asyncio.Lock()
 
     # --- per-run workspaces (ADR-0017) ------------------------------------
 
@@ -175,6 +193,62 @@ class GatewayService:
 
         return await self._read(action)
 
+    # --- тёплые sandbox'ы сессий (ADR-0017) --------------------------------
+
+    async def _acquire_warm(
+        self, session_id: str, workspace: Path, autonomy: AutonomyMode
+    ) -> _WarmSlot | None:
+        """Слот тёплого sandbox сессии; None — фича выключена (ttl=0).
+
+        Первый вызов сессии поднимает env/infra/MCP один раз; дальнейшие
+        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s).
+        """
+        if self.cfg.cloud.warm_session_ttl_sec <= 0:
+            return None
+        async with self._warm_lock:
+            slot = self._warm.get(session_id)
+            if slot is not None:
+                slot.last_used = time.monotonic()
+                return slot
+            runner = self._runner_for(workspace)
+            resources = await runner.prepare_session_resources(autonomy)
+            slot = _WarmSlot(
+                workspace=workspace,
+                runner=runner,
+                resources=resources,
+                last_used=time.monotonic(),
+            )
+            self._warm[session_id] = slot
+            return slot
+
+    async def _drop_warm(self, session_id: str) -> None:
+        """Закрыть и забыть тёплый слот (ошибка ноги / TTL / shutdown)."""
+        slot = self._warm.pop(session_id, None)
+        if slot is not None:
+            await slot.resources.close()
+
+    async def close_warm_sessions(self) -> None:
+        """Закрыть все тёплые sandbox'ы (graceful shutdown, тесты)."""
+        for session_id in list(self._warm):
+            await self._drop_warm(session_id)
+
+    async def _sweep_warm_sessions(self) -> None:
+        """Закрыть тёплые слоты, простоявшие дольше TTL (idle-GC).
+
+        Слот с живым run'ом (lease workspace) не трогаем: длинный run — не
+        простой; его last_used обновится при следующем сообщении.
+        """
+        ttl = float(self.cfg.cloud.warm_session_ttl_sec)
+        if ttl <= 0:
+            return
+        now = time.monotonic()
+        for session_id, slot in list(self._warm.items()):
+            if now - slot.last_used < ttl:
+                continue
+            if await self._workspace_busy(slot.workspace):
+                continue
+            await self._drop_warm(session_id)
+
     # --- запуск и возобновление runs -------------------------------------
 
     async def usage(self) -> QuotaUsage:
@@ -222,15 +296,25 @@ class GatewayService:
         runner: TaskRunner | None = None,
         session_id: str | None = None,
         history: list[ChatMessage] | None = None,
+        warm: _WarmSlot | None = None,
     ) -> None:
         holder = _RunHolder()
         hooks = self._event_hooks(holder, started)
         try:
             outcome = await (runner or self._runner).run_once(
-                task, autonomy, hooks=hooks, session_id=session_id, history=history
+                task,
+                autonomy,
+                hooks=hooks,
+                session_id=session_id,
+                history=history,
+                resources=warm.resources if warm is not None else None,
             )
             self._publish_finished(outcome)
         except Exception as exc:
+            if warm is not None and session_id is not None:
+                # Нога упала — sandbox может быть в неизвестном состоянии
+                # (умерший контейнер и т.п.); следующий message поднимет свежий.
+                await self._drop_warm(session_id)
             self._publish_error(holder, started, exc)
 
     async def resume_run(self, run_id: str) -> None:
@@ -513,15 +597,19 @@ class GatewayService:
             ]
         )
         mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
+        # Тёплый sandbox сессии (ADR-0017): env/infra/MCP переживают сообщение.
+        warm = await self._acquire_warm(session.id, workspace, mode)
+        runner = warm.runner if warm is not None else self._runner_for(workspace)
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(
             self._run_bg(
                 text,
                 mode,
                 started,
-                runner=self._runner_for(workspace),
+                runner=runner,
                 session_id=session.id,
                 history=history,
+                warm=warm,
             )
         )
         return await started
@@ -567,6 +655,11 @@ class GatewayService:
         path = resolve_named_workspace(self.workspace, name).resolve()
         if await self._workspace_busy(path):
             raise WorkspaceBusyError(f"workspace '{name}' занят активным run — удаление отклонено")
+        # Тёплые sandbox'ы сессий этого workspace закрываем до rmtree —
+        # иначе контейнер останется с mount'ом удалённого дерева.
+        for session_id, slot in list(self._warm.items()):
+            if slot.workspace == path:
+                await self._drop_warm(session_id)
         delete_named_workspace(self.workspace, name)
 
     def workspace_target(self, name: str, relative: str) -> Path:
@@ -636,6 +729,8 @@ class GatewayService:
         """Один проход: поднять refuel-suspended runs. Возвращает run_id'ы, для
         которых запущено авто-возобновление (для тестов и наблюдаемости)."""
         await self._maybe_sweep_workspaces()  # retention-GC task-workspaces (ADR-0017)
+        with contextlib.suppress(Exception):
+            await self._sweep_warm_sessions()  # idle-GC тёплых sandbox'ов (ADR-0017)
         sup = self.cfg.supervisor
         if not sup.auto_resume_refuel:
             return []

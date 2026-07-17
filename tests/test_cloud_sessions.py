@@ -285,6 +285,9 @@ def _write_external_config(ws: Path, tmp_path: Path) -> None:
         "    adapter: claude-code\n"
         "    image: agent:test\n"
         "    api_key_ref: PROVIDER_KEY\n"
+        # Тёплый sandbox выключен: эти тесты мокают run_once/executor и не
+        # поднимают реальную инфраструктуру (bridge требует секрет/докер).
+        "cloud:\n  warm_session_ttl_sec: 0\n"
         f"storage:\n  db_path: {db_path}\n",
         encoding="utf-8",
     )
@@ -408,6 +411,7 @@ async def test_send_message_external_skips_history(
         hooks: object,
         session_id: str | None = None,
         history: object = None,
+        resources: object = None,
     ) -> RunOutcome:
         captured["session_id"] = session_id
         captured["history"] = history
@@ -439,3 +443,134 @@ async def test_send_message_external_skips_history(
 
     assert captured["session_id"] == view.session_id
     assert captured["history"] is None  # history не собирается для external
+
+
+# --- тёплый sandbox сессии (ADR-0017) --------------------------------------
+
+
+async def test_warm_session_reuses_environment(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Два сообщения сессии — одна подготовка sandbox (prepare один раз)."""
+    from svarog_harness.runtime.orchestrator import TaskRunner
+
+    calls = {"prepare": 0}
+    original = TaskRunner.prepare_session_resources
+
+    async def counting_prepare(self: TaskRunner, autonomy: object) -> object:
+        calls["prepare"] += 1
+        return await original(self, autonomy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TaskRunner, "prepare_session_resources", counting_prepare)
+    await service.create_workspace("proj")
+    _install_provider(monkeypatch, ScriptedProvider([_final("раз"), _final("два")]))
+
+    view = await service.create_session(title="чат", workspace_name="proj")
+    run1 = await service.send_message(view.session_id, "привет", None)
+    assert await _wait_state(service, run1, {"completed"}) == "completed"
+    run2 = await service.send_message(view.session_id, "ещё", None)
+    assert await _wait_state(service, run2, {"completed"}) == "completed"
+
+    assert calls["prepare"] == 1  # sandbox поднят один раз на всю серию
+    assert view.session_id in service._warm
+    await service.close_warm_sessions()
+    assert service._warm == {}
+
+
+async def test_warm_session_ttl_sweep(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Слот, простоявший дольше TTL, закрывается idle-GC; свежий — остаётся."""
+    _install_provider(monkeypatch, ScriptedProvider([_final()]))
+    view = await service.create_session(title="чат")
+    run_id = await service.send_message(view.session_id, "привет", None)
+    assert await _wait_state(service, run_id, {"completed"}) == "completed"
+
+    slot = service._warm[view.session_id]
+    closed = {"n": 0}
+    original_close = slot.resources.close
+
+    async def spy_close() -> None:
+        closed["n"] += 1
+        await original_close()
+
+    monkeypatch.setattr(slot.resources, "close", spy_close)
+
+    await service._sweep_warm_sessions()
+    assert view.session_id in service._warm  # свежий слот не тронут
+
+    slot.last_used -= float(service.cfg.cloud.warm_session_ttl_sec) + 1
+    await service._sweep_warm_sessions()
+    assert view.session_id not in service._warm
+    assert closed["n"] == 1
+
+
+async def test_warm_slot_dropped_on_run_failure(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Упавшая нога сбрасывает тёплый слот — следующее сообщение поднимет свежий."""
+    from svarog_harness.runtime.orchestrator import TaskRunner
+
+    async def broken_run_once(self: TaskRunner, *args: object, **kwargs: object) -> object:
+        raise RuntimeError("контейнер умер")
+
+    monkeypatch.setattr(TaskRunner, "run_once", broken_run_once)
+    view = await service.create_session(title="чат")
+    with pytest.raises(RuntimeError, match="контейнер умер"):
+        await service.send_message(view.session_id, "привет", None)
+    assert view.session_id not in service._warm
+
+
+async def test_delete_workspace_closes_warm_slot(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Удаление named workspace закрывает тёплые sandbox'ы его сессий."""
+    _install_provider(monkeypatch, ScriptedProvider([_final()]))
+    await service.create_workspace("proj")
+    view = await service.create_session(title="чат", workspace_name="proj")
+    run_id = await service.send_message(view.session_id, "привет", None)
+    assert await _wait_state(service, run_id, {"completed"}) == "completed"
+    assert view.session_id in service._warm
+
+    await service.delete_workspace("proj")
+    assert view.session_id not in service._warm
+    assert not (service.workspace / "named" / "proj").exists()
+
+
+async def test_warm_disabled_by_ttl_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """warm_session_ttl_sec=0 — прежнее поведение: sandbox на каждый run."""
+    from svarog_harness.runtime.orchestrator import TaskRunner
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        "cloud:\n  warm_session_ttl_sec: 0\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = GatewayService(load_config(project_dir=ws), ws)
+
+    calls = {"prepare": 0}
+    original = TaskRunner.prepare_session_resources
+
+    async def counting_prepare(self: TaskRunner, autonomy: object) -> object:
+        calls["prepare"] += 1
+        return await original(self, autonomy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TaskRunner, "prepare_session_resources", counting_prepare)
+    _install_provider(monkeypatch, ScriptedProvider([_final()]))
+
+    view = await service.create_session(title="чат")
+    run_id = await service.send_message(view.session_id, "привет", None)
+    assert await _wait_state(service, run_id, {"completed"}) == "completed"
+    assert calls["prepare"] == 0
+    assert service._warm == {}
