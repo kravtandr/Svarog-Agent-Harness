@@ -2,7 +2,7 @@
 
 ## Статус
 
-Принято (Фаза 1 реализована)
+Принято (Фазы 1–2 реализованы)
 
 ## Контекст
 
@@ -275,9 +275,18 @@ gateway:
   переиспользует entry-конфиг (`TaskRunner._runner_for_resume`) — конфиг не
   перечитывается из склонированного репо. Тесты:
   `tests/test_cloud_workspaces.py`.
-* **Фаза 2 — thin CLI.** `remote`-профиль + `svarog login`, маппинг
-  `run/resume/traces/approvals/skills/workspace`, WS-attach, сессии +
-  remote-chat, `POST /runs/{id}/cancel`, `GET /whoami`.
+* **Фаза 2 — thin CLI. ✅ выполнено.** Сервер: cooperative-cancel
+  (`POST /runs/{id}/cancel`, флаг в Run.meta, loop отменяет на границе
+  итерации с сохранением checkpoint; run без живой ноги терминализируется
+  сразу, его pending-approvals закрываются отказом), `GET /whoami`,
+  сессии `POST/GET /sessions` + `POST /sessions/{id}/messages` (workspace
+  сессии в Session.meta, история — `session_history`), NDJSON-стрим
+  `GET /runs/{id}/events/stream` (вместо WS-attach: клиенту достаточно
+  httpx, без новых зависимостей). Клиент: `cli/remote.py` — `svarog login`
+  (профиль `remote:` в user-конфиге + токен в user-SecretStore) и
+  `svarog remote run/resume/cancel/runs/show --diff/approvals/approve/deny/
+  skills/whoami/chat/workspace create|list|rm|pull`. Тесты:
+  `tests/test_cloud_sessions.py`, `tests/test_remote_cli.py`.
 * **Фаза 3 — admin-plane и упаковка.** `/admin/*` (create/list/token-rotate/
   deactivate), bind-guard `--behind-proxy`, rate-limit auth, systemd unit +
   docker compose + reverse-proxy гайд, retention/бэкап-доки.

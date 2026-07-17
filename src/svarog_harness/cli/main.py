@@ -18,6 +18,7 @@ from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
+from svarog_harness.cli import remote as remote_module
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import (
     WorkspaceLayoutError,
@@ -111,6 +112,9 @@ approvals_app = typer.Typer(help="Approval-запросы: список и ре�
 app.add_typer(approvals_app, name="approvals")
 skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
 app.add_typer(skills_app, name="skills")
+# Thin CLI cloud-режима (ADR-0017 §3): svarog remote … / svarog login.
+app.add_typer(remote_module.remote_app, name="remote")
+app.command("login")(remote_module.login)
 console = Console()
 
 

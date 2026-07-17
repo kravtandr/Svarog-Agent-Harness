@@ -222,6 +222,17 @@ class GatewayConfig(StrictModel):
     token_ref: str | None = None
 
 
+class RemoteConfig(StrictModel):
+    """Профиль thin CLI (ADR-0017 §3): svarog --remote ходит на этот gateway.
+
+    Живёт в user-слое (`~/.svarog/svarog.yaml`, пишется `svarog login`);
+    токен — в user-level SecretStore, в конфиге только имя.
+    """
+
+    url: str
+    token_ref: str = "svarog_remote_token"
+
+
 class CloudConfig(StrictModel):
     """Cloud-режим (ADR-0017): серверные workspaces поверх gateway.
 
@@ -401,6 +412,8 @@ class SvarogConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
+    # Профиль remote-клиента (ADR-0017 §3); None — команды исполняются локально.
+    remote: RemoteConfig | None = None
 
     @classmethod
     def settings_customise_sources(
