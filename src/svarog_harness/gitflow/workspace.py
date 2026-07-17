@@ -37,10 +37,30 @@ class WorkspaceFlow:
         self._repo = repo
         self._cfg = git_cfg
 
+    async def _owns_repo(self) -> bool:
+        """Workspace — корень своего репозитория, а не поддерево чужого.
+
+        `git add -A`/branch из поддиректории действуют на весь родительский
+        репозиторий — Flow C пересёк бы границу workspace (для серверных
+        named/task-workspaces внутри git-корня это кросс-workspace утечка,
+        найдено симуляцией remote-режима, ADR-0017).
+        """
+        top = await self._repo.toplevel()
+        return top is not None and top.resolve() == self._repo.path.expanduser().resolve()
+
     async def start(self, task: str) -> WorkspacePrep:
         """Подготовить workspace: pull (если есть remote) + task branch."""
         if not await self._repo.is_repo():
             return WorkspacePrep(is_git=False, note="workspace не является git-репозиторием")
+        if not await self._owns_repo():
+            top = await self._repo.toplevel()
+            return WorkspacePrep(
+                is_git=False,
+                note=(
+                    f"workspace внутри репозитория {top}, а не его корень — "
+                    "Flow C выключен: git-операции не пересекают границу workspace"
+                ),
+            )
         await self._repo.ensure_identity()
 
         pulled = False
@@ -66,6 +86,10 @@ class WorkspaceFlow:
         self, message: str, *, run_id: str | None = None, known_values: frozenset[str] = frozenset()
     ) -> str | None:
         """Закоммитить все изменения workspace; None — коммитить нечего."""
+        # Та же граница, что в start(): не коммитить в чужой родительский репо
+        # (сюда приходят и refuel/step-коммиты мимо WorkspacePrep).
+        if not await self._repo.is_repo() or not await self._owns_repo():
+            return None
         # Служебное дерево runtime (spill tool-результатов, ADR-0015 §1.2)
         # не попадает в коммиты Flow C.
         await self._repo.ensure_excluded(".svarog/")

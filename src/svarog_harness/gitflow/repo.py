@@ -79,6 +79,17 @@ class GitRepo:
         code, out, _ = await self._git("rev-parse", "--is-inside-work-tree", check=False)
         return code == 0 and out.strip() == "true"
 
+    async def toplevel(self) -> Path | None:
+        """Корень рабочего дерева, которому принадлежит path (None — не репо).
+
+        path внутри чужого репозитория ≠ path является репозиторием: границу
+        различает сравнение toplevel с path (см. WorkspaceFlow, ADR-0017).
+        """
+        code, out, _ = await self._git("rev-parse", "--show-toplevel", check=False)
+        if code != 0 or not out.strip():
+            return None
+        return Path(out.strip())
+
     async def init(
         self, *, initial_branch: str = "main", separate_git_dir: Path | None = None
     ) -> None:

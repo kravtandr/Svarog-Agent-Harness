@@ -480,3 +480,64 @@ def test_strip_secrets() -> None:
     msg = provision._strip_secrets("fatal: https://user:tok123@host/r.git", "user:tok123")
     assert "tok123" not in msg
     assert "***" in msg
+
+
+# --- граница workspace против родительского git (регрессия симуляции remote) --
+
+
+async def test_flow_c_disabled_inside_foreign_repo(tmp_path: Path) -> None:
+    """Workspace в поддиректории чужого репо: Flow C выключен, commit_step — None."""
+    from svarog_harness.config.schema import GitConfig
+    from svarog_harness.gitflow.workspace import WorkspaceFlow
+
+    root = tmp_path / "parent"
+    sub = root / "named" / "proj"
+    sub.mkdir(parents=True)
+    repo = GitRepo(root)
+    await repo.init()
+    await repo.ensure_identity()
+    (root / "config.yaml").write_text("secret_ref: X\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("init")
+
+    flow = WorkspaceFlow(GitRepo(sub), GitConfig())
+    prep = await flow.start("задача")
+    assert prep.is_git is False
+    assert "не пересекают границу workspace" in prep.note
+
+    (sub / "result.txt").write_text("итог", encoding="utf-8")
+    assert await flow.commit_step("svarog: шаг") is None
+    # Родительский репо не тронут: ни веток svarog/*, ни новых коммитов.
+    _, out, _ = await repo._git("branch", "--list", "svarog/*")
+    assert out.strip() == ""
+    _, log, _ = await repo._git("log", "--oneline")
+    assert len(log.strip().splitlines()) == 1
+
+
+async def test_named_workspace_run_does_not_touch_parent_repo(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run в named workspace внутри git-корня сервиса: без веток/коммитов в
+    родительском репо и без его содержимого в diff (находка симуляции remote)."""
+    repo = GitRepo(service.workspace)
+    await repo.init()
+    await repo.ensure_identity()
+    (service.workspace / "server.txt").write_text("серверный файл\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("init")
+
+    await service.create_workspace("proj")
+    _patch_provider(monkeypatch, [_write_turn("out.txt", "готово"), _final_turn()])
+    run_id = await service.create_run("создай файл", None, workspace_name="proj")
+    assert await _wait_completed(service, run_id) == "completed"
+    assert (service.workspace / "named" / "proj" / "out.txt").exists()
+
+    # Родительский репо сервиса не тронут.
+    _, branches, _ = await repo._git("branch", "--list", "svarog/*")
+    assert branches.strip() == ""
+    _, log, _ = await repo._git("log", "--oneline", "--all")
+    assert len(log.strip().splitlines()) == 1
+
+    # Diff run'а не показывает родительский репозиторий.
+    diff = await service.run_diff(run_id)
+    assert diff.committed == "" and diff.uncommitted == ""
