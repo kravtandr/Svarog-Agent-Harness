@@ -246,6 +246,11 @@ class CloudConfig(StrictModel):
     workspace_retention_days: int = Field(default=14, ge=0)
     # Потолок named workspaces на тенанта; 0 — named workspaces выключены.
     max_named_workspaces: int = Field(default=20, ge=0)
+    # Тёплый sandbox сессии gateway-chat: env/infra/MCP живут между сообщениями,
+    # убирая старт контейнера на каждое сообщение; закрывается после стольких
+    # секунд простоя. 0 — выключено (sandbox на каждый run, как раньше).
+    # Trade-off для внешнего агента: budget bridge действует на серию (CLI-chat).
+    warm_session_ttl_sec: int = Field(default=900, ge=0)
 
 
 class SupervisorConfig(StrictModel):

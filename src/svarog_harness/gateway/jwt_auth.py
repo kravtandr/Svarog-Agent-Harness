@@ -114,3 +114,6 @@ class JwtResolver:
 
     async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
         await self.hub.run_supervisor(should_stop=should_stop)
+
+    async def shutdown(self) -> None:
+        await self.hub.shutdown()

@@ -93,6 +93,10 @@ def create_app(
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # Тёплые sandbox'ы сессий не переживают процесс (ADR-0017);
+            # осиротевшие при аварии подметает GC по PID владельца (ADR-0016).
+            with contextlib.suppress(Exception):
+                await resolver.shutdown()
 
     app = FastAPI(title="Svarog Gateway", version="0.1.0", lifespan=lifespan)
 

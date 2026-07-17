@@ -51,6 +51,9 @@ class GatewayResolver(Protocol):
     async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
         """Периодическое авто-поднятие refuel-suspended runs, пока gateway жив."""
 
+    async def shutdown(self) -> None:
+        """Graceful shutdown: закрыть тёплые sandbox'ы сессий (ADR-0017)."""
+
 
 @dataclass
 class SingleTenantResolver:
@@ -58,6 +61,9 @@ class SingleTenantResolver:
 
     service: GatewayService
     bearer_token: str | None = None
+
+    async def shutdown(self) -> None:
+        await self.service.close_warm_sessions()
 
     def authenticate(
         self, authorization: str | None, *, query_token: str | None = None
@@ -155,6 +161,11 @@ class TenantHub:
     @property
     def supervisor_enabled(self) -> bool:
         return self.base_cfg.supervisor.auto_resume_refuel
+
+    async def shutdown(self) -> None:
+        """Закрыть тёплые sandbox'ы всех материализованных тенантов (ADR-0017)."""
+        for svc in self._services.values():
+            await svc.close_warm_sessions()
 
     async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
         """Per-tenant refuel-супервизор по run_index (ADR-0014 #5).
