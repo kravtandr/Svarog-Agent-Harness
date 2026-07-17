@@ -859,6 +859,21 @@ class TaskRunner:
             if infra is not None:
                 await infra.stop()
 
+    def _runner_for_resume(self, workspace: Path) -> "TaskRunner":
+        """Runner для resume в workspace checkpoint'а.
+
+        Свой workspace — этот же runner с entry-конфигом: gateway-runs в
+        per-run workspaces (ADR-0017) возобновляются под конфигом тенанта,
+        а не под `svarog.yaml`, который мог приехать внутри склонированного
+        репозитория (щель trust gate). Чужой workspace (CLI `svarog resume`
+        для run'а из другой папки) — как раньше, конфиг workspace'а +
+        re-clamp роли (ADR-0013).
+        """
+        ws = workspace.expanduser().resolve()
+        if ws == self._workspace.expanduser().resolve():
+            return self
+        return TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
+
     async def resume(self, run_id: str, *, hooks: RunHooks) -> RunOutcome:
         """Возобновить run из checkpoint (ADR-0005).
 
@@ -883,7 +898,7 @@ class TaskRunner:
             # Роль тенанта переклампывает конфиг workspace'а на resume (ADR-0013):
             # standard остаётся в docker/hardened, даже если yaml workspace'а
             # говорит local-trusted. Для superuser (CLI-resume) — no-op.
-            runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
+            runner = self._runner_for_resume(workspace)
             runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
             assert_workspace_isolated(runner._cfg, workspace)  # раскладка (ADR-0015 §0.3)
             # Trust gate (ADR-0015 §0.4): security-конфиг заморожен снимком на
@@ -961,7 +976,7 @@ class TaskRunner:
         workspace = Path(run.workspace or "").expanduser()
         if not workspace.is_dir():
             raise RunNotResumableError(f"workspace run'а больше не существует: {workspace}")
-        runner = TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
+        runner = self._runner_for_resume(workspace)
         runner.assert_sandbox_available()
         runner.assert_external_autonomy_supported(AutonomyMode(run.autonomy))
         _assert_config_unchanged(run, runner._cfg, workspace)  # trust gate (§0.4)

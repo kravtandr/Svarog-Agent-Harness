@@ -7,10 +7,13 @@ GatewayService, сериализует ответ. Approval асинхронны
 
 import asyncio
 import contextlib
+import os
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
@@ -18,14 +21,28 @@ from svarog_harness.gateway.models import (
     ApprovalDecisionRequest,
     ApprovalView,
     CreateRunRequest,
+    CreateWorkspaceRequest,
+    DirListing,
+    FileEntry,
     RunDetail,
+    RunDiffView,
     RunRef,
     RunSummary,
     SkillCard,
+    WorkspaceView,
 )
 from svarog_harness.gateway.service import GatewayService
+from svarog_harness.gitflow.provision import (
+    CloneError,
+    RepoUrlError,
+    UnknownWorkspaceError,
+    WorkspaceExistsError,
+    WorkspaceLimitError,
+    WorkspaceNameError,
+)
 from svarog_harness.tenant.quota import QuotaExceededError
 from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
+from svarog_harness.trace.recorder import WorkspaceBusyError
 
 
 def create_app(
@@ -86,9 +103,19 @@ def create_app(
     @app.post("/runs", response_model=RunRef, status_code=201)
     async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:
         try:
-            run_id = await service.create_run(req.task, req.autonomy)
+            run_id = await service.create_run(
+                req.task, req.autonomy, repo=req.repo, workspace_name=req.workspace
+            )
         except QuotaExceededError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from None
+        except UnknownWorkspaceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except (RepoUrlError, WorkspaceNameError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except CloneError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     @app.get("/runs", response_model=list[RunSummary])
@@ -101,6 +128,92 @@ def create_app(
             return await service.get_run(run_id)
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post("/runs/{run_id}/resume", response_model=RunRef)
+    async def resume_run(run_id: str, service: ServiceDep) -> RunRef:
+        # Явное возобновление suspended-run (ADR-0017 §2): проверяем, что run
+        # существует, до фонового resume — иначе 404 некому вернуть.
+        try:
+            await service.get_run(run_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        await service.resume_run(run_id)
+        return RunRef(run_id=run_id, state="running")
+
+    @app.get("/runs/{run_id}/diff", response_model=RunDiffView)
+    async def run_diff(run_id: str, service: ServiceDep) -> RunDiffView:
+        try:
+            return await service.run_diff(run_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    # --- named workspaces (ADR-0017 §1/§2) --------------------------------
+
+    @app.post("/workspaces", response_model=WorkspaceView, status_code=201)
+    async def create_workspace(req: CreateWorkspaceRequest, service: ServiceDep) -> WorkspaceView:
+        try:
+            return await service.create_workspace(req.name)
+        except WorkspaceExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except WorkspaceLimitError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from None
+        except WorkspaceNameError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.get("/workspaces", response_model=list[WorkspaceView])
+    async def list_workspaces(service: ServiceDep) -> list[WorkspaceView]:
+        return await service.list_workspaces()
+
+    @app.delete("/workspaces/{name}", status_code=204)
+    async def delete_workspace(name: str, service: ServiceDep) -> None:
+        try:
+            await service.delete_workspace(name)
+        except (UnknownWorkspaceError, WorkspaceNameError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/workspaces/{name}/files", response_model=None)
+    async def workspace_files(
+        name: str, service: ServiceDep, path: str = "."
+    ) -> FileResponse | JSONResponse:
+        """Листинг каталога (JSON) или скачивание файла named workspace."""
+        try:
+            target = service.workspace_target(name, path)
+        except UnknownWorkspaceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceNameError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if target.is_dir():
+            entries = [
+                FileEntry(
+                    name=child.name,
+                    is_dir=child.is_dir(),
+                    size_bytes=child.stat().st_size if child.is_file() else 0,
+                )
+                for child in sorted(target.iterdir())
+            ]
+            listing = DirListing(path=path, entries=entries)
+            return JSONResponse(listing.model_dump())
+        if target.is_file():
+            return FileResponse(target, filename=target.name)
+        raise HTTPException(status_code=404, detail=f"нет такого пути в workspace: {path}")
+
+    @app.get("/workspaces/{name}/archive")
+    async def workspace_archive(name: str, service: ServiceDep) -> FileResponse:
+        """tar.gz снапшот workspace (транспорт результатов не-git workspace'а)."""
+        try:
+            archive = service.archive_workspace(name)
+        except UnknownWorkspaceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceNameError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return FileResponse(
+            archive,
+            filename=f"{name}.tar.gz",
+            media_type="application/gzip",
+            background=BackgroundTask(os.unlink, archive),
+        )
 
     @app.websocket("/runs/{run_id}/events")
     async def run_events(websocket: WebSocket, run_id: str) -> None:

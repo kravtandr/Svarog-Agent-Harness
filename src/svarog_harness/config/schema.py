@@ -222,6 +222,21 @@ class GatewayConfig(StrictModel):
     token_ref: str | None = None
 
 
+class CloudConfig(StrictModel):
+    """Cloud-режим (ADR-0017): серверные workspaces поверх gateway.
+
+    Run может исполняться в одноразовом task-workspace, склонированном из
+    git-репо клиента, либо в постоянном named workspace тенанта. Retention-GC
+    подметает только терминальные task-workspaces; named живут до явного
+    удаления.
+    """
+
+    # GC терминальных task-workspace'ов по возрасту; 0 — не чистить.
+    workspace_retention_days: int = Field(default=14, ge=0)
+    # Потолок named workspaces на тенанта; 0 — named workspaces выключены.
+    max_named_workspaces: int = Field(default=20, ge=0)
+
+
 class SupervisorConfig(StrictModel):
     """Авто-поднятие refuel-suspended runs в долгоживущих процессах (§6.10).
 
@@ -380,6 +395,7 @@ class SvarogConfig(BaseSettings):
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    cloud: CloudConfig = Field(default_factory=CloudConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
