@@ -262,6 +262,13 @@ class AgentLoop:
                 await self._rebuild_after_refuel(run, state)
 
             while state.iterations < self._cfg.max_iterations:
+                # Cooperative-cancel (ADR-0017 §2): флаг ставит gateway из
+                # другой сессии БД; проверяем на границе итерации — посреди
+                # LLM-вызова или tool-исполнения ногу не рвём, checkpoint цел.
+                if await self._recorder.cancel_requested(run):
+                    await self._save_checkpoint(run, state)
+                    await self._recorder.finish_run(run, RunState.CANCELLED)
+                    return self._outcome(run, RunState.CANCELLED, state, "")
                 state.iterations += 1
                 state.iterations_since_refuel += 1
                 # Микрокомпакция (§1.4): дешёвый слой без LLM между «всё в

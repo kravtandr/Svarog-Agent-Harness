@@ -100,6 +100,7 @@ class TenantHub:
                 resolved.workspace,
                 on_run_created=lambda run_id: self.registry.record_run(run_id, tenant_id),
                 role=ctx.role,
+                tenant_id=tenant_id,  # /whoami (ADR-0017 §2)
             )
             svc.quota_guard = self._quota_guard_for(tenant_id, svc)
             self._services[ctx.tenant_id] = svc
