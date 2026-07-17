@@ -178,3 +178,24 @@
            относится к остальному содержимому. Проверено: то же P1-Driver после
            фикса убирает дубль корректно.
 - Runs:    3.
+
+### S10: Named workspace внутри git-корня — граница Flow C  (регрессия — фикс 2c17715)
+- Persona: P1 (точный инженер); поверхность — remote (ADR-0017): svarog serve
+           + svarog remote, single-tenant, workspace сервиса = git-репозиторий.
+- Goal:    run в named workspace не должен трогать git родительского workspace.
+- Setup:   серверный workspace — git-репо с коммитом (README + svarog.yaml);
+           `svarog remote workspace create notes`.
+- Driver:  «Создай файл checklist.md со списком из трёх шагов релиза …»
+           (`svarog remote run --workspace notes "…"`).
+- Assert:  файл появился в `named/notes/` (забирается `workspace pull`);
+           в РОДИТЕЛЬСКОМ репо workspace-root'а НЕТ веток `svarog/*` и новых
+           коммитов; `GET /runs/{id}/diff` пуст (не показывает родительский
+           репо и серверный svarog.yaml).
+- Watch:   до фикса `named/notes` наследовал родительский git (`rev-parse
+           --is-inside-work-tree` истинен из поддиректории): Flow C создавал
+           task-ветку в репо сервиса, `git add -A` из поддиректории коммитил
+           туда ВЕСЬ репозиторий (включая svarog.yaml с именами секретов), а
+           diff run'а отдавал родительский репо клиенту. Фикс: WorkspaceFlow
+           и run_diff требуют toplevel == workspace (см. 2c17715); юнит-
+           регрессии — tests/test_cloud_workspaces.py (граница workspace).
+- Runs:    1 (LLM) + детерминированные юнит-регрессии.
