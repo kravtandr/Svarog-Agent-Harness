@@ -36,6 +36,10 @@ from svarog_harness.trace.lookup import (
 # Состояния, из которых run можно возобновить (ADR-0005).
 _RESUMABLE_STATES = frozenset({RunState.SUSPENDED, RunState.WAITING_APPROVAL})
 
+# Cooperative-cancel (ADR-0017 §2): флаг в Run.meta, который loop читает на
+# границе итерации; checkpoint сохраняется, run уходит в CANCELLED.
+CANCEL_META_KEY = "cancel_requested"
+
 # Per-workspace lease (ADR-0015 §0.5): живой run бьётся heartbeat'ом каждую
 # итерацию. Если heartbeat старше этого порога — процесс run'а считается
 # мёртвым (упал/завис), lease протух: recovery приостанавливает такой run, а
@@ -395,6 +399,28 @@ class TraceRecorder:
         run.error = error
         run.finished_at = utcnow()
         await self._db.commit()
+
+    async def request_cancel(self, run: Run) -> None:
+        """Пометить run к cooperative-cancel (ADR-0017 §2).
+
+        Живую ногу loop не прерываем посреди tool-исполнения: флаг читается
+        loop'ом на границе итерации, checkpoint сохраняется, run уходит в
+        CANCELLED.
+        """
+        await self.merge_run_meta(run, {CANCEL_META_KEY: True})
+
+    async def cancel_requested(self, run: Run) -> bool:
+        """Прочитать флаг cancel из БД (пишется другим процессом/сессией)."""
+        await self._db.refresh(run)
+        return bool((run.meta or {}).get(CANCEL_META_KEY))
+
+    async def create_session(self, *, title: str, meta: dict[str, Any] | None = None) -> Session:
+        """Сессия без run'а — для gateway-chat (ADR-0017 §2): workspace сессии
+        фиксируется в meta до первого сообщения."""
+        session = Session(title=title[:200], meta=meta or {})
+        self._db.add(session)
+        await self._db.commit()
+        return session
 
     async def set_run_state(self, run: Run, state: RunState, *, error: str | None = None) -> None:
         """Нетерминальный переход state machine (suspended, waiting_approval,

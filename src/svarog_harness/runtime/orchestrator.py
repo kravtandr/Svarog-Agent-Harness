@@ -28,6 +28,7 @@ from svarog_harness.config.paths import (
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gitflow import GitRepo, SecretScanBlockedError, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import default_provider
+from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.policy import PolicyEngine, load_policy_rules
@@ -755,8 +756,22 @@ class TaskRunner:
         parts.append(f"результат:\n{outcome.final_answer}")
         return "\n".join(parts)
 
-    async def run_once(self, task: str, autonomy: AutonomyMode, *, hooks: RunHooks) -> RunOutcome:
-        """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit."""
+    async def run_once(
+        self,
+        task: str,
+        autonomy: AutonomyMode,
+        *,
+        hooks: RunHooks,
+        session_id: str | None = None,
+        history: list[ChatMessage] | None = None,
+    ) -> RunOutcome:
+        """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit.
+
+        session_id/history — серия runs одной сессии (§10.1): gateway-chat
+        (ADR-0017 §2) гоняет каждое сообщение отдельным run'ом в общем
+        workspace. Для внешнего агента (ADR-0016) сессию ведёт сам агент —
+        session_id здесь работает только с нативным loop.
+        """
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
         assert_workspace_isolated(self._cfg, self._workspace)  # раскладка (ADR-0015 §0.3)
         self._warn_layout_tradeoff(hooks)
@@ -766,6 +781,11 @@ class TaskRunner:
             hooks.on_workspace_prep(prep)
 
         external = self._cfg.executor.type == "external"
+        if external and session_id is not None:
+            raise ValueError(
+                "session_id поддерживается только нативным loop: сессию внешнего "
+                "агента ведёт сам агент (ADR-0016), gateway-chat для него — пост-MVP"
+            )
         # MCP внешнему агенту не пробрасывается (у него свой MCP-сервер
         # Svarog через bridge, §4): host-side серверы зря не поднимаем.
         backends = (
@@ -838,7 +858,7 @@ class TaskRunner:
                         mcp_tools=mcp_tools,
                         child_spawn=spawn,
                     )
-                    outcome = await loop.run(task, autonomy)
+                    outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
                 failed_checks = await self.verify(env, recorder, outcome, hooks)

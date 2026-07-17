@@ -116,3 +116,44 @@ class RunDiffView(BaseModel):
     # изменения рабочего дерева; пустые строки — нет git/изменений.
     committed: str
     uncommitted: str
+
+
+class CancelView(BaseModel):
+    run_id: str
+    # "cancelled" — терминализирован сразу (не было живой ноги);
+    # "cancelling" — флаг поставлен, loop завершит run на границе итерации.
+    state: str
+
+
+class WhoamiView(BaseModel):
+    tenant_id: str
+    role: str
+    active_runs: int
+    total_cost_usd: float
+    total_tokens: int
+
+
+class CreateSessionRequest(BaseModel):
+    """Сессия gateway-chat (ADR-0017 §2): workspace фиксируется на всю серию."""
+
+    title: str = Field(default="", max_length=200)
+    repo: RepoSpec | None = None
+    workspace: str | None = None
+
+    @model_validator(mode="after")
+    def _one_workspace_source(self) -> "CreateSessionRequest":
+        if self.repo is not None and self.workspace is not None:
+            raise ValueError("repo и workspace взаимоисключающие: задайте один источник")
+        return self
+
+
+class SendMessageRequest(BaseModel):
+    text: str = Field(min_length=1)
+    autonomy: AutonomyMode | None = None
+
+
+class SessionView(BaseModel):
+    session_id: str
+    title: str
+    workspace: str | None = None
+    runs: list[RunSummary]

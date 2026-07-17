@@ -26,17 +26,21 @@ from svarog_harness.config.paths import skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
     ApprovalView,
+    CancelView,
     RepoSpec,
     RunDetail,
     RunDiffView,
     RunSummary,
+    SessionView,
     SkillCard,
     ToolCallView,
+    WhoamiView,
     WorkspaceView,
 )
 from svarog_harness.gitflow.provision import (
     DEFAULT_GIT_CREDENTIALS_REF,
     CloneError,
+    UnknownWorkspaceError,
     create_named_workspace,
     delete_named_workspace,
     list_named_workspaces,
@@ -47,13 +51,19 @@ from svarog_harness.gitflow.provision import (
     task_workspace_dir,
 )
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
-from svarog_harness.storage.models import Run, RunState
+from svarog_harness.storage.models import Run, RunState, Session
 from svarog_harness.tenant.quota import QuotaUsage
-from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError, find_run_by_prefix
+from svarog_harness.trace.lookup import (
+    ApprovalNotFoundError,
+    RunNotFoundError,
+    find_run_by_prefix,
+    find_session_by_prefix,
+)
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import fetch_run, fetch_runs, run_usage_totals
 from svarog_harness.verifier import CheckOutcome
@@ -64,6 +74,14 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _GC_INTERVAL_SEC = 3600.0
 # Незавершённые состояния: их workspace GC не трогает (resume должен работать).
 _LIVE_STATES = (RunState.PENDING, RunState.RUNNING, RunState.WAITING_APPROVAL, RunState.SUSPENDED)
+# Терминальные состояния: cancel к ним неприменим (409).
+_TERMINAL_STATES = (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED)
+# Сообщений истории сессии в контексте run'а (как _CHAT_HISTORY_LIMIT в CLI-chat).
+_SESSION_HISTORY_LIMIT = 24
+
+
+class CancelNotAllowedError(Exception):
+    """Run уже терминален — отменять нечего (ADR-0017 §2)."""
 
 
 @dataclass
@@ -85,6 +103,8 @@ class GatewayService:
     # Проверка квоты перед стартом run'а — TenantHub вешает сюда лимиты тенанта
     # (ADR-0014, Фаза 3); бросает QuotaExceededError. None — без квот.
     quota_guard: Callable[[], Awaitable[None]] | None = None
+    # Идентичность для /whoami (ADR-0017 §2); TenantHub проставляет tenant_id.
+    tenant_id: str = "local"
 
     def __post_init__(self) -> None:
         self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
@@ -200,11 +220,15 @@ class GatewayService:
         started: asyncio.Future[str],
         *,
         runner: TaskRunner | None = None,
+        session_id: str | None = None,
+        history: list[ChatMessage] | None = None,
     ) -> None:
         holder = _RunHolder()
         hooks = self._event_hooks(holder, started)
         try:
-            outcome = await (runner or self._runner).run_once(task, autonomy, hooks=hooks)
+            outcome = await (runner or self._runner).run_once(
+                task, autonomy, hooks=hooks, session_id=session_id, history=history
+            )
             self._publish_finished(outcome)
         except Exception as exc:
             self._publish_error(holder, started, exc)
@@ -376,6 +400,130 @@ class GatewayService:
             approval = await recorder.find_approval_by_prefix(approval_id)
             await recorder.answer_question(approval, answer=answer, answered_by="api")
             return approval.run_id
+
+        return await self._read(action)
+
+    async def cancel_run(self, run_id: str) -> CancelView:
+        """Cooperative-cancel (ADR-0017 §2).
+
+        Run без живой ноги (waiting_approval/suspended/протухший) терминализируется
+        сразу — его pending-approvals закрываются отказом. Живой RUNNING получает
+        флаг в meta: loop завершит run на границе итерации, checkpoint сохранён.
+        """
+
+        async def action(db: AsyncSession) -> CancelView:
+            recorder = TraceRecorder(db)
+            run = await find_run_by_prefix(db, run_id)
+            if run.state in _TERMINAL_STATES:
+                raise CancelNotAllowedError(
+                    f"run {run.id[:8]} уже в терминальном состоянии '{run.state.value}'"
+                )
+            if run.state == RunState.RUNNING:
+                await recorder.request_cancel(run)
+                return CancelView(run_id=run.id, state="cancelling")
+            # waiting_approval / suspended / pending: живой ноги нет —
+            # терминализируем сразу и закрываем pending-approvals отказом.
+            for approval in await recorder.fetch_pending_approvals():
+                if approval.run_id == run.id:
+                    await recorder.decide_approval(
+                        approval, approved=False, decided_by="cancel", reason="run отменён"
+                    )
+            await recorder.finish_run(run, RunState.CANCELLED)
+            return CancelView(run_id=run.id, state="cancelled")
+
+        view = await self._read(action)
+        if view.state == "cancelled":
+            self.events.publish(
+                view.run_id,
+                {"type": "run_finished", "run_id": view.run_id, "state": "cancelled"},
+            )
+        return view
+
+    async def whoami(self) -> WhoamiView:
+        """Идентичность и usage тенанта (ADR-0017 §2)."""
+        usage = await self.usage()
+        return WhoamiView(
+            tenant_id=self.tenant_id,
+            role=self.role.value,
+            active_runs=usage.active_runs,
+            total_cost_usd=usage.total_cost_usd,
+            total_tokens=usage.total_tokens,
+        )
+
+    # --- сессии gateway-chat (ADR-0017 §2, семантика §10.1) ---------------
+
+    async def create_session(
+        self,
+        *,
+        title: str = "",
+        repo: RepoSpec | None = None,
+        workspace_name: str | None = None,
+    ) -> SessionView:
+        """Сессия: workspace провижнится один раз и живёт всю серию runs."""
+        workspace = await self._provision_workspace(title or "session", repo, workspace_name)
+        meta = {"workspace": str(workspace.expanduser().resolve())}
+
+        async def action(db: AsyncSession) -> Session:
+            return await TraceRecorder(db).create_session(
+                title=title or "gateway-сессия", meta=meta
+            )
+
+        session = await self._read(action)
+        return SessionView(
+            session_id=session.id, title=session.title or "", workspace=meta["workspace"], runs=[]
+        )
+
+    async def send_message(self, session_id: str, text: str, autonomy: AutonomyMode | None) -> str:
+        """Сообщение чата → отдельный run в workspace сессии с её историей."""
+        if self.quota_guard is not None:
+            await self.quota_guard()  # QuotaExceededError → 429
+
+        async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:
+            session = await find_session_by_prefix(db, session_id)
+            raw = await TraceRecorder(db).session_history(
+                session.id, limit_messages=_SESSION_HISTORY_LIMIT
+            )
+            return session, raw
+
+        session, raw = await self._read(action)
+        workspace = Path((session.meta or {}).get("workspace") or self.workspace)
+        if not workspace.is_dir():
+            raise UnknownWorkspaceError(
+                f"workspace сессии {session.id[:8]} больше не существует: {workspace}"
+            )
+        if await self._workspace_busy(workspace):
+            raise WorkspaceBusyError(f"в сессии {session.id[:8]} ещё выполняется предыдущий run")
+        history = [
+            ChatMessage(role="user" if m["role"] == "user" else "assistant", content=m["content"])
+            for m in raw
+        ]
+        mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
+        started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._spawn(
+            self._run_bg(
+                text,
+                mode,
+                started,
+                runner=self._runner_for(workspace),
+                session_id=session.id,
+                history=history,
+            )
+        )
+        return await started
+
+    async def get_session(self, session_id: str) -> SessionView:
+        async def action(db: AsyncSession) -> SessionView:
+            session = await find_session_by_prefix(db, session_id)
+            result = await db.execute(
+                select(Run).where(Run.session_id == session.id).order_by(Run.created_at)
+            )
+            runs = [_summary(run) for run in result.scalars()]
+            return SessionView(
+                session_id=session.id,
+                title=session.title or "",
+                workspace=(session.meta or {}).get("workspace"),
+                runs=runs,
+            )
 
         return await self._read(action)
 

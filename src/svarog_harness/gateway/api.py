@@ -7,12 +7,13 @@ GatewayService, сериализует ответ. Approval асинхронны
 
 import asyncio
 import contextlib
+import json
 import os
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
@@ -20,7 +21,9 @@ from svarog_harness.gateway.models import (
     AnswerRequest,
     ApprovalDecisionRequest,
     ApprovalView,
+    CancelView,
     CreateRunRequest,
+    CreateSessionRequest,
     CreateWorkspaceRequest,
     DirListing,
     FileEntry,
@@ -28,10 +31,13 @@ from svarog_harness.gateway.models import (
     RunDiffView,
     RunRef,
     RunSummary,
+    SendMessageRequest,
+    SessionView,
     SkillCard,
+    WhoamiView,
     WorkspaceView,
 )
-from svarog_harness.gateway.service import GatewayService
+from svarog_harness.gateway.service import CancelNotAllowedError, GatewayService
 from svarog_harness.gitflow.provision import (
     CloneError,
     RepoUrlError,
@@ -41,7 +47,11 @@ from svarog_harness.gitflow.provision import (
     WorkspaceNameError,
 )
 from svarog_harness.tenant.quota import QuotaExceededError
-from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
+from svarog_harness.trace.lookup import (
+    ApprovalNotFoundError,
+    RunNotFoundError,
+    SessionNotFoundError,
+)
 from svarog_harness.trace.recorder import WorkspaceBusyError
 
 
@@ -146,6 +156,71 @@ def create_app(
             return await service.run_diff(run_id)
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post("/runs/{run_id}/cancel", response_model=CancelView)
+    async def cancel_run(run_id: str, service: ServiceDep) -> CancelView:
+        try:
+            return await service.cancel_run(run_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except CancelNotAllowedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/runs/{run_id}/events/stream")
+    async def run_events_stream(run_id: str, service: ServiceDep) -> StreamingResponse:
+        """NDJSON-стрим событий run'а: HTTP-аналог WS для thin CLI (ADR-0017 §3).
+
+        Клиенту достаточно httpx: строка = JSON-событие, стрим закрывается
+        после run_finished.
+        """
+
+        async def lines() -> AsyncIterator[bytes]:
+            async for event in service.stream(run_id):
+                yield (json.dumps(event, ensure_ascii=False) + "\n").encode()
+
+        return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+    @app.get("/whoami", response_model=WhoamiView)
+    async def whoami(service: ServiceDep) -> WhoamiView:
+        return await service.whoami()
+
+    # --- сессии gateway-chat (ADR-0017 §2) --------------------------------
+
+    @app.post("/sessions", response_model=SessionView, status_code=201)
+    async def create_session(req: CreateSessionRequest, service: ServiceDep) -> SessionView:
+        try:
+            return await service.create_session(
+                title=req.title, repo=req.repo, workspace_name=req.workspace
+            )
+        except UnknownWorkspaceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except (RepoUrlError, WorkspaceNameError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except CloneError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @app.get("/sessions/{session_id}", response_model=SessionView)
+    async def get_session(session_id: str, service: ServiceDep) -> SessionView:
+        try:
+            return await service.get_session(session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
+    async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
+        try:
+            run_id = await service.send_message(session_id, req.text, req.autonomy)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except UnknownWorkspaceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except QuotaExceededError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from None
+        return RunRef(run_id=run_id, state="running")
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------
 
