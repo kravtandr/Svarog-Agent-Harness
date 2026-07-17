@@ -9,32 +9,61 @@ run в фоне. Источник истины по trace — SQLite; событ
 
 import asyncio
 import contextlib
+import os
+import tarfile
+import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.paths import skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
     ApprovalView,
+    RepoSpec,
     RunDetail,
+    RunDiffView,
     RunSummary,
     SkillCard,
     ToolCallView,
+    WorkspaceView,
 )
+from svarog_harness.gitflow.provision import (
+    DEFAULT_GIT_CREDENTIALS_REF,
+    CloneError,
+    create_named_workspace,
+    delete_named_workspace,
+    list_named_workspaces,
+    provision_clone,
+    resolve_named_workspace,
+    resolve_workspace_file,
+    sweep_task_workspaces,
+    task_workspace_dir,
+)
+from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
-from svarog_harness.storage.models import Run
+from svarog_harness.storage.models import Run, RunState
 from svarog_harness.tenant.quota import QuotaUsage
-from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError
-from svarog_harness.trace.recorder import TraceRecorder
+from svarog_harness.trace.lookup import ApprovalNotFoundError, RunNotFoundError, find_run_by_prefix
+from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import fetch_run, fetch_runs, run_usage_totals
 from svarog_harness.verifier import CheckOutcome
+
+# Диф от корня истории, когда первый коммит run'а — root commit.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# Retention-GC task-workspace'ов гоняется не чаще раза в час (ADR-0017).
+_GC_INTERVAL_SEC = 3600.0
+# Незавершённые состояния: их workspace GC не трогает (resume должен работать).
+_LIVE_STATES = (RunState.PENDING, RunState.RUNNING, RunState.WAITING_APPROVAL, RunState.SUSPENDED)
 
 
 @dataclass
@@ -65,6 +94,66 @@ class GatewayService:
         # и множество run'ов с уже запущенным авто-возобновлением (без гонки).
         self._auto_resumes: dict[str, int] = {}
         self._inflight: set[str] = set()
+        # Retention-GC task-workspace'ов (ADR-0017): троттлинг по monotonic.
+        self._last_gc = 0.0
+
+    # --- per-run workspaces (ADR-0017) ------------------------------------
+
+    def _runner_for(self, workspace: Path) -> TaskRunner:
+        """Runner для workspace run'а; workspace сервиса — общий self._runner.
+
+        Per-run runner делит с сервисом конфиг (та же БД/память/секреты
+        тенанта) и отличается только рабочим деревом — изоляция путей ядра
+        уже параметризована по workspace (ADR-0012).
+        """
+        ws = workspace.expanduser().resolve()
+        if ws == self.workspace.expanduser().resolve():
+            return self._runner
+        return TaskRunner(self.cfg, ws, role=self.role)
+
+    async def _provision_workspace(
+        self, task: str, repo: RepoSpec | None, name: str | None
+    ) -> Path:
+        """Workspace будущего run'а: named / git-клон / workspace сервиса."""
+        if name is not None:
+            path = resolve_named_workspace(self.workspace, name).resolve()
+            # Ранний отказ 409 до docker/LLM; авторитетный lease-гард всё равно
+            # срабатывает в run_once (ADR-0015 §0.5) — тут только быстрый UX.
+            if await self._workspace_busy(path):
+                raise WorkspaceBusyError(f"workspace '{name}' занят активным run")
+            return path
+        if repo is not None:
+            dest = task_workspace_dir(self.workspace, task)
+            credentials = self._git_credentials(repo.credentials_ref)
+            await provision_clone(repo.url, dest, ref=repo.ref, credentials=credentials)
+            return dest.resolve()
+        return self.workspace
+
+    def _git_credentials(self, ref: str | None) -> str | None:
+        """Git-credentials из tenant-store (ADR-0017 развилка 3), только host-side.
+
+        Явно названный ref обязан существовать; конвенциональный
+        "git.credentials" опционален (нет секрета — анонимный clone).
+        """
+        store = self._runner.store  # tenant-скоуп (для standard — без env-fallback)
+        if ref is not None:
+            value = store.get(ref)
+            if not value:
+                raise CloneError(f"секрет '{ref}' (credentials_ref) не найден в tenant-store")
+            return value
+        return store.get(DEFAULT_GIT_CREDENTIALS_REF) or None
+
+    async def _workspace_busy(self, path: Path) -> bool:
+        """Есть ли живой run в workspace (lease-семантика ADR-0015 §0.5)."""
+
+        async def action(db: AsyncSession) -> bool:
+            try:
+                await TraceRecorder(db).acquire_workspace_lease(str(path))
+            except WorkspaceBusyError:
+                return True
+            return False
+
+        return await self._read(action)
 
     # --- запуск и возобновление runs -------------------------------------
 
@@ -77,13 +166,26 @@ class GatewayService:
 
         return await self._read(action)
 
-    async def create_run(self, task: str, autonomy: AutonomyMode | None) -> str:
-        """Запустить run в фоне; вернуть run_id, как только он создан."""
+    async def create_run(
+        self,
+        task: str,
+        autonomy: AutonomyMode | None,
+        *,
+        repo: RepoSpec | None = None,
+        workspace_name: str | None = None,
+    ) -> str:
+        """Запустить run в фоне; вернуть run_id, как только он создан.
+
+        Источник workspace (ADR-0017): git-клон в одноразовый task-workspace
+        (`repo`), постоянный named workspace (`workspace_name`) либо workspace
+        сервиса. Квота проверяется ДО клона (429 раньше сетевой работы).
+        """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429 на транспорте
+        workspace = await self._provision_workspace(task, repo, workspace_name)
         mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        self._spawn(self._run_bg(task, mode, started))
+        self._spawn(self._run_bg(task, mode, started, runner=self._runner_for(workspace)))
         return await started
 
     def _spawn(self, coro: Awaitable[None]) -> None:
@@ -92,12 +194,17 @@ class GatewayService:
         task.add_done_callback(self._tasks.discard)
 
     async def _run_bg(
-        self, task: str, autonomy: AutonomyMode, started: asyncio.Future[str]
+        self,
+        task: str,
+        autonomy: AutonomyMode,
+        started: asyncio.Future[str],
+        *,
+        runner: TaskRunner | None = None,
     ) -> None:
         holder = _RunHolder()
         hooks = self._event_hooks(holder, started)
         try:
-            outcome = await self._runner.run_once(task, autonomy, hooks=hooks)
+            outcome = await (runner or self._runner).run_once(task, autonomy, hooks=hooks)
             self._publish_finished(outcome)
         except Exception as exc:
             self._publish_error(holder, started, exc)
@@ -115,10 +222,25 @@ class GatewayService:
         started.set_result(run_id)
         hooks = self._event_hooks(holder, started)
         try:
-            outcome = await self._runner.resume(run_id, hooks=hooks)
+            # Runner — по workspace run'а (per-run workspaces, ADR-0017):
+            # resume под конфигом тенанта, а не сервиса-по-умолчанию.
+            runner = await self._runner_for_run(run_id)
+            outcome = await runner.resume(run_id, hooks=hooks)
             self._publish_finished(outcome)
         except Exception as exc:
             self._publish_error(holder, started, exc)
+
+    async def _runner_for_run(self, run_id: str) -> TaskRunner:
+        """Runner, привязанный к workspace существующего run'а (для resume)."""
+
+        async def action(db: AsyncSession) -> str | None:
+            run = await find_run_by_prefix(db, run_id)
+            return run.workspace
+
+        workspace = await self._read(action)
+        if not workspace:
+            return self._runner
+        return self._runner_for(Path(workspace))
 
     # --- события ----------------------------------------------------------
 
@@ -257,11 +379,100 @@ class GatewayService:
 
         return await self._read(action)
 
+    # --- named workspaces и артефакты (ADR-0017) ---------------------------
+
+    async def create_workspace(self, name: str) -> WorkspaceView:
+        path = create_named_workspace(
+            self.workspace, name, limit=self.cfg.cloud.max_named_workspaces
+        )
+        return WorkspaceView(name=name, size_bytes=0, modified_at=_mtime(path), busy=False)
+
+    async def list_workspaces(self) -> list[WorkspaceView]:
+        views = []
+        for info in list_named_workspaces(self.workspace):
+            views.append(
+                WorkspaceView(
+                    name=info.name,
+                    size_bytes=info.size_bytes,
+                    modified_at=info.modified_at,
+                    busy=await self._workspace_busy(info.path.resolve()),
+                )
+            )
+        return views
+
+    async def delete_workspace(self, name: str) -> None:
+        path = resolve_named_workspace(self.workspace, name).resolve()
+        if await self._workspace_busy(path):
+            raise WorkspaceBusyError(f"workspace '{name}' занят активным run — удаление отклонено")
+        delete_named_workspace(self.workspace, name)
+
+    def workspace_target(self, name: str, relative: str) -> Path:
+        """Файл/каталог внутри named workspace (confinement — в provision)."""
+        return resolve_workspace_file(self.workspace, name, relative)
+
+    def archive_workspace(self, name: str) -> Path:
+        """tar.gz снапшот named workspace во временном файле (вызывающий удаляет)."""
+        base = resolve_named_workspace(self.workspace, name)
+        fd, tmp = tempfile.mkstemp(prefix=f"svarog-ws-{name}-", suffix=".tar.gz")
+        os.close(fd)
+        with tarfile.open(tmp, "w:gz") as tar:
+            # tarfile не следует symlink'ам (кладёт их как symlink-записи) —
+            # содержимое за пределами workspace в архив не утекает.
+            tar.add(base, arcname=name)
+        return Path(tmp)
+
+    async def run_diff(self, run_id: str) -> RunDiffView:
+        """Диф run'а: патч его step-коммитов (Run-Id trailer, Flow C) +
+        незакоммиченные изменения рабочего дерева (ADR-0017 §2)."""
+
+        async def action(db: AsyncSession) -> Run:
+            return await find_run_by_prefix(db, run_id)
+
+        run = await self._read(action)
+        workspace = Path(run.workspace) if run.workspace else self.workspace
+        committed = uncommitted = ""
+        repo = GitRepo(workspace)
+        if workspace.is_dir() and await repo.is_repo() and await repo.has_commits():
+            _, uncommitted, _ = await repo._git("diff", "HEAD", check=False)
+            shas = [sha for sha, rid in await repo.log_with_run_ids() if run.id in rid.split(",")]
+            if shas:
+                newest, oldest = shas[0], shas[-1]
+                code, base, _ = await repo._git("rev-parse", f"{oldest}^", check=False)
+                base_ref = base.strip() if code == 0 else _EMPTY_TREE
+                _, committed, _ = await repo._git("diff", base_ref, newest, check=False)
+        return RunDiffView(run_id=run.id, committed=committed, uncommitted=uncommitted)
+
+    async def sweep_workspaces(self) -> list[Path]:
+        """Retention-GC терминальных task-workspace'ов (named не трогает)."""
+        days = self.cfg.cloud.workspace_retention_days
+        if days <= 0:
+            return []
+
+        async def action(db: AsyncSession) -> set[str]:
+            result = await db.execute(
+                select(Run.workspace).where(Run.state.in_(_LIVE_STATES), Run.workspace.is_not(None))
+            )
+            return {ws for (ws,) in result.all() if ws}
+
+        active = await self._read(action)
+        return sweep_task_workspaces(self.workspace, retention_days=days, active=active)
+
+    async def _maybe_sweep_workspaces(self) -> None:
+        if self.cfg.cloud.workspace_retention_days <= 0:
+            return
+        now = time.monotonic()
+        if self._last_gc and now - self._last_gc < _GC_INTERVAL_SEC:
+            return
+        self._last_gc = now
+        with contextlib.suppress(Exception):
+            await self.sweep_workspaces()
+
     # --- супервизор refuel (§6.10, ADR-0005) ------------------------------
 
     async def supervise_once(self) -> list[str]:
         """Один проход: поднять refuel-suspended runs. Возвращает run_id'ы, для
         которых запущено авто-возобновление (для тестов и наблюдаемости)."""
+        await self._maybe_sweep_workspaces()  # retention-GC task-workspaces (ADR-0017)
         sup = self.cfg.supervisor
         if not sup.auto_resume_refuel:
             return []
@@ -317,6 +528,10 @@ class GatewayService:
             )
             for s in scan.skills
         ]
+
+
+def _mtime(path: Path) -> "datetime":
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
 
 
 def _summary(run: Run) -> RunSummary:

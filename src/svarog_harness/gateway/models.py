@@ -1,16 +1,37 @@
-"""Pydantic-схемы REST/WebSocket API (§10.4)."""
+"""Pydantic-схемы REST/WebSocket API (§10.4, cloud-режим — ADR-0017)."""
 
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from svarog_harness.config.schema import AutonomyMode
+
+
+class RepoSpec(BaseModel):
+    """Git-источник одноразового task-workspace (ADR-0017 §1)."""
+
+    url: str = Field(min_length=1, description="https:// или ssh URL репозитория")
+    ref: str | None = Field(default=None, description="Ветка/тег; None — default branch")
+    # Имя секрета с credentials в tenant-store; None — конвенциональный
+    # "git.credentials" (отсутствие секрета = анонимный clone).
+    credentials_ref: str | None = None
 
 
 class CreateRunRequest(BaseModel):
     task: str = Field(min_length=1, description="Задача для агента")
     # None — взять режим из конфигурации; иначе переопределить для этого run.
     autonomy: AutonomyMode | None = None
+    # Источник workspace (ADR-0017): git-клон в одноразовый task-workspace
+    # ЛИБО постоянный named workspace тенанта; оба None — workspace сервиса.
+    repo: RepoSpec | None = None
+    workspace: str | None = Field(default=None, description="Имя named workspace")
+
+    @model_validator(mode="after")
+    def _one_workspace_source(self) -> "CreateRunRequest":
+        if self.repo is not None and self.workspace is not None:
+            raise ValueError("repo и workspace взаимоисключающие: задайте один источник")
+        return self
 
 
 class RunRef(BaseModel):
@@ -65,3 +86,33 @@ class ApprovalDecisionRequest(BaseModel):
 class AnswerRequest(BaseModel):
     # Ответ человека на вопрос ask_user; пусто — продолжить без ответа (§6.5).
     answer: str = ""
+
+
+class CreateWorkspaceRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64, description="Слаг [a-z0-9-]")
+
+
+class WorkspaceView(BaseModel):
+    name: str
+    size_bytes: int
+    modified_at: datetime
+    busy: bool  # есть живой run в этом workspace (lease, ADR-0015 §0.5)
+
+
+class FileEntry(BaseModel):
+    name: str
+    is_dir: bool
+    size_bytes: int
+
+
+class DirListing(BaseModel):
+    path: str
+    entries: list[FileEntry]
+
+
+class RunDiffView(BaseModel):
+    run_id: str
+    # Патч коммитов run'а (по Run-Id trailer, Flow C) и незакоммиченные
+    # изменения рабочего дерева; пустые строки — нет git/изменений.
+    committed: str
+    uncommitted: str
