@@ -9,7 +9,6 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -19,10 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.cli import remote as remote_module
+from svarog_harness.cli.chat_engine import (
+    ChatEngine,
+    record_gate_answer,
+    record_gate_decision,
+)
+from svarog_harness.cli.chat_engine import (
+    with_db as _with_db,
+)
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import (
     WorkspaceLayoutError,
-    assert_workspace_isolated,
     memory_dir,
     skills_dirs,
 )
@@ -35,7 +41,6 @@ from svarog_harness.gitflow import (
     separate_gitdir_for,
 )
 from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
-from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
@@ -71,7 +76,6 @@ from svarog_harness.skills.proposal_manager import (
     SkillProposalNotFoundError,
     SkillProposalStateError,
 )
-from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.locks import default_lock_backend
 from svarog_harness.storage.models import Approval, Run, RunState, SkillProposal
 from svarog_harness.trace.lookup import (
@@ -297,17 +301,6 @@ def _resolve_autonomy(
     return chosen[0] if chosen else cfg.runtime.autonomy
 
 
-async def _with_db[T](cfg: SvarogConfig, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
-    init_db(cfg.storage.db_path)
-    engine = create_engine(cfg.storage.db_path.expanduser())
-    try:
-        factory = create_session_factory(engine)
-        async with factory() as db:
-            return await action(db)
-    finally:
-        await engine.dispose()
-
-
 def _known_secret_values(cfg: SvarogConfig, store: SecretStore) -> frozenset[str]:
     refs = list(cfg.secrets.inject)
     refs.extend(
@@ -469,9 +462,6 @@ def run(
     _report_outcome(outcome, _failed_checks(cfg, outcome), as_json=json_output)
 
 
-_CHAT_HISTORY_LIMIT = 24  # сообщений диалога в контексте, чтобы не раздувать промпт
-
-
 @app.command()
 def chat(
     workspace: Annotated[
@@ -546,110 +536,26 @@ async def _chat_session(
     continue_ref: str | None = None,
     fork_ref: str | None = None,
 ) -> None:
-    assert_workspace_isolated(cfg, workspace)  # раскладка (ADR-0015 §0.3), как в run_once/resume
-    runner = TaskRunner(cfg, workspace)
     hooks = _console_hooks()
     if sys.stdin.isatty():
         # Живой промпт approval/ask_user прямо в чате (§7): решение уходит в
         # БД, гейт продолжает агента без suspend/resume.
         hooks.on_approval_requested = lambda approval: _prompt_gate_decision(cfg, approval)
-    external = cfg.executor.type == "external"
-    if external:
-        runner.assert_external_autonomy_supported(autonomy)  # fail-closed (ADR-0016 §6)
-    backends = (
-        [] if external else await connect_mcp_servers(cfg.mcp, runner.host_store)
-    )  # host-скоуп (ADR-0014 #2)
-    mcp_tools = build_mcp_tools(backends)
-    infra = None
-    if external:
-        infra = runner.build_agent_infra()
-        await infra.start()
-        runner.prepare_agent_launch(infra)
-    environment = runner.build_environment(infra)
-    await environment.start()
-    try:
-
-        async def action(db: AsyncSession) -> None:
-            recorder = TraceRecorder(db)
-            await runner.recover(recorder, hooks)
-            session_id: str | None = None
-            history: list[ChatMessage] = []
-            if continue_ref or fork_ref:
-                # Продолжение/форк сессии (ADR-0015 фаза 5): история из trace —
-                # пары (task, финальный ответ) по каждому run сессии.
-                source = await find_session_by_prefix(db, continue_ref or fork_ref or "")
-                raw = await recorder.session_history(source.id, limit_messages=_CHAT_HISTORY_LIMIT)
-                history = [
-                    ChatMessage(
-                        role="user" if m["role"] == "user" else "assistant",
-                        content=m["content"],
-                    )
-                    for m in raw
-                ]
-                if continue_ref:
-                    session_id = source.id
-                    label = f"продолжаю сессию {source.id[:8]}"
-                else:
-                    label = f"форк сессии {source.id[:8]} — новая сессия"
-                console.print(f"[dim]{label} ({len(history)} сообщений истории)[/dim]")
-            while True:
-                try:
-                    task = (
-                        await asyncio.to_thread(_read_user_line, "\n[bold cyan]› [/bold cyan]")
-                    ).strip()
-                except (EOFError, KeyboardInterrupt):
-                    break
-                if not task or task in {"/quit", "/exit"}:
-                    break
-                proposal_sink: list[SkillProposalRequest] = []
-                if external:
-                    # Chat поверх agent-сессий (ADR-0016 фаза 3): контекст
-                    # диалога живёт в сессии агента — продолжаем её --resume.
-                    assert infra is not None
-                    control = runner.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
-                    agent_session = (
-                        await recorder.last_agent_session(session_id)
-                        if session_id is not None
-                        else None
-                    )
-                    executor = runner.build_external_executor(
-                        recorder, environment, hooks, infra=infra, control=control
-                    )
-                    outcome = await executor.run(
-                        task, autonomy, session_id=session_id, agent_session=agent_session
-                    )
-                else:
-                    excluded = frozenset(await CuratorStore(db).archived_names())
-                    loop = runner.build_loop(
-                        recorder,
-                        environment,
-                        autonomy,
-                        hooks,
-                        proposal_sink,
-                        excluded_skills=excluded,
-                        mcp_tools=mcp_tools,
-                    )
-                    outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
-                await runner.drain_memory(db, hooks)
-                await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
-                if session_id is None:
-                    run = await recorder.get_run(outcome.run_id)
-                    session_id = run.session_id if run else None
-                history.append(ChatMessage(role="user", content=task))
-                history.append(
-                    ChatMessage(role="assistant", content=outcome.final_answer or "(без ответа)")
-                )
-                history[:] = history[-_CHAT_HISTORY_LIMIT:]
-                _print_chat_turn(outcome)
-
-        await runner.with_db(action)
-    finally:
-        await environment.cleanup()
-        for backend in backends:
-            with contextlib.suppress(Exception):
-                await backend.close()
-        if infra is not None:
-            await infra.stop()
+    async with ChatEngine(cfg, workspace, autonomy, hooks) as engine:
+        start = await engine.start(continue_ref=continue_ref, fork_ref=fork_ref)
+        if start.label:
+            console.print(f"[dim]{start.label}[/dim]")
+        while True:
+            try:
+                task = (
+                    await asyncio.to_thread(_read_user_line, "\n[bold cyan]› [/bold cyan]")
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not task or task in {"/quit", "/exit"}:
+                break
+            outcome = await engine.send(task)
+            _print_chat_turn(outcome)
 
 
 def _print_chat_turn(outcome: RunOutcome) -> None:
@@ -726,21 +632,6 @@ def _show_approval(approval: Approval) -> None:
         console.print(f"  причина: {payload['reason']}")
 
 
-def _record_decision(
-    cfg: SvarogConfig, approval_id: str, *, approved: bool, reason: str | None, decided_by: str
-) -> None:
-    """Записать решение approval собственной короткой DB-сессией."""
-
-    async def decide(db: AsyncSession) -> None:
-        recorder = TraceRecorder(db)
-        found = await recorder.find_approval_by_prefix(approval_id)
-        await recorder.decide_approval(
-            found, approved=approved, decided_by=decided_by, reason=reason
-        )
-
-    asyncio.run(_with_db(cfg, decide))
-
-
 def _confirm_approval(cfg: SvarogConfig, approval: Approval, *, decided_by: str) -> None:
     """Показать действие и записать вердикт человека из терминала."""
     _show_approval(approval)
@@ -748,7 +639,7 @@ def _confirm_approval(cfg: SvarogConfig, approval: Approval, *, decided_by: str)
     reason = None
     if not approved:
         reason = typer.prompt("причина отказа", default="", show_default=False) or None
-    _record_decision(cfg, approval.id, approved=approved, reason=reason, decided_by=decided_by)
+    record_gate_decision(cfg, approval.id, approved=approved, reason=reason, decided_by=decided_by)
 
 
 def _prompt_gate_decision(cfg: SvarogConfig, approval: Approval) -> None:
@@ -799,13 +690,7 @@ def _answer_question_interactive(cfg: SvarogConfig, approval: Approval) -> None:
     answer = typer.prompt(
         "ваш ответ (Enter — продолжить без ответа)", default="", show_default=False
     )
-
-    async def record(db: AsyncSession, approval_id: str = approval.id, text: str = answer) -> None:
-        recorder = TraceRecorder(db)
-        found = await recorder.find_approval_by_prefix(approval_id)
-        await recorder.answer_question(found, answer=text, answered_by="cli")
-
-    asyncio.run(_with_db(cfg, record))
+    record_gate_answer(cfg, approval.id, answer, answered_by="cli")
 
 
 def _outcome_exit_code(outcome: RunOutcome, failed_checks: int) -> int:
