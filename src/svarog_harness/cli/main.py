@@ -499,7 +499,7 @@ def chat(
         raise typer.Exit(code=1)
     cfg = _load_config_or_exit(project_dir=workspace)
     autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
-    if not plain and sys.stdin.isatty() and sys.stdout.isatty():
+    if not plain and _stdio_is_tty():
         # Loop'ом владеет Textual: без asyncio.run. Ошибки старта sandbox/модели
         # TUI показывает сам (транскрипт + статус), а не через exit-код.
         from svarog_harness.cli.tui import run_chat_tui
@@ -524,6 +524,11 @@ def chat(
     except WorkspaceLayoutError as exc:
         console.print(f"[red]ошибка раскладки workspace:[/red] {exc}")
         raise typer.Exit(code=1) from None
+
+
+def _stdio_is_tty() -> bool:
+    """TTY-автовыбор TUI (ADR-0018): оба конца — терминал."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _read_user_line(prompt: str) -> str:

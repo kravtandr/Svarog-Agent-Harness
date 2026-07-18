@@ -109,3 +109,63 @@ def test_chat_rejects_workspace_overlapping_control_plane(tmp_path, monkeypatch)
 
     assert result.exit_code == 1, result.output
     assert "раскладки workspace" in result.output
+
+
+def _write_chat_config(tmp_path, ws) -> None:
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+
+
+def test_chat_opens_tui_on_tty_and_plain_forces_repl(tmp_path, monkeypatch) -> None:
+    # TTY-автовыбор (ADR-0018): с терминалом chat уходит в TUI, --plain и
+    # отсутствие TTY остаются на построчном REPL.
+    from svarog_harness.cli import main as cli_main
+    from svarog_harness.cli import tui as tui_module
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_chat_config(tmp_path, ws)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    launched: list[tuple] = []
+    monkeypatch.setattr(
+        tui_module, "run_chat_tui", lambda *args, **kwargs: launched.append((args, kwargs))
+    )
+    monkeypatch.setattr(cli_main, "_stdio_is_tty", lambda: True)
+
+    result = runner.invoke(app, ["chat", "--workspace", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1  # ушли в TUI
+
+    # --plain: REPL читает stdin (CliRunner подаёт EOF — мгновенный выход).
+    result = runner.invoke(app, ["chat", "--workspace", str(ws), "--plain"])
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1  # TUI не запускался
+    assert "svarog chat" in result.output
+
+
+def test_chat_without_tty_falls_back_to_plain(tmp_path, monkeypatch) -> None:
+    from svarog_harness.cli import tui as tui_module
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_chat_config(tmp_path, ws)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    launched: list[tuple] = []
+    monkeypatch.setattr(
+        tui_module, "run_chat_tui", lambda *args, **kwargs: launched.append((args, kwargs))
+    )
+
+    result = runner.invoke(app, ["chat", "--workspace", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert launched == []  # CliRunner — не TTY: plain-REPL
