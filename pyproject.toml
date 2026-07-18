@@ -31,6 +31,9 @@ dependencies = [
     "docker>=7.1",
     # Telegram Bot API и HTTP-инструменты (transitive через openai; объявляем явно).
     "httpx>=0.28",
+    # Полноэкранный chat-TUI (ADR-0018): >=3.2 — Markdown.get_stream()
+    # (троттленный стриминг токенов в markdown-виджет).
+    "textual>=3.2",
 ]
 
 [project.optional-dependencies]
