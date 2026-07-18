@@ -481,8 +481,15 @@ def chat(
         str | None,
         typer.Option("--fork", help="Новая сессия с копией истории указанной (id/префикс)"),
     ] = None,
+    plain: Annotated[
+        bool, typer.Option("--plain", help="Классический REPL вместо полноэкранного TUI")
+    ] = False,
 ) -> None:
-    """Интерактивная сессия: каждое сообщение — run в общей session (§10.1)."""
+    """Интерактивная сессия: каждое сообщение — run в общей session (§10.1).
+
+    На TTY открывается полноэкранный TUI (ADR-0018); --plain или отсутствие
+    терминала (pipe, CI) — построчный REPL, как раньше.
+    """
     if session is not None and fork is not None:
         console.print("[red]--session и --fork взаимоисключающие[/red]")
         raise typer.Exit(code=1)
@@ -492,6 +499,13 @@ def chat(
         raise typer.Exit(code=1)
     cfg = _load_config_or_exit(project_dir=workspace)
     autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
+    if not plain and sys.stdin.isatty() and sys.stdout.isatty():
+        # Loop'ом владеет Textual: без asyncio.run. Ошибки старта sandbox/модели
+        # TUI показывает сам (транскрипт + статус), а не через exit-код.
+        from svarog_harness.cli.tui import run_chat_tui
+
+        run_chat_tui(cfg, workspace, autonomy, continue_ref=session, fork_ref=fork)
+        return
     console.print(
         f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
         f"[dim]пустая строка или /quit — выход[/dim]"
