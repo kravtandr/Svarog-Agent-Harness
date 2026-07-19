@@ -12,7 +12,12 @@ import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from svarog_harness.sandbox.base import ExecResult, ExecutionEnvironment, read_stream_tail
+from svarog_harness.sandbox.base import (
+    ExecResult,
+    ExecutionEnvironment,
+    read_line_unbounded,
+    read_stream_tail,
+)
 
 
 class LocalEnvironment(ExecutionEnvironment):
@@ -66,7 +71,7 @@ class LocalEnvironment(ExecutionEnvironment):
         try:
             async with asyncio.timeout(timeout_sec):
                 while True:
-                    raw = await proc.stdout.readline()
+                    raw = await read_line_unbounded(proc.stdout)
                     if not raw:
                         break
                     await on_line(raw.decode(errors="replace").rstrip("\n"))

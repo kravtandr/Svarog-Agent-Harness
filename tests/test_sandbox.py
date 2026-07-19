@@ -131,3 +131,36 @@ class TestDockerIntegration:
             timeout_sec=30,
         )
         assert result.stdout.strip() == "0"
+
+
+async def test_local_stream_handles_lines_longer_than_reader_limit(tmp_path: Path) -> None:
+    # Регрессия: readline() падал ValueError («Separator is found, but chunk is
+    # longer than limit») на строках > 64КБ — JSON-события внешнего агента.
+    env = LocalEnvironment(tmp_path)
+    lines: list[str] = []
+
+    async def on_line(line: str) -> None:
+        lines.append(line)
+
+    result = await env.stream(
+        "python3 -c \"print('x' * 300000); print('done')\"",
+        timeout_sec=30,
+        on_line=on_line,
+    )
+    assert result.exit_code == 0
+    assert lines[0] == "x" * 300000
+    assert lines[1] == "done"
+
+
+async def test_read_line_unbounded_eof_and_split() -> None:
+    import asyncio
+
+    from svarog_harness.sandbox.base import read_line_unbounded
+
+    reader = asyncio.StreamReader(limit=16)  # крошечный лимит: форсируем переполнение
+    reader.feed_data(b"a" * 100 + b"\nshort\ntail-no-newline")
+    reader.feed_eof()
+    assert await read_line_unbounded(reader) == b"a" * 100 + b"\n"
+    assert await read_line_unbounded(reader) == b"short\n"
+    assert await read_line_unbounded(reader) == b"tail-no-newline"
+    assert await read_line_unbounded(reader) == b""  # EOF
