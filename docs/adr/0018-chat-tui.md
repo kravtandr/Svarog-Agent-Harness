@@ -1,119 +1,100 @@
-# ADR-0018: Полноэкранный chat-TUI на Textual
+# ADR-0018: Inline-режим chat (диалог в обычном буфере терминала)
 
 ## Статус
 
-Принято (Фазы 1–4 реализованы)
+Принято (реализовано)
 
 | Фаза | Содержание | Статус |
 | --- | --- | --- |
-| 1 | `ChatEngine` — общий драйвер chat-сессии для обоих фронтендов | ✅ Сделано |
-| 2 | TUI core: транскрипт с markdown-стримом, ввод с историей, статус-бар | ✅ Сделано |
-| 3 | Approval/ask_user-модалки: живой гейт external и resume-цикл native | ✅ Сделано |
-| 4 | Слэш-команды с автодополнением, session picker, панель событий | ✅ Сделано |
+| 1 | `ChatEngine` — общий драйвер chat-сессии для всех фронтендов | ✅ Сделано |
+| 2 | Inline-режим: Rich Live-стрим, readline-ввод, markdown в scrollback | ✅ Сделано |
+| 3 | Approval/ask_user: живой гейт external + resume-цикл native прямо в чате | ✅ Сделано |
+| 4 | Слэш-команды (/help /new /sessions /fork /copy /quit), /copy через OSC 52 | ✅ Сделано |
 
 ## Контекст
 
 `svarog chat` был построчным REPL: сырой поток `on_text_delta` без
-markdown, без истории ввода и навигации стрелками, с костылём
-`_read_user_line` (UTF-8 по чанкам рвал кириллицу), а approval на
-native-пути был виден только постфактум («ожидает approval» + подсказка
-про второй терминал). Референсный UX — opencode и Claude Code:
-полноэкранный чат с рендером markdown, стримингом, permission-промптами
-на месте и командной строкой.
+markdown, без истории ввода, костыль `_read_user_line` (UTF-8 по чанкам),
+а approval на native-пути был виден только постфактум. Референсный UX —
+qwen-code/gemini-cli: диалог живёт в **обычном буфере терминала**
+(scrollback, нативное выделение и копирование), динамична только нижняя
+область текущего ответа; никакого alt-screen.
 
-Прямое переиспользование кода референсов невозможно: fast-code —
-деобфусцированный форк проприетарного Claude Code («research use only»),
-opencode — TypeScript/Ink. Из них берётся только UX-модель.
+Код референсов не переиспользуется: qwen-code/gemini-cli — TypeScript/Ink,
+fast-code — проприетарный форк Claude Code («research use only»). Берётся
+только UX-модель.
 
-Фундамент для своего TUI в ядре уже был:
-
-* весь вывод рантайма идёт через `RunHooks` (`runtime/orchestrator.py`),
-  прямых print в `runtime/llm/tools` нет — полноэкранному приложению
-  ничего не мешает;
-* токен-стриминг (`on_text_delta`) и прогресс (`on_progress`) уже
-  события, а не печать;
-* живой approval-гейт external-пути (§7) решается записью вердикта в БД
-  под poll `bridge_control`; native-путь возвращает `WAITING_APPROVAL` и
-  резюмируется;
-* `TaskRunner.prepare_session_resources`/`SessionResources` (ADR-0017)
-  дают lifecycle тёплого sandbox'а серии runs.
+Фундамент в ядре уже был: весь вывод рантайма идёт через `RunHooks`
+(прямых print в `runtime/llm/tools` нет), токен-стриминг и прогресс — уже
+события, живой approval-гейт external-пути решается записью в БД под poll
+`bridge_control`, native-путь возвращает `WAITING_APPROVAL` и
+резюмируется, `TaskRunner.prepare_session_resources` даёт lifecycle
+тёплого sandbox'а серии runs (ADR-0017).
 
 ## Принятые развилки
 
-1. **Textual, core-зависимость.** Asyncio-нативный фреймворк от авторов
-   Rich (уже в стеке), `py.typed` (mypy strict), `MarkdownStream` —
-   готовый троттленный рендер токен-стрима (нижняя граница `textual>=3.2`
-   именно из-за него). Chat — основной интерфейс разработчика (§10.1),
-   поэтому не extra: TUI работает из коробки. Отклонено: prompt_toolkit
-   (нет layout-фреймворка полноэкранного приложения), extra `[tui]`
-   (ломает «работает из коробки» ради небольшой экономии базовой
-   установки).
-2. **TTY-автовыбор с fallback.** `svarog chat` открывает TUI, когда stdin
-   и stdout — TTY; `--plain` принудительно возвращает построчный REPL;
-   без терминала (pipe, CI, CliRunner в тестах) — plain автоматически.
-   Плоский режим остаётся полноценным, не деградирует.
+1. **Inline-рендер, не полноэкранный TUI.** Полноэкранный вариант на
+   Textual был реализован и **отброшен по результатам живой пробы**:
+   alt-screen отрезает scrollback терминала, а захват мыши ломает
+   привычное выделение/копирование текста — для чата с длинными ответами
+   это перевешивает выгоды экранного layout'а. Модель qwen-code:
+   завершённый контент печатается в scrollback навсегда (markdown уже
+   отрендерен), живёт только маленькая нижняя область (Rich `Live`:
+   хвост стрима + строка прогресса, `transient=True` — стирается по
+   завершении хода). Rich сам поднимает обычные `console.print` над
+   Live-областью, поэтому события (tool calls, checks, commit, память)
+   печатаются теми же хуками, что в plain/`run`. Новых зависимостей нет —
+   Rich уже в стеке.
+2. **TTY-автовыбор с fallback.** На TTY — inline-режим; `--plain` или
+   отсутствие терминала (pipe, CI, CliRunner) — прежний построчный REPL.
 3. **`ChatEngine` (`cli/chat_engine.py`) — общий драйвер, `RunHooks` —
    контракт фронтенда.** Тело `_chat_session` перенесено в движок без
-   изменения поведения: те же native/external-ветки send, drain
-   памяти/proposals после каждого сообщения, continue/fork истории,
-   лимит `CHAT_HISTORY_LIMIT`. Lifecycle — `prepare_session_resources`.
-   Фронтенды различаются только реализацией hooks: plain печатает
-   (`_console_hooks`), TUI постит Textual-сообщения. Отклонено:
-   async-generator событий вместо hooks — сломал бы симметрию с
-   gateway/telegram, которые уже живут на `RunHooks`. Движок остаётся в
-   слое `cli` (правило направления зависимостей: ядро не знает о CLI);
-   унификация с gateway-chat — вне скоупа.
-4. **Threading-модель.** Run исполняется async-worker'ом на loop'е
-   Textual (без `asyncio.run` на пути TUI — loop'ом владеет приложение),
-   поэтому все хуки, кроме approval, — дешёвый `post_message` с того же
-   loop'а. `on_approval_requested` приходит из worker-потока bridge-гейта:
-   модалка показывается через `call_from_thread`, поток блокируется на
-   `threading.Event` до вердикта и сам пишет решение в БД
-   (`record_gate_decision`/`record_gate_answer` — общие с plain-режимом)
-   — poll гейта подхватывает, UI не блокируется. Native-путь: после
-   `send` цикл `WAITING_APPROVAL → модалки → resume` (TUI-порт
-   `_interactive_approvals`) — UX-улучшение относительно plain-chat,
-   который только печатал подсказку.
-5. **Esc = прерывание run, Ctrl+Q — выход.** Отмена worker'а роняет
-   `CancelledError` в `engine.send`; write-ahead trace (ADR-0005)
-   переводит run в suspended (`svarog resume` доступен), тёплый sandbox
-   помечается dirty и пересобирается перед следующим сообщением
-   (прецедент — `_drop_warm` gateway). Выход при активном run — двойной
-   Ctrl+Q (второй прерывает и выходит).
-6. **История ввода — `~/.svarog/chat_history`.** Построчный файл в
-   user-state директории (конвенция `USER_CONFIG_PATH`), вне workspace —
-   не попадает под `assert_workspace_isolated` и в коммиты агента.
+   изменения поведения: native/external-ветки send, drain
+   памяти/proposals, continue/fork, лимит `CHAT_HISTORY_LIMIT`, lifecycle
+   через `prepare_session_resources`. Фронтенды различаются только
+   реализацией hooks; inline переопределяет лишь `on_text_delta` (буфер
+   Live) и `on_progress` (статус-строка) поверх `_console_hooks`.
+   Отклонено: async-generator событий — сломал бы симметрию с
+   gateway/telegram, живущими на `RunHooks`.
+4. **Ввод — readline.** Стрелки/редактирование/персистентная история
+   (`~/.svarog/chat_history` — user-state, вне workspace агента); с
+   readline `input()` читает строку целиком, баг UTF-8 по чанкам не
+   воспроизводится. Отклонено: prompt_toolkit (лишняя зависимость ради
+   того же).
+5. **Approval.** External-путь: живой гейт (§7) — тот же промпт, что в
+   plain (`_prompt_gate_decision`, worker-поток, решение в БД под poll),
+   обёрнутый паузой Live-области, чтобы промпт и перерисовка не писали в
+   терминал одновременно. Native-путь: после send цикл `WAITING_APPROVAL
+   → промпт → resume` прямо в чате (порт `_interactive_approvals`).
+6. **Ctrl+C во время run — прервать run** (write-ahead → suspended,
+   ADR-0005; sandbox помечается dirty и пересобирается перед следующим
+   сообщением — прецедент `_drop_warm` gateway); Ctrl+C/Ctrl+D в промпте —
+   выход. `/copy` кладёт последний ответ в буфер через OSC 52
+   (iTerm2/kitty/WezTerm; в остальных — обычное выделение, оно не
+   заблокировано: мышь не захватывается).
 
 ## Компоненты
 
 ```text
-cli/chat_engine.py    ChatEngine, ChatEngineProtocol (фейки в тестах),
-                      record_gate_decision/answer, with_db
-cli/tui/app.py        SvarogChatApp: worker-оркестрация, approval-циклы
-cli/tui/hooks.py      RunHooks → Textual-сообщения (TextDelta, ToolCalled,
-                      ProgressUpdated, PanelEvent) + промпт гейта
-cli/tui/widgets.py    Transcript (VerticalScroll + MarkdownStream),
-                      ChatInput (история ↑/↓), SlashDropdown, StatusBar,
-                      EventPanel (RichLog, ^T)
-cli/tui/screens.py    ApprovalScreen, QuestionScreen, SessionPickerScreen
-                      (превью через fetch_sessions/session_history), Help
-cli/tui/commands.py   реестр /help /new /sessions /fork /quit + автодополнение
-cli/tui/history.py    InputHistory (персистентная, кап 1000)
+cli/chat_engine.py     ChatEngine, ChatEngineProtocol (фейки в тестах),
+                       record_gate_decision/answer, with_db
+cli/chat_inline.py     InlineChat: Rich Live-стрим, readline, слэш-команды,
+                       approval-циклы, OSC 52; run_chat_inline — точка входа
+cli/chat_commands.py   реестр /help /new /sessions /fork /copy /quit + parse
 ```
 
 ## Известные trade-offs
 
-* Тёплый sandbox серии означает для external-агента budget bridge на всю
-  серию сообщений — унаследовано от CLI-chat/ADR-0017, не ново.
-* `MarkdownStream.stop()` textual ≤8.x пробрасывает `CancelledError`
-  своего фонового task'а (семантика py3.13+) — гасится точечно в
-  `_finalize_stream`, реальная отмена worker'а не глотается.
-* Панель событий копит счётчик «непрочитанного» в статус-баре, пока
-  скрыта; сами события не теряются (полный след — в trace).
+* Тёплый sandbox серии — budget bridge external-агента действует на всю
+  серию сообщений (унаследовано от CLI-chat/ADR-0017).
+* Во время стрима в Live-области виден только хвост ответа
+  (`_TAIL_LINES`); полный ответ печатается по завершении хода —
+  осознанный компромисс против глюков перерисовки области выше экрана.
+* OSC 52 не поддерживается штатным Terminal.app — там копирование обычным
+  выделением (оно работает, alt-screen'а и захвата мыши нет).
 
 ## Не покрыто (кандидаты на следующие фазы)
 
-* очередь сообщений во время активного run (сейчас — отказ с подсказкой);
-* поиск/фильтр в session picker и транскрипте;
-* просмотр diff/артефактов из TUI;
-* темизация и конфиг горячих клавиш.
+* очередь сообщений во время активного run;
+* автодополнение слэш-команд по Tab (readline completer);
+* просмотр diff/артефактов из чата.

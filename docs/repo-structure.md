@@ -16,14 +16,9 @@ svarog/
     __init__.py
     cli/                    # Typer-приложение
       main.py               # все команды + интерактивный approval в терминале (одним модулем)
-      chat_engine.py        # ChatEngine: общий драйвер chat-сессии plain-REPL и TUI (ADR-0018)
-      tui/                  # полноэкранный chat-TUI на Textual (ADR-0018)
-        app.py              # SvarogChatApp: worker-оркестрация, approval-модалки
-        hooks.py            # RunHooks → Textual-сообщения
-        widgets.py          # транскрипт (markdown-стрим), ввод, статус-бар, панель событий
-        screens.py          # approval/ask_user, session picker, help
-        commands.py         # слэш-команды и автодополнение
-        history.py          # персистентная история ввода (~/.svarog/chat_history)
+      chat_engine.py        # ChatEngine: общий драйвер chat-сессии для фронтендов (ADR-0018)
+      chat_inline.py        # inline-режим chat: Rich Live-стрим, readline, слэш-команды
+      chat_commands.py      # реестр слэш-команд чата и парсинг
 
     config/                 # svarog.yaml → pydantic-settings
       schema.py

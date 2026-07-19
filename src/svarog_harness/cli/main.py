@@ -482,13 +482,15 @@ def chat(
         typer.Option("--fork", help="Новая сессия с копией истории указанной (id/префикс)"),
     ] = None,
     plain: Annotated[
-        bool, typer.Option("--plain", help="Классический REPL вместо полноэкранного TUI")
+        bool, typer.Option("--plain", help="Построчный REPL без живой области стрима")
     ] = False,
 ) -> None:
     """Интерактивная сессия: каждое сообщение — run в общей session (§10.1).
 
-    На TTY открывается полноэкранный TUI (ADR-0018); --plain или отсутствие
-    терминала (pipe, CI) — построчный REPL, как раньше.
+    На TTY по умолчанию — inline-режим (ADR-0018): диалог в обычном буфере
+    терминала (scrollback, нативное выделение и копирование), живая область
+    только у текущего ответа. --plain или отсутствие терминала (pipe, CI) —
+    построчный REPL.
     """
     if session is not None and fork is not None:
         console.print("[red]--session и --fork взаимоисключающие[/red]")
@@ -499,18 +501,23 @@ def chat(
         raise typer.Exit(code=1)
     cfg = _load_config_or_exit(project_dir=workspace)
     autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
-    if not plain and _stdio_is_tty():
-        # Loop'ом владеет Textual: без asyncio.run. Ошибки старта sandbox/модели
-        # TUI показывает сам (транскрипт + статус), а не через exit-код.
-        from svarog_harness.cli.tui import run_chat_tui
-
-        run_chat_tui(cfg, workspace, autonomy, continue_ref=session, fork_ref=fork)
-        return
-    console.print(
-        f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
-        f"[dim]пустая строка или /quit — выход[/dim]"
-    )
     try:
+        if not plain and _stdio_is_tty():
+            # Inline-режим (qwen-code-style): scrollback + живая область ответа.
+            from svarog_harness.cli.chat_inline import run_chat_inline
+
+            hooks = _console_hooks()
+            hooks.on_approval_requested = lambda approval: _prompt_gate_decision(cfg, approval)
+            asyncio.run(
+                run_chat_inline(
+                    cfg, workspace, autonomy, hooks, continue_ref=session, fork_ref=fork
+                )
+            )
+            return
+        console.print(
+            f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
+            f"[dim]пустая строка или /quit — выход[/dim]"
+        )
         asyncio.run(_chat_session(cfg, workspace, autonomy, continue_ref=session, fork_ref=fork))
     except SessionNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")

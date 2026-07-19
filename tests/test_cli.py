@@ -125,11 +125,11 @@ def _write_chat_config(tmp_path, ws) -> None:
     )
 
 
-def test_chat_opens_tui_on_tty_and_plain_forces_repl(tmp_path, monkeypatch) -> None:
-    # TTY-автовыбор (ADR-0018): с терминалом chat уходит в TUI, --plain и
-    # отсутствие TTY остаются на построчном REPL.
+def test_chat_opens_inline_on_tty_and_plain_forces_repl(tmp_path, monkeypatch) -> None:
+    # TTY-автовыбор (ADR-0018): с терминалом chat уходит в inline-режим,
+    # --plain и отсутствие TTY остаются на построчном REPL.
+    from svarog_harness.cli import chat_inline as inline_module
     from svarog_harness.cli import main as cli_main
-    from svarog_harness.cli import tui as tui_module
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -137,24 +137,26 @@ def test_chat_opens_tui_on_tty_and_plain_forces_repl(tmp_path, monkeypatch) -> N
     monkeypatch.setenv("HOME", str(tmp_path))
 
     launched: list[tuple] = []
-    monkeypatch.setattr(
-        tui_module, "run_chat_tui", lambda *args, **kwargs: launched.append((args, kwargs))
-    )
+
+    async def fake_run_chat_inline(*args, **kwargs) -> None:
+        launched.append((args, kwargs))
+
+    monkeypatch.setattr(inline_module, "run_chat_inline", fake_run_chat_inline)
     monkeypatch.setattr(cli_main, "_stdio_is_tty", lambda: True)
 
     result = runner.invoke(app, ["chat", "--workspace", str(ws)])
     assert result.exit_code == 0, result.output
-    assert len(launched) == 1  # ушли в TUI
+    assert len(launched) == 1  # ушли в inline-режим
 
     # --plain: REPL читает stdin (CliRunner подаёт EOF — мгновенный выход).
     result = runner.invoke(app, ["chat", "--workspace", str(ws), "--plain"])
     assert result.exit_code == 0, result.output
-    assert len(launched) == 1  # TUI не запускался
+    assert len(launched) == 1  # inline не запускался
     assert "svarog chat" in result.output
 
 
 def test_chat_without_tty_falls_back_to_plain(tmp_path, monkeypatch) -> None:
-    from svarog_harness.cli import tui as tui_module
+    from svarog_harness.cli import chat_inline as inline_module
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -162,9 +164,11 @@ def test_chat_without_tty_falls_back_to_plain(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
     launched: list[tuple] = []
-    monkeypatch.setattr(
-        tui_module, "run_chat_tui", lambda *args, **kwargs: launched.append((args, kwargs))
-    )
+
+    async def fake_run_chat_inline(*args, **kwargs) -> None:
+        launched.append((args, kwargs))
+
+    monkeypatch.setattr(inline_module, "run_chat_inline", fake_run_chat_inline)
 
     result = runner.invoke(app, ["chat", "--workspace", str(ws)])
     assert result.exit_code == 0, result.output
