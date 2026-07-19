@@ -212,7 +212,13 @@ class HelpScreen(ModalScreen[None]):
         ("Ctrl+T", "панель событий"),
         ("Ctrl+S", "выбор сессии"),
         ("Ctrl+N", "новая сессия"),
+        ("Ctrl+Y", "скопировать последний ответ (или /copy)"),
         ("↑ / ↓", "история ввода"),
+    )
+
+    _NOTES = (
+        "выделение мышью: мышь захвачена TUI — на macOS выделяйте с Option (⌥),",
+        "в Linux-терминалах — с Shift; Ctrl+Y кладёт весь последний ответ в буфер.",
     )
 
     def compose(self) -> ComposeResult:
@@ -221,6 +227,8 @@ class HelpScreen(ModalScreen[None]):
         lines.append("")
         lines.append("[bold]клавиши[/bold]")
         lines += [f"  {key:<18} {desc}" for key, desc in self._KEYS]
+        lines.append("")
+        lines += [f"[dim]{note}[/dim]" for note in self._NOTES]
         with Vertical(id="gate-dialog"):
             yield Label("svarog chat — помощь", id="gate-title")
             yield Static("\n".join(lines), id="gate-body", markup=True)
