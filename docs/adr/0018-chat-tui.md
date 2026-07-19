@@ -10,6 +10,9 @@
 | 2 | Inline-режим: Rich Live-стрим, readline-ввод, markdown в scrollback | ✅ Сделано |
 | 3 | Approval/ask_user: живой гейт external + resume-цикл native прямо в чате | ✅ Сделано |
 | 4 | Слэш-команды (/help /new /sessions /fork /copy /quit), /copy через OSC 52 | ✅ Сделано |
+| 5 | Презентация «как Claude Code»: welcome Panel, tool-карточки без дампа content | ✅ Сделано |
+| 6 | Executor в UI (native/local vs external/claude-code…) | ✅ Сделано |
+| 7 | prompt_toolkit: меню `/` и `@` только при наборе (паттерн qwen-code CompletionMode); синий welcome | ✅ Сделано |
 
 ## Контекст
 
@@ -43,8 +46,7 @@ fast-code — проприетарный форк Claude Code («research use on
    хвост стрима + строка прогресса, `transient=True` — стирается по
    завершении хода). Rich сам поднимает обычные `console.print` над
    Live-областью, поэтому события (tool calls, checks, commit, память)
-   печатаются теми же хуками, что в plain/`run`. Новых зависимостей нет —
-   Rich уже в стеке.
+   печатаются теми же хуками, что в plain/`run`.
 2. **TTY-автовыбор с fallback.** На TTY — inline-режим; `--plain` или
    отсутствие терминала (pipe, CI, CliRunner) — прежний построчный REPL.
 3. **`ChatEngine` (`cli/chat_engine.py`) — общий драйвер, `RunHooks` —
@@ -56,11 +58,14 @@ fast-code — проприетарный форк Claude Code («research use on
    Live) и `on_progress` (статус-строка) поверх `_console_hooks`.
    Отклонено: async-generator событий — сломал бы симметрию с
    gateway/telegram, живущими на `RunHooks`.
-4. **Ввод — readline.** Стрелки/редактирование/персистентная история
-   (`~/.svarog/chat_history` — user-state, вне workspace агента); с
-   readline `input()` читает строку целиком, баг UTF-8 по чанкам не
-   воспроизводится. Отклонено: prompt_toolkit (лишняя зависимость ради
-   того же).
+4. **Ввод — prompt_toolkit (не readline).** Изначально был readline
+   (стрелки/история). Для живого меню `/`/`@` как в qwen-code
+   (`CompletionMode`: IDLE → пусто; SLASH → команды; AT → файлы) и
+   fast-code (`useTypeahead` / `PromptInputFooterSuggestions`) нужен
+   character-level completer с `complete_while_typing` — readline этого
+   не умеет. Зависимость `prompt-toolkit` добавлена осознанно; Ink/React
+   из референсов не портируется. История — `FileHistory`
+   (`~/.svarog/chat_history`). В тестах `read_line` подменяется фейком.
 5. **Approval.** External-путь: живой гейт (§7) — тот же промпт, что в
    plain (`_prompt_gate_decision`, worker-поток, решение в БД под poll),
    обёрнутый паузой Live-области, чтобы промпт и перерисовка не писали в
@@ -82,15 +87,28 @@ fast-code — проприетарный форк Claude Code («research use on
    клампится в False в `TaskRunner` — для них гейт безусловный, как был.
    На `resume` подтверждение запрашивается по факту отказа гейта
    (workspace checkpoint'а известен только после загрузки).
+8. **Презентация — раскладка Claude Code / fast-code, свой бренд.**
+   Welcome Panel: две колонки — workspace/статус слева, tips справа; title
+   в рамке `Svarog chat v…`. Акцент — синий (`dodger_blue2`), не оранжевый.
+   Tool-карточки (`✎ Write path (2.1 KB)`). Полоса над промптом; статус
+   автономии/executor — `bottom_toolbar` prompt_toolkit (не постоянный
+   список `/help · /new`). Полноэкранный chrome (toolbar pills) не
+   переносится: требует alt-screen (п.1).
+9. **Подсказки `/` и `@` — только при наборе.** Логика в
+   `chat_completion.py` (порт смысла `useCommandCompletion` qwen-code):
+   меню команд при токене `/…` в начале строки; меню файлов при токене
+   `@…` (в т.ч. mid-line). В IDLE completer молчит. Рендер меню —
+   `prompt_toolkit` COLUMN (label + description).
 
 ## Компоненты
 
 ```text
-cli/chat_engine.py     ChatEngine, ChatEngineProtocol (фейки в тестах),
-                       record_gate_decision/answer, with_db
-cli/chat_inline.py     InlineChat: Rich Live-стрим, readline, слэш-команды,
-                       approval-циклы, OSC 52; run_chat_inline — точка входа
-cli/chat_commands.py   реестр /help /new /sessions /fork /copy /quit + parse
+cli/chat_engine.py       ChatEngine, ChatEngineProtocol, with_db
+cli/chat_inline.py       InlineChat: Live-стрим, слэш-команды, approvals
+cli/chat_display.py      welcome Panel, format_tool_call, executor_view
+cli/chat_completion.py   CompletionMode IDLE/SLASH/AT, slash/at suggestions
+cli/chat_prompt.py       PromptSession + ChatCompleter (prompt_toolkit)
+cli/chat_commands.py     реестр /help… + parse
 ```
 
 ## Известные trade-offs
@@ -102,9 +120,12 @@ cli/chat_commands.py   реестр /help /new /sessions /fork /copy /quit + par
   осознанный компромисс против глюков перерисовки области выше экрана.
 * OSC 52 не поддерживается штатным Terminal.app — там копирование обычным
   выделением (оно работает, alt-screen'а и захвата мыши нет).
+* Индекс `@`-файлов — простой обход дерева (без fuse/ripgrep/Rust FileIndex
+  из fast-code); для больших репо может быть медленнее референса.
 
 ## Не покрыто (кандидаты на следующие фазы)
 
 * очередь сообщений во время активного run;
-* автодополнение слэш-команд по Tab (readline completer);
-* просмотр diff/артефактов из чата.
+* fuzzy-поиск файлов (fzf) и MCP-resource `@server:uri` как в qwen-code;
+* просмотр diff/артефактов из чата (карточка Write с превью diff);
+* cycle автономии по hotkey (как shift+tab у Claude Code) — сейчас только флаг CLI.
