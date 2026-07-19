@@ -173,3 +173,65 @@ def test_chat_without_tty_falls_back_to_plain(tmp_path, monkeypatch) -> None:
     result = runner.invoke(app, ["chat", "--workspace", str(ws)])
     assert result.exit_code == 0, result.output
     assert launched == []  # CliRunner — не TTY: plain-REPL
+
+
+def _write_overlap_config(tmp_path, ws) -> None:
+    # control-plane (memory) внутри workspace + docker-sandbox → гейт ADR-0015 §0.3.
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        "memory:\n  path: ./memory\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+
+
+def test_chat_overlap_declined_exits_before_start(tmp_path, monkeypatch) -> None:
+    # Запуск из папки, затрагивающей control-plane (ADR-0018): отказ в промпте
+    # завершает команду до старта sandbox.
+    import typer as typer_module
+
+    from svarog_harness.cli import main as cli_main
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_overlap_config(tmp_path, ws)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(ws)
+    monkeypatch.setattr(cli_main, "_stdio_is_tty", lambda: True)
+    monkeypatch.setattr(typer_module, "confirm", lambda *a, **k: False)
+
+    result = runner.invoke(app, ["chat", "--workspace", str(ws)])
+
+    assert result.exit_code == 1, result.output
+    assert "затрагивает control-plane" in result.output
+    assert "ошибка sandbox" not in result.output
+
+
+def test_chat_overlap_confirmed_passes_layout_gate(tmp_path, monkeypatch) -> None:
+    # Подтверждение пропускает гейт раскладки: следующий отказ — уже sandbox
+    # (docker недоступен в тестах), а не WorkspaceLayoutError.
+    import typer as typer_module
+
+    from svarog_harness.cli import main as cli_main
+    from svarog_harness.sandbox import docker as docker_module
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_overlap_config(tmp_path, ws)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(ws)
+    monkeypatch.setattr(cli_main, "_stdio_is_tty", lambda: True)
+    monkeypatch.setattr(typer_module, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(docker_module, "find_docker", lambda: None)
+
+    result = runner.invoke(app, ["chat", "--workspace", str(ws)])
+
+    assert result.exit_code == 1, result.output
+    assert "ошибка раскладки workspace" not in result.output
+    assert "ошибка sandbox" in result.output

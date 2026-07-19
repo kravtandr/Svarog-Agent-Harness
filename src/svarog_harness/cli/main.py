@@ -31,6 +31,7 @@ from svarog_harness.config.paths import (
     WorkspaceLayoutError,
     memory_dir,
     skills_dirs,
+    workspace_layout_violations,
 )
 from svarog_harness.config.schema import AutonomyMode, SecretsConfig, SvarogConfig
 from svarog_harness.gitflow import (
@@ -400,14 +401,49 @@ def _console_hooks() -> RunHooks:
     )
 
 
+def _confirm_layout_overlap(cfg: SvarogConfig, workspace: Path) -> bool:
+    """Запуск из любой папки (ADR-0018): пересечение workspace с control-plane —
+    только с явного подтверждения человека.
+
+    True — человек подтвердил (гейт ADR-0015 §0.3 пропустит), False — нечего
+    подтверждать или нет TTY (тогда решает fail-closed гейт в рантайме).
+    Отказ в промпте завершает команду сразу.
+    """
+    if not _stdio_is_tty():
+        return False
+    violations = workspace_layout_violations(cfg, workspace)
+    if not violations or cfg.sandbox.type == "local-trusted":
+        return False
+    console.print("[yellow]workspace затрагивает control-plane Svarog:[/yellow]")
+    for violation in violations:
+        console.print(f"[yellow]  - {violation}[/yellow]")
+    console.print(
+        "[yellow]агент сможет читать и менять код, память, скиллы и настройки "
+        "самого Svarog (ADR-0015 §0.3)[/yellow]"
+    )
+    if not typer.confirm("продолжить в этом workspace?", default=False):
+        raise typer.Exit(code=1)
+    return True
+
+
 async def _run_task(
-    cfg: SvarogConfig, workspace: Path, task: str, autonomy: AutonomyMode, hooks: RunHooks
+    cfg: SvarogConfig,
+    workspace: Path,
+    task: str,
+    autonomy: AutonomyMode,
+    hooks: RunHooks,
+    *,
+    allow_layout_overlap: bool = False,
 ) -> RunOutcome:
-    return await TaskRunner(cfg, workspace).run_once(task, autonomy, hooks=hooks)
+    runner = TaskRunner(cfg, workspace, allow_layout_overlap=allow_layout_overlap)
+    return await runner.run_once(task, autonomy, hooks=hooks)
 
 
-async def _resume_task(cfg: SvarogConfig, run_id: str, hooks: RunHooks) -> RunOutcome:
-    return await TaskRunner(cfg, Path.cwd().resolve()).resume(run_id, hooks=hooks)
+async def _resume_task(
+    cfg: SvarogConfig, run_id: str, hooks: RunHooks, *, allow_layout_overlap: bool = False
+) -> RunOutcome:
+    runner = TaskRunner(cfg, Path.cwd().resolve(), allow_layout_overlap=allow_layout_overlap)
+    return await runner.resume(run_id, hooks=hooks)
 
 
 @app.command()
@@ -438,8 +474,12 @@ def run(
         console.print(f"[bold]задача:[/bold] {task}")
         console.print(f"[dim]workspace: {workspace} | автономия: {autonomy.value}[/dim]\n")
     hooks = RunHooks() if json_output else _console_hooks()
+    # --json неинтерактивен: пересечение с control-plane остаётся fail-closed.
+    allow_overlap = False if json_output else _confirm_layout_overlap(cfg, workspace)
     try:
-        outcome = asyncio.run(_run_task(cfg, workspace, task, autonomy, hooks))
+        outcome = asyncio.run(
+            _run_task(cfg, workspace, task, autonomy, hooks, allow_layout_overlap=allow_overlap)
+        )
     except ApiKeyError as exc:
         console.print(f"[red]ошибка доступа к модели:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -458,7 +498,7 @@ def run(
     if not json_output:
         # Машиночитаемый режим не интерактивен: approval решается отдельными
         # командами `svarog approvals approve/deny` + `resume`.
-        outcome = _interactive_approvals(cfg, outcome)
+        outcome = _interactive_approvals(cfg, outcome, allow_layout_overlap=allow_overlap)
     _report_outcome(outcome, _failed_checks(cfg, outcome), as_json=json_output)
 
 
@@ -501,6 +541,7 @@ def chat(
         raise typer.Exit(code=1)
     cfg = _load_config_or_exit(project_dir=workspace)
     autonomy = _resolve_autonomy(cfg, yolo=yolo, auto=auto, supervised=supervised)
+    allow_overlap = _confirm_layout_overlap(cfg, workspace)
     try:
         if not plain and _stdio_is_tty():
             # Inline-режим (qwen-code-style): scrollback + живая область ответа.
@@ -510,7 +551,13 @@ def chat(
             hooks.on_approval_requested = lambda approval: _prompt_gate_decision(cfg, approval)
             asyncio.run(
                 run_chat_inline(
-                    cfg, workspace, autonomy, hooks, continue_ref=session, fork_ref=fork
+                    cfg,
+                    workspace,
+                    autonomy,
+                    hooks,
+                    continue_ref=session,
+                    fork_ref=fork,
+                    allow_layout_overlap=allow_overlap,
                 )
             )
             return
@@ -518,7 +565,16 @@ def chat(
             f"[bold]svarog chat[/bold] | workspace: {workspace} | автономия: {autonomy.value}\n"
             f"[dim]пустая строка или /quit — выход[/dim]"
         )
-        asyncio.run(_chat_session(cfg, workspace, autonomy, continue_ref=session, fork_ref=fork))
+        asyncio.run(
+            _chat_session(
+                cfg,
+                workspace,
+                autonomy,
+                continue_ref=session,
+                fork_ref=fork,
+                allow_layout_overlap=allow_overlap,
+            )
+        )
     except SessionNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
@@ -561,13 +617,17 @@ async def _chat_session(
     *,
     continue_ref: str | None = None,
     fork_ref: str | None = None,
+    allow_layout_overlap: bool = False,
 ) -> None:
     hooks = _console_hooks()
     if sys.stdin.isatty():
         # Живой промпт approval/ask_user прямо в чате (§7): решение уходит в
         # БД, гейт продолжает агента без suspend/resume.
         hooks.on_approval_requested = lambda approval: _prompt_gate_decision(cfg, approval)
-    async with ChatEngine(cfg, workspace, autonomy, hooks) as engine:
+    engine_ctx = ChatEngine(
+        cfg, workspace, autonomy, hooks, allow_layout_overlap=allow_layout_overlap
+    )
+    async with engine_ctx as engine:
         start = await engine.start(continue_ref=continue_ref, fork_ref=fork_ref)
         if start.label:
             console.print(f"[dim]{start.label}[/dim]")
@@ -610,8 +670,27 @@ def resume(
     """Возобновить suspended run из checkpoint (ADR-0005)."""
     cfg = _load_config_or_exit()
     hooks = RunHooks() if json_output else _console_hooks()
+    allow_overlap = False
     try:
-        outcome = asyncio.run(_resume_task(cfg, run_id, hooks))
+        try:
+            outcome = asyncio.run(_resume_task(cfg, run_id, hooks))
+        except WorkspaceLayoutError:
+            # Workspace checkpoint'а известен только после загрузки — поэтому
+            # подтверждение пересечения с control-plane (ADR-0018) здесь
+            # запрашивается по факту отказа гейта, а не заранее.
+            if json_output or not _stdio_is_tty():
+                raise
+            console.print(
+                "[yellow]workspace run'а затрагивает control-plane Svarog — агент "
+                "сможет читать и менять код/настройки самого Svarog (ADR-0015 §0.3)[/yellow]"
+            )
+            if not typer.confirm("продолжить resume в этом workspace?", default=False):
+                raise typer.Exit(code=1) from None
+            allow_overlap = True
+            outcome = asyncio.run(_resume_task(cfg, run_id, hooks, allow_layout_overlap=True))
+    except WorkspaceLayoutError as exc:
+        console.print(f"[red]ошибка раскладки workspace:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     except ConfigDriftError as exc:
         console.print(f"[red]resume отклонён (изменился security-конфиг):[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -628,7 +707,7 @@ def resume(
         console.print(f"[red]ошибка sandbox:[/red] {exc}")
         raise typer.Exit(code=1) from None
     if not json_output:
-        outcome = _interactive_approvals(cfg, outcome)
+        outcome = _interactive_approvals(cfg, outcome, allow_layout_overlap=allow_overlap)
     _report_outcome(outcome, _failed_checks(cfg, outcome), as_json=json_output)
 
 
@@ -683,7 +762,9 @@ def _prompt_gate_decision(cfg: SvarogConfig, approval: Approval) -> None:
     _confirm_approval(cfg, approval, decided_by="chat")
 
 
-def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome:
+def _interactive_approvals(
+    cfg: SvarogConfig, outcome: RunOutcome, *, allow_layout_overlap: bool = False
+) -> RunOutcome:
     """Промпт решения прямо в терминале, затем resume — пока run не завершится.
 
     Асинхронный путь (ADR-0005) остается основным: без TTY команда выходит
@@ -704,7 +785,11 @@ def _interactive_approvals(cfg: SvarogConfig, outcome: RunOutcome) -> RunOutcome
                 _answer_question_interactive(cfg, approval)
                 continue
             _confirm_approval(cfg, approval, decided_by="cli")
-        outcome = asyncio.run(_resume_task(cfg, outcome.run_id, _console_hooks()))
+        outcome = asyncio.run(
+            _resume_task(
+                cfg, outcome.run_id, _console_hooks(), allow_layout_overlap=allow_layout_overlap
+            )
+        )
     return outcome
 
 

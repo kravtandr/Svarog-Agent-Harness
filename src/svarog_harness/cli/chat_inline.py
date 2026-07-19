@@ -126,6 +126,7 @@ class InlineChat:
         read_line: Callable[[str], Awaitable[str]] | None = None,
         engine_factory: Callable[[RunHooks], ChatEngineProtocol] | None = None,
         history_path: Path | None = None,
+        allow_layout_overlap: bool = False,
     ) -> None:
         self._cfg = cfg
         self._workspace = workspace
@@ -133,7 +134,9 @@ class InlineChat:
         self._console = console or Console()
         self._read_line = read_line or self._default_read_line
         self._engine_factory = engine_factory or (
-            lambda hooks: ChatEngine(cfg, workspace, autonomy, hooks)
+            lambda hooks: ChatEngine(
+                cfg, workspace, autonomy, hooks, allow_layout_overlap=allow_layout_overlap
+            )
         )
         self._history_path = history_path or default_history_path()
         self._hooks = self._build_hooks(base_hooks)
@@ -471,7 +474,10 @@ async def run_chat_inline(
     *,
     continue_ref: str | None = None,
     fork_ref: str | None = None,
+    allow_layout_overlap: bool = False,
 ) -> None:
     """Точка входа inline-режима из `svarog chat` (loop создаёт вызывающий)."""
-    chat = InlineChat(cfg, workspace, autonomy, base_hooks)
+    chat = InlineChat(
+        cfg, workspace, autonomy, base_hooks, allow_layout_overlap=allow_layout_overlap
+    )
     await chat.run(continue_ref=continue_ref, fork_ref=fork_ref)

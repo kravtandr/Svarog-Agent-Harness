@@ -129,6 +129,8 @@ uv run svarog chat                                          # интеракти
                                                             # inline-режим (ADR-0018): markdown-стрим в scrollback,
                                                             # /sessions, approvals в чате, Ctrl+C — прервать run;
                                                             # --plain — построчный REPL
+                                                            # запуск из любой папки: пересечение workspace с
+                                                            # control-plane Svarog требует явного подтверждения
 uv run svarog traces list                                   # последние runs
 uv run svarog traces show <run-id>                          # полный trace run'а
 uv run svarog resume <run-id>                               # продолжить приостановленный run
