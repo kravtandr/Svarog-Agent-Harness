@@ -126,8 +126,9 @@ export PROVIDER_API_KEY="sk-…"
 ```bash
 uv run svarog run "создай hello.py, который печатает время" # выполнить задачу
 uv run svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
-                                                            # на TTY — полноэкранный TUI (ADR-0018): markdown-стрим,
-                                                            # /sessions, approval-модалки, Esc — прервать; --plain — REPL
+                                                            # inline-режим (ADR-0018): markdown-стрим в scrollback,
+                                                            # /sessions, approvals в чате, Ctrl+C — прервать run;
+                                                            # --plain — построчный REPL
 uv run svarog traces list                                   # последние runs
 uv run svarog traces show <run-id>                          # полный trace run'а
 uv run svarog resume <run-id>                               # продолжить приостановленный run

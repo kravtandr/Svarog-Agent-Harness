@@ -1,19 +1,6 @@
-"""Слэш-команды TUI: автодополнение и парсинг."""
+"""Слэш-команды inline-чата: парсинг."""
 
-from svarog_harness.cli.tui.commands import COMMANDS, complete, parse
-
-
-def test_complete_requires_slash() -> None:
-    assert complete("help") == []
-
-
-def test_complete_prefix_filters() -> None:
-    names = [cmd.name for cmd in complete("/f")]
-    assert names == ["fork"]
-
-
-def test_complete_bare_slash_lists_all() -> None:
-    assert complete("/") == list(COMMANDS)
+from svarog_harness.cli.chat_commands import parse
 
 
 def test_parse_plain_message_is_none() -> None:

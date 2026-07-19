@@ -20,7 +20,7 @@
 | `docs/first-issues.md` | backlog: 29 issues по milestones M0–M5, порядок топологический |
 | `simulation/` | agent-based user simulation: как внешнему агенту тестировать Svarog на реальном LLM — инструкции, сценарии, личности пользователей |
 
-Стек: Python 3.12+, uv, Typer, Pydantic v2, SQLAlchemy/SQLite, Docker SDK (ADR-0001), Textual — chat-TUI (ADR-0018).
+Стек: Python 3.12+, uv, Typer, Pydantic v2, SQLAlchemy/SQLite, Docker SDK (ADR-0001); chat — inline-режим на Rich (ADR-0018).
 
 ## Как работать
 

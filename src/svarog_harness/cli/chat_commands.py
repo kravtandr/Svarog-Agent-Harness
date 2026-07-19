@@ -1,4 +1,4 @@
-"""Слэш-команды chat-TUI: реестр, парсинг и автодополнение."""
+"""Слэш-команды inline-чата: реестр, парсинг и справка."""
 
 from dataclasses import dataclass
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SlashCommand:
     name: str  # без слэша: "help"
-    usage: str  # как показывать в дропдауне: "/fork <ref>"
+    usage: str  # как показывать в /help: "/fork <ref>"
     help: str
 
 
@@ -21,14 +21,6 @@ COMMANDS: tuple[SlashCommand, ...] = (
 
 _BY_NAME = {cmd.name: cmd for cmd in COMMANDS}
 _BY_NAME["exit"] = _BY_NAME["quit"]  # алиас plain-REPL
-
-
-def complete(prefix: str) -> list[SlashCommand]:
-    """Команды, подходящие под ввод, начинающийся с '/' (для дропдауна)."""
-    if not prefix.startswith("/"):
-        return []
-    head = prefix[1:].split(" ", 1)[0].lower()
-    return [cmd for cmd in COMMANDS if cmd.name.startswith(head)]
 
 
 def parse(line: str) -> tuple[SlashCommand | None, str] | None:
