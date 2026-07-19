@@ -28,6 +28,7 @@ import contextlib
 import json
 import secrets
 import socketserver
+import sys
 import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
@@ -39,7 +40,7 @@ import httpx
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer без reverse-DNS при bind.
+    """ThreadingHTTPServer без reverse-DNS при bind и без traceback-спама.
 
     Стандартный HTTPServer.server_bind зовёт socket.getfqdn() — на хостах с
     кривым reverse-DNS (типичный macOS) это блокирует запуск на десятки
@@ -51,6 +52,18 @@ class QuietHTTPServer(ThreadingHTTPServer):
         host, port = self.server_address[:2]
         self.server_name = str(host)
         self.server_port = int(port)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Обрыв соединения клиентом — не событие.
+
+        Агент закрывает stream-соединения на своё усмотрение (retry, отмена);
+        стандартный handle_error печатает traceback прямо в stderr — поверх
+        живого чата CLI. Прочие ошибки хендлера оставляем видимыми.
+        """
+        exc = sys.exception()
+        if isinstance(exc, ConnectionError | TimeoutError):
+            return
+        super().handle_error(request, client_address)
 
 
 # Заголовки hop-by-hop. В inject-режиме дополнительно срезаем авторизацию
