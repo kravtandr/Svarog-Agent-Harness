@@ -256,3 +256,22 @@ def test_claude_hook_timeout_exceeds_grace() -> None:
     hook = managed["hooks"]["PreToolUse"][0]["hooks"][0]
     assert hook["timeout"] == 900 + CLIENT_GATE_TIMEOUT_MARGIN_SEC
     assert hook["timeout"] > cfg.approval_grace_sec
+
+
+def test_opencode_provider_files_pin_chat_completions_provider() -> None:
+    # Регрессия: без managed-конфига OpenCode выбирает провайдера `openai`
+    # (Responses API), и resume у OpenAI-совместимых upstream'ов падает
+    # («Invalid Responses API request»). С executor.external.model Svarog
+    # пишет провайдера на @ai-sdk/openai-compatible (chat-completions).
+    files = OpencodeAdapter().provider_files("openai/gpt-oss-120b")
+    assert list(files) == [".config/opencode/opencode.jsonc"]
+    config = json.loads(files[".config/opencode/opencode.jsonc"])
+    provider = config["provider"]["svarog"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "{env:OPENAI_BASE_URL}"
+    assert "openai/gpt-oss-120b" in provider["models"]
+    assert config["model"] == "svarog/openai/gpt-oss-120b"
+
+
+def test_opencode_provider_files_absent_without_model() -> None:
+    assert OpencodeAdapter().provider_files(None) == {}

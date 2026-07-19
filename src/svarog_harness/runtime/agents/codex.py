@@ -83,6 +83,10 @@ class CodexAdapter:
             return {}
         return {"AGENTS.md": "\n\n".join(sections) + "\n"}
 
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        # Провайдер/модель Codex задаются его собственным конфигом в state.
+        return {}
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         return None  # у Codex нет managed-настроек с высшим приоритетом
 
