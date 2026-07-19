@@ -48,6 +48,7 @@ from svarog_harness.cli.tui.widgets import (
     StatusBar,
     Transcript,
 )
+from svarog_harness.config.paths import WorkspaceLayoutError
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
@@ -94,6 +95,7 @@ class SvarogChatApp(App[None]):
         Binding("ctrl+t", "toggle_panel", "события"),
         Binding("ctrl+s", "pick_session", "сессии"),
         Binding("ctrl+n", "new_session", "новая сессия"),
+        Binding("ctrl+y", "copy_answer", "копировать ответ"),
         Binding("ctrl+q", "quit", "выход", priority=True),
     ]
 
@@ -128,6 +130,7 @@ class SvarogChatApp(App[None]):
         self._stream: MarkdownStream | None = None
         self._run_active = False
         self._quit_armed = False
+        self._last_answer = ""  # для Ctrl+Y (терминал не даёт выделять: мышь у TUI)
         self._gate_waiters: set[threading.Event] = set()
 
     def compose(self) -> ComposeResult:
@@ -158,6 +161,12 @@ class SvarogChatApp(App[None]):
             self._status.running = False
             self._status.status_text = "ошибка запуска"
             await self._transcript.add_note(f"[red]ошибка запуска: {exc}[/red]")
+            if isinstance(exc, WorkspaceLayoutError):
+                await self._transcript.add_note(
+                    "[dim]подсказка: chat запускается в каталоге задачи, а не в "
+                    "control-plane: svarog chat --workspace "
+                    "<agent-home>/workspaces/tasks/<задача>[/dim]"
+                )
             await self._transcript.add_note("[dim]Ctrl+Q — выход[/dim]")
             return
         await self._apply_session_start(start)
@@ -171,6 +180,9 @@ class SvarogChatApp(App[None]):
             await self._transcript.add_note(f"[dim]{start.label}[/dim]")
         for message in start.history:
             await self._replay_message(message)
+        assistants = [m.content for m in start.history if m.role == "assistant"]
+        if assistants:
+            self._last_answer = assistants[-1]
         self._refresh_session_label()
 
     async def _replay_message(self, message: ChatMessage) -> None:
@@ -242,6 +254,8 @@ class SvarogChatApp(App[None]):
                 self.action_new_session()
             case "sessions":
                 self.action_pick_session()
+            case "copy":
+                self.action_copy_answer()
             case "fork":
                 if not args:
                     await self._transcript.add_note("[yellow]нужен id: /fork <ref>[/yellow]")
@@ -291,6 +305,7 @@ class SvarogChatApp(App[None]):
         await self._finalize_stream()
         outcome = await self._native_approval_loop(engine, outcome)
         await self._print_turn(outcome)
+        self._last_answer = outcome.final_answer or self._last_answer
         self._refresh_session_label()
         self._set_running(False)
 
@@ -428,6 +443,14 @@ class SvarogChatApp(App[None]):
     def action_cancel_run(self) -> None:
         if self._run_active:
             self.workers.cancel_group(self, "run")
+
+    def action_copy_answer(self) -> None:
+        """Скопировать последний ответ агента (OSC 52; мышь захвачена TUI)."""
+        if not self._last_answer:
+            self.notify("ответов ещё нет — нечего копировать", severity="warning")
+            return
+        self.copy_to_clipboard(self._last_answer)
+        self.notify(f"ответ скопирован ({len(self._last_answer)} символов)")
 
     def action_toggle_panel(self) -> None:
         self._panel.display = not self._panel.display

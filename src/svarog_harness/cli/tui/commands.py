@@ -15,6 +15,7 @@ COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("new", "/new", "новая сессия с чистой историей"),
     SlashCommand("sessions", "/sessions", "выбрать сессию: продолжить или форкнуть"),
     SlashCommand("fork", "/fork <ref>", "форкнуть сессию по id/префиксу"),
+    SlashCommand("copy", "/copy", "скопировать последний ответ в буфер"),
     SlashCommand("quit", "/quit", "выход"),
 )
 

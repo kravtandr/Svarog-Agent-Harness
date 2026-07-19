@@ -7,6 +7,7 @@ import pytest
 
 from svarog_harness.cli.chat_engine import ChatSessionStart
 from svarog_harness.cli.tui.app import SvarogChatApp
+from svarog_harness.cli.tui.commands import COMMANDS
 from svarog_harness.cli.tui.screens import ApprovalScreen, SessionPickerScreen
 from svarog_harness.cli.tui.widgets import SlashDropdown, StatusBar, Transcript
 from svarog_harness.config.loader import load_config
@@ -194,7 +195,7 @@ async def test_slash_dropdown_and_unknown_command(cfg: SvarogConfig, tmp_path: P
         await pilot.press("slash")
         await pilot.pause()
         dropdown = app.query_one(SlashDropdown)
-        assert dropdown.display and dropdown.option_count == 5
+        assert dropdown.display and dropdown.option_count == len(COMMANDS)
         for char in "нет":
             await pilot.press(char)
         await pilot.press("enter")
@@ -287,3 +288,27 @@ async def test_session_picker_switches_session(cfg: SvarogConfig, tmp_path: Path
         transcript = app.query_one(Transcript)
         rendered = " ".join(str(w.render()) for w in transcript.query("Static"))
         assert "продолжаю сессии sessabcd" in rendered
+
+
+async def test_copy_answer_binding_and_command(cfg: SvarogConfig, tmp_path: Path) -> None:
+    app, _engines = _make_app(cfg, tmp_path)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+        app.query_one("#chat-input").focus()
+        await pilot.press("ctrl+y")  # до первого ответа копировать нечего
+        assert copied == []
+        for char in "го":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.press("ctrl+y")
+        assert copied == ["готово"]
+        for char in "/copy":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert copied == ["готово", "готово"]
