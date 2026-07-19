@@ -152,6 +152,12 @@ class AgentAdapter(Protocol):
         не передаётся."""
         ...
 
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        """Файлы конфигурации LLM-провайдера агента: относительный путь внутри
+        state_dir → содержимое; пусто — адаптер провайдером не управляет
+        (модель/endpoint заданы механизмом самого агента)."""
+        ...
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         """Содержимое managed-настроек агента (ADR-0016 §6) — read-only
         mount с высшим приоритетом; None — агент их не поддерживает."""

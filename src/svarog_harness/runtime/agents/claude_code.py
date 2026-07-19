@@ -119,6 +119,10 @@ class ClaudeCodeAdapter:
             return {}
         return {"CLAUDE.md": "\n\n".join(sections) + "\n"}
 
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        # Модель Claude Code выбирает подписка/ANTHROPIC_MODEL — конфиг не нужен.
+        return {}
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         settings: dict[str, Any] = {"permissions": {"defaultMode": "bypassPermissions"}}
         if hook_command is not None:

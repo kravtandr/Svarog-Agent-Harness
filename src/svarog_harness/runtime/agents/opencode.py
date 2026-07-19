@@ -71,6 +71,37 @@ class OpencodeAdapter:
             return {}
         return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
 
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        """Managed-конфиг провайдера: ~/.config/opencode/opencode.jsonc.
+
+        Без него OpenCode сам выбирает провайдера по env (`openai` →
+        Responses API), что у произвольных OpenAI-совместимых upstream'ов
+        ломается на resume («Invalid Responses API request»). Пишем явный
+        провайдер на @ai-sdk/openai-compatible (chat-completions) поверх
+        bridge-endpoint'а из env; модель — из executor.external.model.
+        """
+        if model is None:
+            return {}
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                "svarog": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Svarog bridge",
+                    "options": {
+                        "baseURL": "{env:OPENAI_BASE_URL}",
+                        "apiKey": "{env:OPENAI_API_KEY}",
+                    },
+                    "models": {model: {"name": model}},
+                }
+            },
+            "model": f"svarog/{model}",
+        }
+        return {
+            ".config/opencode/opencode.jsonc": json.dumps(config, ensure_ascii=False, indent=2)
+            + "\n"
+        }
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         return None
 
