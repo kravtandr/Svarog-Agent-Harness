@@ -210,7 +210,12 @@ class TaskRunner:
     """Гоняет задачи в фиксированном workspace по одной конфигурации."""
 
     def __init__(
-        self, cfg: SvarogConfig, workspace: Path, *, role: TenantRole = TenantRole.SUPERUSER
+        self,
+        cfg: SvarogConfig,
+        workspace: Path,
+        *,
+        role: TenantRole = TenantRole.SUPERUSER,
+        allow_layout_overlap: bool = False,
     ) -> None:
         # Роль фиксируется при старте (ADR-0010/0013) и заклампывает cfg
         # идемпотентно: standard → docker/hardened, superuser (по умолчанию) —
@@ -219,6 +224,10 @@ class TaskRunner:
         self._cfg = clamp_by_role(cfg, role)
         cfg = self._cfg
         self._workspace = workspace
+        # Подтверждённое человеком пересечение workspace с control-plane
+        # (ADR-0018, только локальный CLI): для standard-тенантов клампится в
+        # False — гейт раскладки ADR-0015 §0.3 для них безусловный.
+        self._allow_layout_overlap = allow_layout_overlap and role is TenantRole.SUPERUSER
         # Два скоупа секретов (ADR-0014 #2):
         #   _store — SANDBOX-инъекция (secrets.inject): у standard env_fallback
         #     выключен клампом, чтобы tenant-ref не провалился в хостовый os.environ;
@@ -835,7 +844,9 @@ class TaskRunner:
         infra/MCP не строятся и не убираются этим run'ом, ими владеет сессия.
         """
         self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
-        assert_workspace_isolated(self._cfg, self._workspace)  # раскладка (ADR-0015 §0.3)
+        assert_workspace_isolated(
+            self._cfg, self._workspace, allow_overlap=self._allow_layout_overlap
+        )  # раскладка (ADR-0015 §0.3)
         self._warn_layout_tradeoff(hooks)
         flow = WorkspaceFlow(GitRepo(self._workspace), self._cfg.git)
         prep = await flow.start(task)
@@ -969,7 +980,12 @@ class TaskRunner:
         ws = workspace.expanduser().resolve()
         if ws == self._workspace.expanduser().resolve():
             return self
-        return TaskRunner(load_config(project_dir=workspace), workspace, role=self._role)
+        return TaskRunner(
+            load_config(project_dir=workspace),
+            workspace,
+            role=self._role,
+            allow_layout_overlap=self._allow_layout_overlap,
+        )
 
     async def resume(self, run_id: str, *, hooks: RunHooks) -> RunOutcome:
         """Возобновить run из checkpoint (ADR-0005).
@@ -997,7 +1013,9 @@ class TaskRunner:
             # говорит local-trusted. Для superuser (CLI-resume) — no-op.
             runner = self._runner_for_resume(workspace)
             runner.assert_sandbox_available()  # fail-closed на resume (ADR-0013)
-            assert_workspace_isolated(runner._cfg, workspace)  # раскладка (ADR-0015 §0.3)
+            assert_workspace_isolated(
+                runner._cfg, workspace, allow_overlap=runner._allow_layout_overlap
+            )  # раскладка (ADR-0015 §0.3)
             # Trust gate (ADR-0015 §0.4): security-конфиг заморожен снимком на
             # старте. Расхождение с текущим yaml → fail-closed: resume отклонён,
             # а не тихо исполнен под подменённым провайдером/MCP/policy.

@@ -81,7 +81,9 @@ def workspace_layout_violations(cfg: SvarogConfig, workspace: Path) -> list[str]
     return violations
 
 
-def assert_workspace_isolated(cfg: SvarogConfig, workspace: Path) -> None:
+def assert_workspace_isolated(
+    cfg: SvarogConfig, workspace: Path, *, allow_overlap: bool = False
+) -> None:
     """Workspace непересекается с control-plane каталогами (ADR-0015 §0.3).
 
     Инвариант раскладки: рабочая директория агента — строго отдельный каталог,
@@ -94,6 +96,10 @@ def assert_workspace_isolated(cfg: SvarogConfig, workspace: Path) -> None:
     В `local-trusted` bash работает на хосте и путями не заперт в принципе —
     остаточный доступ к control-plane принят как явный trade-off режима
     «trusted» (§17): нарушения возвращаются как предупреждения, а не блокируют.
+
+    allow_overlap — человек явно подтвердил пересечение в локальном CLI
+    (ADR-0018): гейт пропускает. Флаг выставляется только интерактивным
+    TTY-путём superuser'а; gateway/tenant-пути его не передают (fail-closed).
     """
     violations = workspace_layout_violations(cfg, workspace)
     if not violations:
@@ -101,6 +107,8 @@ def assert_workspace_isolated(cfg: SvarogConfig, workspace: Path) -> None:
     detail = "; ".join(violations)
     if cfg.sandbox.type == "local-trusted":
         return  # документированный trade-off режима trusted — не блокируем
+    if allow_overlap:
+        return  # человек подтвердил доступ агента к control-plane (ADR-0018)
     raise WorkspaceLayoutError(
         f"control-plane пересекается с workspace: {detail}. "
         f"Держите БД/память/скиллы вне рабочего дерева агента (ADR-0015 §0.3): "

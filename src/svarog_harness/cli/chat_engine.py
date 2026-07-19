@@ -123,12 +123,20 @@ class ChatEngine:
     """
 
     def __init__(
-        self, cfg: SvarogConfig, workspace: Path, autonomy: AutonomyMode, hooks: RunHooks
+        self,
+        cfg: SvarogConfig,
+        workspace: Path,
+        autonomy: AutonomyMode,
+        hooks: RunHooks,
+        *,
+        allow_layout_overlap: bool = False,
     ) -> None:
         self._cfg = cfg
         self._workspace = workspace
         self._autonomy = autonomy
         self._hooks = hooks
+        # Подтверждённое человеком пересечение с control-plane (ADR-0018).
+        self._allow_layout_overlap = allow_layout_overlap
         self._external = cfg.executor.type == "external"
         self._runner: TaskRunner | None = None
         self._resources: SessionResources | None = None
@@ -153,8 +161,12 @@ class ChatEngine:
     ) -> ChatSessionStart:
         """Поднять sandbox и DB-сессию; подхватить историю continue/fork."""
         # Раскладка workspace (ADR-0015 §0.3) — как в run_once/resume.
-        assert_workspace_isolated(self._cfg, self._workspace)
-        self._runner = TaskRunner(self._cfg, self._workspace)
+        assert_workspace_isolated(
+            self._cfg, self._workspace, allow_overlap=self._allow_layout_overlap
+        )
+        self._runner = TaskRunner(
+            self._cfg, self._workspace, allow_layout_overlap=self._allow_layout_overlap
+        )
         # prepare_session_resources сам делает fail-closed проверки sandbox и
         # автономии внешнего агента (ADR-0013/ADR-0016 §6).
         self._resources = await self._runner.prepare_session_resources(self._autonomy)
