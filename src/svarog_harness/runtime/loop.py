@@ -132,6 +132,7 @@ class _PreparedCall:
 
     call: ToolCallRequest
     arguments: dict[str, Any]
+    repairs: list[str]
     tool: Tool[Any]
     decision: PolicyDecision
 
@@ -437,8 +438,8 @@ class AgentLoop:
             if len(batch) >= self._cfg.max_tool_concurrency:
                 break
             try:
-                arguments = call.parse_arguments()
                 tool = self._registry.get(call.name)
+                arguments, repairs = self._registry.prepare_arguments(tool, call)
             except (ValueError, UnknownToolError):
                 break
             decision = self._policy.evaluate(tool, arguments)
@@ -450,7 +451,7 @@ class AgentLoop:
                 break
             if not tool.is_concurrency_safe(args):
                 break
-            batch.append(_PreparedCall(call, arguments, tool, decision))
+            batch.append(_PreparedCall(call, arguments, repairs, tool, decision))
         return batch
 
     async def _execute_batch(
@@ -470,7 +471,9 @@ class AgentLoop:
                 await self._recorder.start_tool_call(
                     run,
                     tool_name=prepared.call.name,
-                    arguments=self._redact_json(prepared.arguments),
+                    arguments=self._traced_arguments(
+                        prepared.call, prepared.arguments, prepared.repairs
+                    ),
                     risk_level=prepared.decision.risk_level.value,
                     policy_decision=prepared.decision.action.value,
                 )
@@ -599,6 +602,19 @@ class AgentLoop:
         if isinstance(value, dict):
             return {str(key): self._redact_json(item) for key, item in value.items()}
         return value
+
+    def _traced_arguments(
+        self, call: ToolCallRequest, arguments: dict[str, Any], repairs: list[str]
+    ) -> dict[str, Any]:
+        """Аргументы для trace: при ремонте показываем и оригинал, и результат."""
+        traced: dict[str, Any] = self._redact_json(arguments)
+        if repairs:
+            traced = {
+                **traced,
+                "_repairs": repairs,
+                "_raw": self._redact_text(call.arguments_json),
+            }
+        return traced
 
     def _remember_saved_content(self, tool_name: str, arguments: dict[str, Any]) -> None:
         if tool_name != "write_file":
@@ -867,8 +883,8 @@ class AgentLoop:
 
     async def _execute_tool(self, run: Run, call: ToolCallRequest) -> ToolResult:
         try:
-            arguments = call.parse_arguments()
-        except ValueError as exc:
+            tool = self._registry.get(call.name)
+        except UnknownToolError as exc:
             record = await self._recorder.start_tool_call(
                 run,
                 tool_name=call.name,
@@ -880,10 +896,13 @@ class AgentLoop:
             return result
 
         try:
-            tool = self._registry.get(call.name)
-        except UnknownToolError as exc:
+            arguments, repairs = self._registry.prepare_arguments(tool, call)
+        except ValueError as exc:
             record = await self._recorder.start_tool_call(
-                run, tool_name=call.name, arguments=self._redact_json(arguments), risk_level=None
+                run,
+                tool_name=call.name,
+                arguments={"_raw": self._redact_text(call.arguments_json)},
+                risk_level=None,
             )
             result = ToolResult.failure(str(exc))
             await self._recorder.finish_tool_call(record, ok=False, output="", error=result.error)
@@ -894,7 +913,7 @@ class AgentLoop:
             record = await self._recorder.start_tool_call(
                 run,
                 tool_name=call.name,
-                arguments=self._redact_json(arguments),
+                arguments=self._traced_arguments(call, arguments, repairs),
                 risk_level=decision.risk_level.value,
                 policy_decision=decision.action.value,
             )
@@ -918,7 +937,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )

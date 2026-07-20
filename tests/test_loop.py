@@ -240,6 +240,33 @@ async def test_invalid_arguments_json_reported_to_model(db: AsyncSession, tmp_pa
     assert tool_call.arguments == {"_raw": "{broken"}
 
 
+async def test_repaired_call_records_original_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §4: ремонт формы аргументов виден в trace — и что прислала
+    модель, и что реально исполнилось."""
+    (tmp_path / "a.txt").write_text("содержимое", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1",
+                    name="read_file",
+                    arguments_json='{"arguments": {"path": "a.txt"}}',
+                )
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    calls = (await db.scalars(select(ToolCall).where(ToolCall.run_id == outcome.run_id))).all()
+    assert len(calls) == 1
+    assert calls[0].status is ToolCallStatus.SUCCEEDED
+    assert calls[0].arguments["path"] == "a.txt"
+    assert calls[0].arguments["_repairs"] == ["unwrapped"]
+    assert "arguments" in calls[0].arguments["_raw"]
+
+
 async def test_suspends_at_max_iterations(db: AsyncSession, tmp_path: Path) -> None:
     endless = [
         _tool_turn(ToolCallRequest(id=f"c{i}", name="list_dir", arguments_json="{}"))
