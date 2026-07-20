@@ -1,7 +1,10 @@
 # Sandbox-образ внешнего агента OpenCode (ADR-0016 фаза 4).
 #
 # node — сам агент (opencode); git — Flow C (агент коммитит сам внутри
-# workspace); ca-certificates — TLS к bridge-прокси. python3 не нужен —
+# workspace); ca-certificates — TLS к bridge-прокси; ripgrep — инструменты
+# glob/grep OpenCode: без `rg` в PATH он пытается скачать бинарь с github.com,
+# что в internal-сети sandbox'а (единственный hop — bridge, ADR-0016 §2)
+# молча падает, и все glob/grep-вызовы мертвы. python3 не нужен —
 # у OpenCode нет hook-моста (capabilities().hooks=False, tier 2 недоступен).
 #
 # Версия opencode-ai НЕ пинится намеренно — по аналогии с agent-claude.
@@ -10,7 +13,7 @@
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates \
+        git ca-certificates ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Cache-bust: чтобы «всегда свежий» работал вопреки кэшу слоёв, передайте

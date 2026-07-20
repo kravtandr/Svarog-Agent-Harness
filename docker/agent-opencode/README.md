@@ -1,9 +1,12 @@
 # Sandbox-образ агента OpenCode (ADR-0016)
 
 Образ data-plane для `executor: external` с `adapter: opencode`. Внутри —
-Node (сам агент `opencode`), git (Flow C). Хуков нет — cooperative-tier
-(supervised, память/скиллы через MCP) с этим адаптером недоступен,
-только containment (`enforcement: containment`).
+Node (сам агент `opencode`), git (Flow C), ripgrep (инструменты glob/grep:
+без `rg` в PATH OpenCode пытается скачать бинарь с github.com, что в
+закрытой internal-сети sandbox'а молча падает — glob/grep перестают
+работать). Хуков нет — cooperative-tier (supervised, память/скиллы через
+MCP) с этим адаптером недоступен, только containment
+(`enforcement: containment`).
 
 ## Сборка
 
