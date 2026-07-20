@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,11 +21,29 @@ from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Checkpoint, Message, Run, RunState
+from svarog_harness.storage.models import Approval, Checkpoint, Message, Run, RunState
+from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.trace.lookup import RunNotResumableError
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
+
+
+class _NoArgs(BaseModel):
+    pass
+
+
+class _HighRiskTool(Tool[_NoArgs]):
+    """Tool для approval-сценария (блок A §1, регрессия на resume-после-approval)."""
+
+    name = "high_risk_action"
+    action_type = "test.high_risk"
+    description = "тестовый high-risk tool, требующий approval в supervised"
+    risk_level = RiskLevel.HIGH
+    args_model = _NoArgs
+
+    async def execute(self, args: _NoArgs) -> ToolResult:
+        return ToolResult.success("выполнено")
 
 
 class ScriptedProvider(ModelProvider):
@@ -153,6 +172,7 @@ async def test_resume_executes_pending_write_ahead_calls(db: AsyncSession, tmp_p
     state = LoopState(
         workspace=tmp_path,
         messages=[
+            ChatMessage(role="system", content="ты агент"),
             ChatMessage(role="user", content="задача"),
             ChatMessage(role="assistant", content="", tool_calls=(pending,)),
         ],
@@ -244,3 +264,45 @@ async def test_load_resumable_requires_checkpoint(db: AsyncSession) -> None:
 
     with pytest.raises(RunNotResumableError, match="нет checkpoint"):
         await recorder.load_resumable(run.id)
+
+
+async def test_history_invariant_holds_on_resume_after_approval(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Инвариант не срабатывает ложно: pending_tool_calls доисполняются до
+    первого complete() после resume, поэтому пар «вызов ↔ результат» не рвётся.
+
+    Регрессия на блок A §1: проверка обязана стоять ПОСЛЕ доисполнения.
+    """
+    # Прогон до approval: run уходит в waiting_approval с write-ahead вызовом.
+    provider = ScriptedProvider(
+        [
+            _tool_turn(ToolCallRequest(id="c1", name="high_risk_action", arguments_json="{}")),
+            _final("готово"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(_HighRiskTool())
+    loop = AgentLoop(
+        provider,
+        registry,
+        TraceRecorder(db),
+        RuntimeConfig(),
+        PolicyEngine(
+            autonomy=AutonomyMode.SUPERVISED, policies=PoliciesConfig(), workspace=tmp_path
+        ),
+        tmp_path,
+        model_name="test-model",
+    )
+    outcome = await loop.run("рискованная задача", AutonomyMode.SUPERVISED)
+    assert outcome.state is RunState.WAITING_APPROVAL  # type: ignore[union-attr]
+
+    recorder = TraceRecorder(db)
+    approval = (await db.execute(select(Approval))).scalar_one()
+    await recorder.decide_approval(approval, approved=True, decided_by="test", reason="ок")
+
+    # После одобрения resume обязан завершиться без HistoryInvariantError.
+    run, raw_state = await recorder.load_resumable(outcome.run_id)
+    outcome = await loop.resume(run, LoopState.from_dict(raw_state))
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.error is None
