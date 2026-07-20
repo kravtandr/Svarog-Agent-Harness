@@ -31,6 +31,7 @@ dependencies = [
     "docker>=7.1",
     # Telegram Bot API и HTTP-инструменты (transitive через openai; объявляем явно).
     "httpx>=0.28",
+    "prompt-toolkit>=3.0.43",
 ]
 
 [project.optional-dependencies]

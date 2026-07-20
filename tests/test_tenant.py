@@ -127,6 +127,32 @@ def test_local_trusted_overlap_is_documented_tradeoff(tmp_path: Path) -> None:
     assert_workspace_isolated(base, ws)
 
 
+def test_overlap_allowed_after_human_confirmation(tmp_path: Path) -> None:
+    # ADR-0018: подтверждённое человеком пересечение пропускает гейт docker-раскладки.
+    ws = tmp_path / "ws"
+    base = _base_cfg(
+        tmp_path,
+        f"sandbox:\n  type: docker\nmemory:\n  path: {ws / 'memory'}\n",
+    )
+    with pytest.raises(WorkspaceLayoutError):
+        assert_workspace_isolated(base, ws)
+    assert_workspace_isolated(base, ws, allow_overlap=True)
+
+
+def test_standard_role_clamps_layout_overlap_flag(tmp_path: Path) -> None:
+    # Флаг подтверждения — только для superuser CLI; у standard-тенанта гейт
+    # раскладки безусловный (fail-closed), даже если флаг передан.
+    from svarog_harness.runtime.orchestrator import TaskRunner
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    base = _base_cfg(tmp_path, "sandbox:\n  type: docker\n")
+    standard = TaskRunner(base, ws, role=TenantRole.STANDARD, allow_layout_overlap=True)
+    superuser = TaskRunner(base, ws, allow_layout_overlap=True)
+    assert standard._allow_layout_overlap is False
+    assert superuser._allow_layout_overlap is True
+
+
 # --- кламп роли ---------------------------------------------------------------
 
 

@@ -654,3 +654,24 @@ async def test_infra_missing_api_key_fail_closed(tmp_path: Path) -> None:
     )
     with pytest.raises(ApiKeyError, match="NO_SUCH_KEY_REF"):
         await infra.start()
+
+
+def test_handle_error_suppresses_connection_resets(capsys) -> None:
+    # Обрыв соединения клиентом (агент закрыл stream) не должен печатать
+    # traceback в stderr — он ложится поверх живого чата CLI.
+    from http.server import BaseHTTPRequestHandler
+
+    server = QuietHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+    try:
+        try:
+            raise ConnectionResetError("[Errno 54] Connection reset by peer")
+        except ConnectionResetError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("настоящая ошибка хендлера")
+        except ValueError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        assert "ValueError" in capsys.readouterr().err
+    finally:
+        server.server_close()

@@ -343,6 +343,11 @@ class ExternalExecutorConfig(StrictModel):
     # Upstream-endpoint провайдера агента; LLM-трафик идёт агент → bridge →
     # сюда (§3). Для локальных моделей — свой OpenAI-совместимый URL.
     base_url: str = "https://api.anthropic.com"
+    # Модель для агентов с конфигурируемым провайдером (opencode): Svarog
+    # пишет её в managed-конфиг агента вместе с openai-совместимым провайдером
+    # (chat-completions — Responses API у произвольных upstream'ов ломается на
+    # resume). None — агент выбирает модель сам. claude-code/codex игнорируют.
+    model: str | None = None
     # Образ relay-sidecar'а (internal-сеть → bridge, §2): нужен python3.
     relay_image: str = "python:3.12-slim"
     # Цены за миллион токенов — для cost-бюджета на прокси; 0 = не считаем.

@@ -15,12 +15,12 @@
 | Документ | Что содержит |
 |---|---|
 | `TASK.md` | полное ТЗ — источник истины по требованиям |
-| `docs/adr/` | архитектурные решения (ADR-0001…0011) — источник истины по архитектуре |
+| `docs/adr/` | архитектурные решения (ADR-0001…0018) — источник истины по архитектуре |
 | `docs/repo-structure.md` | структура пакета и правила зависимостей между модулями |
 | `docs/first-issues.md` | backlog: 29 issues по milestones M0–M5, порядок топологический |
 | `simulation/` | agent-based user simulation: как внешнему агенту тестировать Svarog на реальном LLM — инструкции, сценарии, личности пользователей |
 
-Стек: Python 3.12+, uv, Typer, Pydantic v2, SQLAlchemy/SQLite, Docker SDK (ADR-0001).
+Стек: Python 3.12+, uv, Typer, Pydantic v2, SQLAlchemy/SQLite, Docker SDK (ADR-0001); chat — inline-режим на Rich (ADR-0018).
 
 ## Как работать
 

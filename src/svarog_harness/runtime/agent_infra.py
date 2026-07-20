@@ -160,7 +160,11 @@ class ExternalAgentInfra:
         verifier его не видят). MCP-конфиг, hook-скрипт и managed-настройки —
         одноразовые ro-mounts вне state volume: агент не может их переписать.
         """
-        for rel, content in self._adapter.context_files(memory, skill_cards).items():
+        state_files = dict(self._adapter.context_files(memory, skill_cards))
+        # Managed-конфиг провайдера (executor.external.model): перезаписывает
+        # одноимённый файл в state — источник истины по модели у Svarog.
+        state_files.update(self._adapter.provider_files(self._external_cfg.model))
+        for rel, content in state_files.items():
             target = self._state_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")

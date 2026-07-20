@@ -30,11 +30,12 @@ class Executor(Protocol):
 
 
 # Виды нормализованных событий стрима внешнего агента (ADR-0016 §8):
-#   text — реплика ассистента; tool_call/tool_result — действие агента
-#   (коррелируются по call_id); result — финал с итогами usage/cost;
-#   opaque — неизвестный тип события, сохраняется raw (forward-compat
-#   при дрейфе stream-формата CLI).
-AgentEventKind = Literal["text", "tool_call", "tool_result", "result", "opaque"]
+#   text — реплика ассистента; reasoning — thinking-канал модели (в trace
+#   не пишется; фолбэк финала, когда модель кладёт ответ только в reasoning —
+#   gpt-oss/harmony); tool_call/tool_result — действие агента (коррелируются
+#   по call_id); result — финал с итогами usage/cost; opaque — неизвестный
+#   тип события, сохраняется raw (forward-compat при дрейфе stream-формата CLI).
+AgentEventKind = Literal["text", "reasoning", "tool_call", "tool_result", "result", "opaque"]
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,12 @@ class AgentAdapter(Protocol):
         """Файлы контекста агента (ADR-0016 §4): относительный путь внутри
         state_dir → содержимое (CLAUDE.md / AGENTS.md); пусто — контекст
         не передаётся."""
+        ...
+
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        """Файлы конфигурации LLM-провайдера агента: относительный путь внутри
+        state_dir → содержимое; пусто — адаптер провайдером не управляет
+        (модель/endpoint заданы механизмом самого агента)."""
         ...
 
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:

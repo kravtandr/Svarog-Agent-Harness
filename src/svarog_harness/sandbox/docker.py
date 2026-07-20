@@ -26,6 +26,7 @@ from svarog_harness.sandbox.base import (
     ExecResult,
     ExecutionEnvironment,
     SandboxError,
+    read_line_unbounded,
     read_stream_tail,
 )
 from svarog_harness.sandbox.reaper import owner_label_args
@@ -206,7 +207,7 @@ class DockerEnvironment(ExecutionEnvironment):
             # Запас поверх внутреннего coreutils timeout — от зависшего клиента.
             async with asyncio.timeout(timeout_sec + _CLIENT_TIMEOUT_MARGIN_SEC):
                 while True:
-                    raw = await proc.stdout.readline()
+                    raw = await read_line_unbounded(proc.stdout)
                     if not raw:
                         break
                     await on_line(raw.decode(errors="replace").rstrip("\n"))
