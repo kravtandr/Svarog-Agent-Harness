@@ -152,11 +152,39 @@ async def test_suspended_run_resumes_and_completes(db: AsyncSession, tmp_path: P
     assert result.iterations == 3
     # Токены накоплены за все итерации, включая до приостановки.
     assert result.tokens_used == 45
+    # Important 5: накопитель фаз (блок A §5) тоже учитывает вызовы модели
+    # и до приостановки, и после — центральное требование к resume.
+    assert run.meta["phases"]["llm_call"]["count"] == 3
 
     # Нумерация сообщений продолжилась без конфликтов UniqueConstraint.
     messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
     assert [m.index_in_run for m in messages] == list(range(len(messages)))
     assert messages[-1].content["content"] == "после resume"
+
+
+async def test_resume_survives_malformed_phase_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """Critical 2: Run.meta["phases"] со строкой/числом вместо словаря не
+    должен ронять resume() исключением до перевода run в failed — таймер
+    просто игнорирует испорченный агрегат и продолжает с нуля."""
+    provider = ScriptedProvider([_final("после resume")])
+    recorder = TraceRecorder(db)
+    run = await recorder.start_run(task="задача", autonomy="yolo", model="test-model")
+    state = LoopState(
+        workspace=tmp_path,
+        messages=[
+            ChatMessage(role="system", content="ты агент"),
+            ChatMessage(role="user", content="задача"),
+        ],
+        iterations=1,
+    )
+    await recorder.save_checkpoint(run, iteration=1, state=state.to_dict())
+    await recorder.set_run_state(run, RunState.SUSPENDED, error="искусственная остановка")
+    # Испорченный агрегат фаз — например, ручная правка БД или битая миграция.
+    await recorder.merge_run_meta(run, {"phases": "мусор"})
+
+    loaded_run, raw_state = await TraceRecorder(db).load_resumable(run.id)
+    outcome = await _loop(provider, db, tmp_path).resume(loaded_run, LoopState.from_dict(raw_state))
+    assert outcome.state is RunState.COMPLETED
 
 
 async def test_resume_executes_pending_write_ahead_calls(db: AsyncSession, tmp_path: Path) -> None:
