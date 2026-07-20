@@ -27,6 +27,12 @@ from svarog_harness.cli.chat_engine import (
 from svarog_harness.cli.chat_engine import (
     with_db as _with_db,
 )
+from svarog_harness.cli.init_executor import (
+    ClaudeAnswers,
+    ExecutorSetupError,
+    OpencodeAnswers,
+    resolve_executor_setup,
+)
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import (
     WorkspaceLayoutError,
@@ -205,10 +211,52 @@ def init(
         str | None,
         typer.Option("--api-key", help="API-ключ (сохраняется в secret store, не в svarog.yaml)"),
     ] = None,
+    executor: Annotated[
+        str | None,
+        typer.Option(
+            "--executor",
+            help="Активный исполнитель: native (по умолчанию) | claude-code | opencode",
+        ),
+    ] = None,
+    claude_auth: Annotated[
+        str | None,
+        typer.Option("--claude-auth", help="Режим авторизации Claude Code: api-key | subscription"),
+    ] = None,
+    claude_api_key: Annotated[
+        str | None, typer.Option("--claude-api-key", help="Anthropic API-ключ (auth=api-key)")
+    ] = None,
+    claude_oauth_token: Annotated[
+        str | None,
+        typer.Option(
+            "--claude-oauth-token",
+            help="OAuth-токен подписки (`claude setup-token`, auth=subscription)",
+        ),
+    ] = None,
+    opencode_model: Annotated[
+        str | None, typer.Option("--opencode-model", help="Модель для OpenCode")
+    ] = None,
+    opencode_base_url: Annotated[
+        str | None, typer.Option("--opencode-base-url", help="Base URL endpoint для OpenCode")
+    ] = None,
+    opencode_api_key: Annotated[
+        str | None, typer.Option("--opencode-api-key", help="API-ключ для OpenCode")
+    ] = None,
+    opencode_same_as_native: Annotated[
+        bool,
+        typer.Option(
+            "--opencode-same-as-native",
+            help="OpenCode использует те же креды (модель/base_url/ключ), что и нативный provider",
+        ),
+    ] = False,
+    opencode_own_creds: Annotated[
+        bool,
+        typer.Option("--opencode-own-creds", help="OpenCode настраивается отдельными кредами"),
+    ] = False,
 ) -> None:
     """Создать agent-home: skills, memory (Flow A), policies, .gitignore (§8).
 
-    Без --no-input задаёт интерактивные вопросы (путь, модель, base_url, ключ).
+    Без --no-input задаёт интерактивные вопросы (путь, модель, base_url, ключ,
+    Claude Code, OpenCode).
     """
     interactive = not no_input and sys.stdin.isatty()
 
@@ -233,20 +281,168 @@ def init(
     base_url = base_url or DEFAULT_BASE_URL
     api_key_ref = DEFAULT_API_KEY_REF if api_key else None
 
+    claude_requested = bool(
+        claude_auth or claude_api_key or claude_oauth_token or executor == "claude-code"
+    )
+    opencode_requested = bool(
+        opencode_model
+        or opencode_base_url
+        or opencode_api_key
+        or opencode_same_as_native
+        or opencode_own_creds
+        or executor == "opencode"
+    )
+
+    if interactive and not claude_requested:
+        claude_requested = typer.confirm(
+            "Настроить Claude Code как исполнителя?", default=False
+        )
+    if interactive and not opencode_requested:
+        opencode_requested = typer.confirm(
+            "Настроить OpenCode как исполнителя?", default=False
+        )
+
+    if claude_requested:
+        if interactive and claude_auth is None:
+            claude_auth = typer.prompt(
+                "Режим авторизации Claude Code (api-key/subscription)", default="api-key"
+            )
+        claude_auth = claude_auth or "api-key"
+        if claude_auth == "subscription":
+            if interactive and claude_oauth_token is None:
+                claude_oauth_token = (
+                    typer.prompt(
+                        "OAuth-токен подписки (`claude setup-token`, Enter — пропустить, "
+                        "добавить позже)",
+                        default="",
+                        hide_input=True,
+                        show_default=False,
+                    )
+                    or None
+                )
+        else:
+            if interactive and claude_api_key is None:
+                claude_api_key = (
+                    typer.prompt(
+                        "Anthropic API-ключ (Enter — пропустить, добавить позже)",
+                        default="",
+                        hide_input=True,
+                        show_default=False,
+                    )
+                    or None
+                )
+
+    opencode_reuse_native = True
+    if opencode_requested:
+        if opencode_own_creds:
+            opencode_reuse_native = False
+        elif opencode_same_as_native:
+            opencode_reuse_native = True
+        elif interactive:
+            opencode_reuse_native = typer.confirm(
+                "OpenCode: использовать те же креды, что и у нативного provider'а?",
+                default=True,
+            )
+            if opencode_reuse_native:
+                opencode_same_as_native = True
+            else:
+                opencode_own_creds = True
+        else:
+            opencode_reuse_native = True
+            opencode_same_as_native = True
+
+        if not opencode_reuse_native:
+            if interactive and opencode_model is None:
+                opencode_model = typer.prompt("Модель для OpenCode", default=model)
+            if interactive and opencode_base_url is None:
+                opencode_base_url = typer.prompt(
+                    "Base URL endpoint для OpenCode", default=base_url
+                )
+            if interactive and opencode_api_key is None:
+                opencode_api_key = (
+                    typer.prompt(
+                        "API-ключ для OpenCode (Enter — пропустить, добавить позже)",
+                        default="",
+                        hide_input=True,
+                        show_default=False,
+                    )
+                    or None
+                )
+
+    if interactive and claude_requested and opencode_requested and executor is None:
+        choice = typer.prompt(
+            "Какой сделать активным исполнителем (claude-code/opencode)",
+            default="claude-code",
+        ).strip()
+        executor = choice if choice in ("claude-code", "opencode") else "claude-code"
+
+    claude_answers = ClaudeAnswers(
+        requested=claude_requested,
+        auth=claude_auth or "api-key",
+        api_key=claude_api_key,
+        oauth_token=claude_oauth_token,
+    )
+    opencode_answers = OpencodeAnswers(
+        requested=opencode_requested,
+        same_as_native=opencode_same_as_native,
+        own_creds=opencode_own_creds,
+        model=opencode_model,
+        base_url=opencode_base_url,
+        api_key=opencode_api_key,
+    )
+    try:
+        executor_setup = resolve_executor_setup(
+            executor=executor,
+            claude=claude_answers,
+            opencode=opencode_answers,
+            native_model=model,
+            native_base_url=base_url,
+            native_api_key_ref=api_key_ref,
+        )
+    except ExecutorSetupError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
     result = scaffold_agent_home(
-        target, force=force, model=model, base_url=base_url, api_key_ref=api_key_ref
+        target,
+        force=force,
+        model=model,
+        base_url=base_url,
+        api_key_ref=api_key_ref,
+        executor=executor_setup,
     )
     for created in result.created:
         console.print(f"[green]+[/green] {created.relative_to(target)}")
     for skipped in result.skipped:
         console.print(f"[dim]= {skipped.relative_to(target)} (существует, пропущено)[/dim]")
 
+    secrets_to_store: list[tuple[str, str, str]] = []
     if api_key and api_key_ref:
+        secrets_to_store.append((api_key_ref, api_key, "модели"))
+    if executor_setup is not None and executor_setup.claude is not None:
+        claude_setup = executor_setup.claude
+        if claude_setup.auth == "api-key" and claude_api_key and claude_setup.api_key_ref:
+            secrets_to_store.append((claude_setup.api_key_ref, claude_api_key, "Claude Code"))
+        if (
+            claude_setup.auth == "subscription"
+            and claude_oauth_token
+            and claude_setup.oauth_token_ref
+        ):
+            secrets_to_store.append(
+                (claude_setup.oauth_token_ref, claude_oauth_token, "Claude Code (OAuth)")
+            )
+    if executor_setup is not None and executor_setup.opencode is not None:
+        opencode_setup = executor_setup.opencode
+        if opencode_api_key and opencode_setup.api_key_ref:
+            secrets_to_store.append((opencode_setup.api_key_ref, opencode_api_key, "OpenCode"))
+
+    if secrets_to_store:
         secrets_path = SecretsConfig().path
         assert secrets_path is not None  # дефолт схемы всегда задан
         store = FileSecretStore(secrets_path.expanduser())
-        store.set(api_key_ref, api_key)
-        console.print(f"[green]ключ сохранён[/green] в {secrets_path} (ref: {api_key_ref})")
+        for ref, value, label in secrets_to_store:
+            store.set(ref, value)
+            console.print(f"[green]ключ сохранён[/green] ({label}) в {secrets_path} (ref: {ref})")
 
     ignored = _ensure_gitignored(target)
     if ignored is not None:
@@ -269,14 +465,40 @@ def init(
         await init_git_subrepo(target / "skills", "svarog init: skills repo")
 
     asyncio.run(init_subrepos())
-    next_step = (
-        'запустите `svarog run "…"`'
-        if api_key or api_key_ref is None
-        else f"добавьте ключ: `svarog secrets set {api_key_ref}`"
+
+    pending_refs: list[str] = []
+    if api_key_ref and not api_key:
+        pending_refs.append(api_key_ref)
+    if executor_setup is not None and executor_setup.claude is not None:
+        claude_setup = executor_setup.claude
+        if claude_setup.auth == "api-key" and claude_setup.api_key_ref and not claude_api_key:
+            pending_refs.append(claude_setup.api_key_ref)
+        if (
+            claude_setup.auth == "subscription"
+            and claude_setup.oauth_token_ref
+            and not claude_oauth_token
+        ):
+            pending_refs.append(claude_setup.oauth_token_ref)
+    if (
+        executor_setup is not None
+        and executor_setup.opencode is not None
+        and not opencode_reuse_native
+        and executor_setup.opencode.api_key_ref
+        and not opencode_api_key
+    ):
+        pending_refs.append(executor_setup.opencode.api_key_ref)
+
+    if pending_refs:
+        reminders = ", ".join(f"`svarog secrets set {ref}`" for ref in pending_refs)
+        next_step = f"добавьте ключи: {reminders}"
+    else:
+        next_step = 'запустите `svarog run "…"`'
+    executor_note = (
+        f"; исполнитель: {executor_setup.active}" if executor_setup is not None else ""
     )
     console.print(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
-        f"[dim]модель {model} @ {base_url}; {next_step}[/dim]"
+        f"[dim]модель {model} @ {base_url}{executor_note}; {next_step}[/dim]"
     )
 
 
