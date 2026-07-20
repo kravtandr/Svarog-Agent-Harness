@@ -334,12 +334,6 @@ def init(
 
     opencode_reuse_native = True
     if opencode_requested:
-        if opencode_same_as_native and opencode_own_creds:
-            console.print(
-                "[red]--opencode-same-as-native и --opencode-own-creds "
-                "взаимоисключающие[/red]"
-            )
-            raise typer.Exit(code=1)
         if opencode_own_creds:
             opencode_reuse_native = False
         elif opencode_same_as_native:
@@ -349,8 +343,13 @@ def init(
                 "OpenCode: использовать те же креды, что и у нативного provider'а?",
                 default=True,
             )
+            if opencode_reuse_native:
+                opencode_same_as_native = True
+            else:
+                opencode_own_creds = True
         else:
             opencode_reuse_native = True
+            opencode_same_as_native = True
 
         if not opencode_reuse_native:
             if interactive and opencode_model is None:
@@ -385,7 +384,8 @@ def init(
     )
     opencode_answers = OpencodeAnswers(
         requested=opencode_requested,
-        reuse_native=opencode_reuse_native,
+        same_as_native=opencode_same_as_native,
+        own_creds=opencode_own_creds,
         model=opencode_model,
         base_url=opencode_base_url,
         api_key=opencode_api_key,

@@ -111,7 +111,7 @@ def test_opencode_reuse_native_uses_native_values() -> None:
     result = resolve_executor_setup(
         executor=None,
         claude=_NO_CLAUDE,
-        opencode=OpencodeAnswers(requested=True, reuse_native=True),
+        opencode=OpencodeAnswers(requested=True, same_as_native=True),
         native_model="qwen3-coder",
         native_base_url="http://localhost:8000/v1",
         native_api_key_ref="PROVIDER_API_KEY",
@@ -130,7 +130,7 @@ def test_opencode_own_creds_with_values_sets_own_ref() -> None:
         claude=_NO_CLAUDE,
         opencode=OpencodeAnswers(
             requested=True,
-            reuse_native=False,
+            own_creds=True,
             model="m2",
             base_url="http://y",
             api_key="sk-y",
@@ -150,7 +150,7 @@ def test_opencode_own_creds_without_model_falls_back_to_native() -> None:
     result = resolve_executor_setup(
         executor=None,
         claude=_NO_CLAUDE,
-        opencode=OpencodeAnswers(requested=True, reuse_native=False, api_key=None),
+        opencode=OpencodeAnswers(requested=True, own_creds=True, api_key=None),
         native_model="qwen3-coder",
         native_base_url="http://localhost:8000/v1",
         native_api_key_ref="PROVIDER_API_KEY",
@@ -167,7 +167,7 @@ def test_both_requested_without_executor_errors() -> None:
         resolve_executor_setup(
             executor=None,
             claude=ClaudeAnswers(requested=True, auth="api-key", api_key="sk-x"),
-            opencode=OpencodeAnswers(requested=True, reuse_native=True),
+            opencode=OpencodeAnswers(requested=True, same_as_native=True),
             native_model="m",
             native_base_url="http://x",
             native_api_key_ref=None,
@@ -178,7 +178,7 @@ def test_both_requested_with_explicit_executor_builds_standby() -> None:
     result = resolve_executor_setup(
         executor="opencode",
         claude=ClaudeAnswers(requested=True, auth="api-key", api_key="sk-x"),
-        opencode=OpencodeAnswers(requested=True, reuse_native=True),
+        opencode=OpencodeAnswers(requested=True, same_as_native=True),
         native_model="m",
         native_base_url="http://x",
         native_api_key_ref="PROVIDER_API_KEY",
@@ -194,7 +194,7 @@ def test_executor_claude_code_without_claude_requested_errors() -> None:
         resolve_executor_setup(
             executor="claude-code",
             claude=ClaudeAnswers(requested=False),
-            opencode=OpencodeAnswers(requested=True, reuse_native=True),
+            opencode=OpencodeAnswers(requested=True, same_as_native=True),
             native_model="m",
             native_base_url="http://x",
             native_api_key_ref=None,
@@ -207,6 +207,20 @@ def test_executor_opencode_without_opencode_requested_errors() -> None:
             executor="opencode",
             claude=ClaudeAnswers(requested=True, auth="api-key", api_key="sk-x"),
             opencode=OpencodeAnswers(requested=False),
+            native_model="m",
+            native_base_url="http://x",
+            native_api_key_ref=None,
+        )
+
+
+def test_opencode_conflicting_creds_flags_errors() -> None:
+    with pytest.raises(
+        ExecutorSetupError, match=r"opencode-same-as-native.*opencode-own-creds"
+    ):
+        resolve_executor_setup(
+            executor=None,
+            claude=_NO_CLAUDE,
+            opencode=OpencodeAnswers(requested=True, same_as_native=True, own_creds=True),
             native_model="m",
             native_base_url="http://x",
             native_api_key_ref=None,
