@@ -48,9 +48,15 @@ def assert_history_valid(messages: list[ChatMessage]) -> None:
                 raise HistoryInvariantError(f"сообщение [{index}]: tool-сообщение без tool_call_id")
             answered[call_id] += 1
             if answered[call_id] > announced[call_id]:
+                if announced[call_id] == 0:
+                    raise HistoryInvariantError(
+                        f"сообщение [{index}]: результат ссылается на неизвестный "
+                        f"tool_call_id {call_id!r}"
+                    )
                 raise HistoryInvariantError(
-                    f"сообщение [{index}]: результат ссылается на неизвестный "
-                    f"tool_call_id {call_id!r}"
+                    f"сообщение [{index}]: повторный результат для tool_call_id "
+                    f"{call_id!r} — объявлений: {announced[call_id]}, "
+                    f"результатов: {answered[call_id]}"
                 )
 
     missing = sorted(call_id for call_id in announced if announced[call_id] > answered[call_id])
