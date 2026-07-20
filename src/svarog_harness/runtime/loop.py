@@ -814,7 +814,14 @@ class AgentLoop:
                 continue
             tool_name = self._tool_name_for(state.messages, index, message.tool_call_id)
             spill = _SPILL_PATH_RE.search(message.content)
-            tail = f"Полный вывод: {spill.group(1)}" if spill else "повтори вызов при необходимости"
+            # Компакция — обучающий сигнал, а не молчаливое усечение: маркер
+            # говорит, что делать дальше, иначе модель повторяет тот же вызов.
+            tail = (
+                f"полный вывод: {spill.group(1)} — читай read_file частями (offset/limit)"
+                if spill
+                else "при необходимости повтори вызов с более узкими параметрами "
+                "(путь, паттерн, лимит), а не тот же самый"
+            )
             state.messages[index] = replace(
                 message,
                 content=(
