@@ -165,7 +165,7 @@ async def test_send_prints_markdown_answer_and_footer(cfg: SvarogConfig, tmp_pat
     assert engine.sent == ["привет"] and engine.closed
     out = _output(console)
     assert "готово" in out  # markdown-ответ напечатан в scrollback
-    assert "— 2 итер. | $0.0123" in out
+    assert "— 2 итер. · $0.0123" in out
 
 
 async def test_quit_and_unknown_command(cfg: SvarogConfig, tmp_path: Path) -> None:
