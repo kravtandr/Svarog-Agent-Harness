@@ -56,6 +56,9 @@ class _StreamState:
     # Codex/OpenCode не несут финальный текст в result-событии — фолбэк на
     # последнюю text-реплику ассистента.
     last_text: str = ""
+    # Последний фолбэк: gpt-oss/harmony у части провайдеров кладёт ответ
+    # только в reasoning-канал, text-событий нет вовсе.
+    last_reasoning: str = ""
     result_ok: bool = False
     saw_result: bool = False
     tokens_used: int = 0
@@ -258,6 +261,9 @@ class ExternalAgentExecutor:
                 await self._recorder.add_message(run, "assistant", {"content": text})
                 if self._on_text_delta is not None:
                     self._on_text_delta(text)
+            case "reasoning":
+                # Thinking в trace не пишется — только фолбэк финала.
+                state.last_reasoning = self._redact(event.text)
             case "tool_call":
                 arguments = {k: self._redact_value(v) for k, v in event.arguments.items()}
                 record = await self._recorder.start_tool_call(
@@ -299,7 +305,9 @@ class ExternalAgentExecutor:
             case "result":
                 state.saw_result = True
                 state.result_ok = event.ok
-                state.final_answer = self._redact(event.text) or state.last_text
+                state.final_answer = (
+                    self._redact(event.text) or state.last_text or state.last_reasoning
+                )
                 state.tokens_used += event.input_tokens + event.output_tokens
                 state.cost_usd += event.cost_usd
                 state.num_turns = event.num_turns

@@ -16,6 +16,12 @@ svarog/
     __init__.py
     cli/                    # Typer-приложение
       main.py               # все команды + интерактивный approval в терминале (одним модулем)
+      chat_engine.py        # ChatEngine: общий драйвер chat-сессии для фронтендов (ADR-0018)
+      chat_inline.py        # inline-режим chat: Rich Live-стрим, слэш-команды
+      chat_display.py       # welcome Panel (логотип), tool-карточки, executor_view
+      chat_completion.py    # CompletionMode IDLE/SLASH/AT (паттерн qwen-code)
+      chat_prompt.py        # prompt_toolkit: меню `/` и `@` при наборе
+      chat_commands.py      # реестр слэш-команд чата и парсинг
 
     config/                 # svarog.yaml → pydantic-settings
       schema.py

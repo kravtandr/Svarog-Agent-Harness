@@ -32,6 +32,29 @@ async def read_stream_tail(reader: asyncio.StreamReader) -> str:
         tail = (tail + chunk)[-_STDERR_CAP_BYTES:]
 
 
+async def read_line_unbounded(reader: asyncio.StreamReader) -> bytes:
+    """Строка из потока без падения на строках длиннее лимита StreamReader.
+
+    `readline()` роняет ValueError («Separator is found, but chunk is longer
+    than limit»), когда строка не помещается в буфер, — например JSON-событие
+    внешнего агента с большим tool output. Собираем строку кусками через
+    readuntil, при переполнении буфера забирая накопленное и продолжая.
+    Пустой bytes — EOF (как у readline()).
+    """
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunks.append(await reader.readuntil(b"\n"))
+            return b"".join(chunks)
+        except asyncio.IncompleteReadError as exc:  # EOF без завершающего \n
+            chunks.append(exc.partial)
+            return b"".join(chunks)
+        except asyncio.LimitOverrunError as exc:
+            # Буфер полон (сепаратор дальше лимита или ещё не найден) —
+            # exc.consumed говорит, сколько байт можно забрать безопасно.
+            chunks.append(await reader.readexactly(exc.consumed))
+
+
 @dataclass(frozen=True)
 class ExecResult:
     """Результат исполнения команды в среде."""

@@ -58,7 +58,7 @@ def test_codex_stream_golden() -> None:
     adapter = CodexAdapter()
     events = [e for line in _CODEX_STREAM for e in adapter.parse_event(json.dumps(line))]
     kinds = [e.kind for e in events]
-    assert kinds == ["opaque", "tool_call", "tool_result", "text", "result"]
+    assert kinds == ["opaque", "tool_call", "tool_result", "reasoning", "text", "result"]
     assert events[0].session_id == "0199a213-81c0-7800-8aa1-bbab2a035a53"
     call, result_ev = events[1], events[2]
     assert call.tool_name == "command_execution"
@@ -67,8 +67,9 @@ def test_codex_stream_golden() -> None:
     assert result_ev.call_id == "item_1"
     assert result_ev.ok
     assert "docs" in result_ev.text
-    assert events[3].text == "Готово: docs и src на месте."
-    final = events[4]
+    assert events[3].text == "**Thinking**"
+    assert events[4].text == "Готово: docs и src на месте."
+    final = events[5]
     assert final.ok
     assert (final.input_tokens, final.output_tokens) == (24763, 122)
 
@@ -143,15 +144,16 @@ def test_opencode_stream_golden() -> None:
     adapter = OpencodeAdapter()
     events = [e for line in _OPENCODE_STREAM for e in adapter.parse_event(json.dumps(line))]
     kinds = [e.kind for e in events]
-    assert kinds == ["opaque", "tool_call", "tool_result", "text", "result"]
+    assert kinds == ["opaque", "reasoning", "tool_call", "tool_result", "text", "result"]
     assert events[0].session_id == "ses_494719016ffe85dkDMj0FPRbHK"
-    call, result_ev = events[1], events[2]
+    assert events[1].text == "думаю"
+    call, result_ev = events[2], events[3]
     assert call.tool_name == "bash"
     assert call.call_id == "prt_2"
     assert call.arguments == {"command": "ls"}
     assert result_ev.ok and result_ev.text == "hello.py"
-    assert events[3].text == "Файл на месте."
-    final = events[4]
+    assert events[4].text == "Файл на месте."
+    final = events[5]
     assert final.ok
     assert (final.input_tokens, final.output_tokens) == (900, 80)
     assert final.cost_usd == 0.0123
@@ -256,3 +258,22 @@ def test_claude_hook_timeout_exceeds_grace() -> None:
     hook = managed["hooks"]["PreToolUse"][0]["hooks"][0]
     assert hook["timeout"] == 900 + CLIENT_GATE_TIMEOUT_MARGIN_SEC
     assert hook["timeout"] > cfg.approval_grace_sec
+
+
+def test_opencode_provider_files_pin_chat_completions_provider() -> None:
+    # Регрессия: без managed-конфига OpenCode выбирает провайдера `openai`
+    # (Responses API), и resume у OpenAI-совместимых upstream'ов падает
+    # («Invalid Responses API request»). С executor.external.model Svarog
+    # пишет провайдера на @ai-sdk/openai-compatible (chat-completions).
+    files = OpencodeAdapter().provider_files("openai/gpt-oss-120b")
+    assert list(files) == [".config/opencode/opencode.jsonc"]
+    config = json.loads(files[".config/opencode/opencode.jsonc"])
+    provider = config["provider"]["svarog"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "{env:OPENAI_BASE_URL}"
+    assert "openai/gpt-oss-120b" in provider["models"]
+    assert config["model"] == "svarog/openai/gpt-oss-120b"
+
+
+def test_opencode_provider_files_absent_without_model() -> None:
+    assert OpencodeAdapter().provider_files(None) == {}

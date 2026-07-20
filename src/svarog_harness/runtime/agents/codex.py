@@ -83,6 +83,10 @@ class CodexAdapter:
             return {}
         return {"AGENTS.md": "\n\n".join(sections) + "\n"}
 
+    def provider_files(self, model: str | None) -> dict[str, str]:
+        # Провайдер/модель Codex задаются его собственным конфигом в state.
+        return {}
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         return None  # у Codex нет managed-настроек с высшим приоритетом
 
@@ -196,8 +200,15 @@ class CodexAdapter:
                         )
                     ]
                 return []
-            case "reasoning" | "todo_list":
-                return []  # не события trace
+            case "reasoning":
+                # Фолбэк финала (см. AgentEventKind): reasoning не пишется в
+                # trace, но executor держит последний на случай пустого ответа.
+                text = item.get("text")
+                if completed and isinstance(text, str) and text:
+                    return [AgentEvent(kind="reasoning", text=text)]
+                return []
+            case "todo_list":
+                return []  # не событие trace
             case _:
                 return [AgentEvent(kind="opaque", raw=payload)]
 
