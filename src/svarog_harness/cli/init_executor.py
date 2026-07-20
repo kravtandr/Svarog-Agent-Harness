@@ -37,7 +37,8 @@ class ClaudeAnswers:
 @dataclass(frozen=True)
 class OpencodeAnswers:
     requested: bool
-    reuse_native: bool = True
+    same_as_native: bool = False
+    own_creds: bool = False
     model: str | None = None
     base_url: str | None = None
     api_key: str | None = None
@@ -109,17 +110,21 @@ def resolve_executor_setup(
 
     opencode_setup: OpencodeExecutorSetup | None = None
     if opencode.requested:
-        if opencode.reuse_native:
-            opencode_setup = OpencodeExecutorSetup(
-                model=native_model,
-                base_url=native_base_url,
-                api_key_ref=native_api_key_ref,
+        if opencode.same_as_native and opencode.own_creds:
+            raise ExecutorSetupError(
+                "--opencode-same-as-native и --opencode-own-creds взаимоисключающие"
             )
-        else:
+        if opencode.own_creds:
             opencode_setup = OpencodeExecutorSetup(
                 model=opencode.model or native_model,
                 base_url=opencode.base_url or native_base_url,
                 api_key_ref=DEFAULT_OPENCODE_API_KEY_REF if opencode.api_key else None,
+            )
+        else:
+            opencode_setup = OpencodeExecutorSetup(
+                model=native_model,
+                base_url=native_base_url,
+                api_key_ref=native_api_key_ref,
             )
 
     return ExecutorSetup(active=active, claude=claude_setup, opencode=opencode_setup)
