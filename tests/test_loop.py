@@ -663,6 +663,38 @@ async def test_microcompact_marker_references_spill_file(db: AsyncSession, tmp_p
     assert ".svarog/tool-results/" in cleared  # ссылка на полный вывод
 
 
+async def test_microcompact_marker_is_actionable(db: AsyncSession, tmp_path: Path) -> None:
+    """Без spill-файла маркер не предлагает повторить ТОТ ЖЕ вызов, а требует
+    сузить параметры (блок A §2): иначе модель зацикливается на повторе."""
+    big = "\n".join(f"строка {i}: " + "х" * 40 for i in range(20))  # > 500 символов
+    (tmp_path / "a.txt").write_text(big, encoding="utf-8")
+    (tmp_path / "b.txt").write_text(big, encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _tool_turn(
+                ToolCallRequest(id="c2", name="read_file", arguments_json='{"path": "b.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(
+        max_context_tokens=1000,
+        microcompact_threshold_ratio=0.5,
+        microcompact_keep_recent=1,
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    cleared = next(m for m in provider.seen_messages[-1] if m.role == "tool")
+    assert "более узкими параметрами" in cleared.content
+    assert "повтори вызов при необходимости" not in cleared.content
+
+
 # --- ADR-0015 §1.6: детектор затухающей отдачи --------------------------------
 
 
