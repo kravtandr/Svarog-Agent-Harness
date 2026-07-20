@@ -159,7 +159,8 @@ def _claude_block_lines(setup: ClaudeExecutorSetup) -> list[str]:
     if setup.auth == "subscription":
         # Схема требует непустой oauth_token_ref для subscription — строка
         # активна всегда, даже если значение токена ещё не сохранено.
-        lines.append(f"    oauth_token_ref: {setup.oauth_token_ref}")
+        token_ref = setup.oauth_token_ref or DEFAULT_CLAUDE_OAUTH_TOKEN_REF
+        lines.append(f"    oauth_token_ref: {token_ref}")
     elif setup.api_key_ref:
         lines.append(f"    api_key_ref: {setup.api_key_ref}")
     else:
