@@ -62,7 +62,7 @@ class ToolRegistry:
             name for name in self.names() if name not in self._deferred or name in self._loaded
         ]
         builtin = [n for n in visible if n not in self._external and n != _LOAD_TOOL_NAME]
-        external = [n for n in visible if n in self._external]
+        external = [n for n in visible if n in self._external and n != _LOAD_TOOL_NAME]
         trailing = [n for n in visible if n == _LOAD_TOOL_NAME]
         return [self._tools[name].definition() for name in builtin + external + trailing]
 
