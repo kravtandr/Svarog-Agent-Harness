@@ -7,6 +7,7 @@ artifacts/, policies/, дефолтный svarog.yaml и .gitignore с denylist
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from svarog_harness.secrets import gitignore_block
 
@@ -33,6 +34,11 @@ _README_MD = """\
 DEFAULT_MODEL = "qwen3-coder"
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_API_KEY_REF = "PROVIDER_API_KEY"
+DEFAULT_CLAUDE_IMAGE = "svarog/agent-claude:latest"
+DEFAULT_OPENCODE_IMAGE = "svarog/agent-opencode:latest"
+DEFAULT_CLAUDE_API_KEY_REF = "CLAUDE_CODE_KEY"
+DEFAULT_CLAUDE_OAUTH_TOKEN_REF = "CLAUDE_CODE_OAUTH_TOKEN"
+DEFAULT_OPENCODE_API_KEY_REF = "OPENCODE_API_KEY"
 
 
 def _render_config_yaml(model: str, base_url: str, api_key_ref: str | None) -> str:
@@ -120,6 +126,110 @@ class ScaffoldResult:
     skipped: list[Path]
 
 
+@dataclass(frozen=True)
+class ClaudeExecutorSetup:
+    auth: Literal["api-key", "subscription"]
+    api_key_ref: str | None = None
+    oauth_token_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class OpencodeExecutorSetup:
+    model: str
+    base_url: str
+    api_key_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutorSetup:
+    active: Literal["claude-code", "opencode"]
+    claude: ClaudeExecutorSetup | None = None
+    opencode: OpencodeExecutorSetup | None = None
+
+
+_ADAPTER_LABELS: dict[str, str] = {"claude-code": "Claude Code", "opencode": "OpenCode"}
+
+
+def _claude_block_lines(setup: ClaudeExecutorSetup) -> list[str]:
+    lines = [
+        "    adapter: claude-code",
+        f"    image: {DEFAULT_CLAUDE_IMAGE}",
+        f"    auth: {setup.auth}",
+    ]
+    if setup.auth == "subscription":
+        # Схема требует непустой oauth_token_ref для subscription — строка
+        # активна всегда, даже если значение токена ещё не сохранено.
+        token_ref = setup.oauth_token_ref or DEFAULT_CLAUDE_OAUTH_TOKEN_REF
+        lines.append(f"    oauth_token_ref: {token_ref}")
+    elif setup.api_key_ref:
+        lines.append(f"    api_key_ref: {setup.api_key_ref}")
+    else:
+        lines.append(
+            f"    # api_key_ref: {DEFAULT_CLAUDE_API_KEY_REF}   # имя секрета в SecretStore"
+        )
+    return lines
+
+
+def _opencode_block_lines(setup: OpencodeExecutorSetup) -> list[str]:
+    lines = [
+        "    adapter: opencode",
+        f"    image: {DEFAULT_OPENCODE_IMAGE}",
+        f"    model: {setup.model}",
+        f"    base_url: {setup.base_url}",
+    ]
+    if setup.api_key_ref:
+        lines.append(f"    api_key_ref: {setup.api_key_ref}")
+    else:
+        lines.append(
+            f"    # api_key_ref: {DEFAULT_OPENCODE_API_KEY_REF}   # имя секрета в SecretStore"
+        )
+    return lines
+
+
+def _adapter_block_lines(
+    adapter: Literal["claude-code", "opencode"], executor: ExecutorSetup
+) -> list[str]:
+    if adapter == "claude-code":
+        assert executor.claude is not None
+        return _claude_block_lines(executor.claude)
+    assert executor.opencode is not None
+    return _opencode_block_lines(executor.opencode)
+
+
+def _full_block_lines(
+    adapter: Literal["claude-code", "opencode"], executor: ExecutorSetup
+) -> list[str]:
+    return [
+        "executor:",
+        "  type: external",
+        "  external:",
+        *_adapter_block_lines(adapter, executor),
+    ]
+
+
+def _render_executor_yaml(executor: ExecutorSetup | None) -> str:
+    """Секция executor.external активного адаптера + закомментированный блок
+    второго, если он тоже настроен (переключение — правкой пары строк)."""
+    if executor is None:
+        return ""
+    active_text = "\n".join(_full_block_lines(executor.active, executor))
+    standby: Literal["claude-code", "opencode"] = (
+        "opencode" if executor.active == "claude-code" else "claude-code"
+    )
+    standby_setup: ClaudeExecutorSetup | OpencodeExecutorSetup | None = (
+        executor.opencode if standby == "opencode" else executor.claude
+    )
+    if standby_setup is None:
+        return f"\n{active_text}\n"
+    label = _ADAPTER_LABELS[standby]
+    commented = "\n".join(f"# {line}" for line in _full_block_lines(standby, executor))
+    return (
+        f"\n{active_text}\n"
+        f"\n# {label} тоже настроен и готов — чтобы переключиться, замените блок "
+        f"executor выше на:\n{commented}\n"
+    )
+
+
 def _write(path: Path, content: str, result: ScaffoldResult, *, force: bool) -> None:
     if path.exists() and not force:
         result.skipped.append(path)
@@ -136,14 +246,18 @@ def scaffold_agent_home(
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
     api_key_ref: str | None = None,
+    executor: ExecutorSetup | None = None,
 ) -> ScaffoldResult:
     """Создать структуру agent-home; существующие файлы не трогаются без force.
 
     model/base_url/api_key_ref подставляются в секцию models сгенерированного
     svarog.yaml. Значение ключа в конфиг не пишется — только имя (api_key_ref).
+    executor — опциональная секция executor.external (Claude Code/OpenCode).
     """
     result = ScaffoldResult(created=[], skipped=[])
-    config_yaml = _render_config_yaml(model, base_url, api_key_ref)
+    config_yaml = _render_config_yaml(model, base_url, api_key_ref) + _render_executor_yaml(
+        executor
+    )
     _write(target / "AGENTS.md", _AGENTS_MD, result, force=force)
     _write(target / "README.md", _README_MD, result, force=force)
     _write(target / "svarog.yaml", config_yaml, result, force=force)
