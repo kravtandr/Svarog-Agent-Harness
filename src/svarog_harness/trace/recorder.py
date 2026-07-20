@@ -434,8 +434,13 @@ class TraceRecorder:
         await self.merge_run_meta(run, {CANCEL_META_KEY: True})
 
     async def cancel_requested(self, run: Run) -> bool:
-        """Прочитать флаг cancel из БД (пишется другим процессом/сессией)."""
-        await self._db.refresh(run)
+        """Прочитать флаг cancel из БД (пишется другим процессом/сессией).
+
+        Refresh сужен до атрибута meta — как в merge_run_meta/update_progress:
+        голый refresh(run) однажды откатил бы другие несохранённые атрибуты
+        того же вызывающего (см. их docstring'и) — здесь риск тот же.
+        """
+        await self._db.refresh(run, attribute_names=["meta"])
         return bool((run.meta or {}).get(CANCEL_META_KEY))
 
     async def create_session(self, *, title: str, meta: dict[str, Any] | None = None) -> Session:

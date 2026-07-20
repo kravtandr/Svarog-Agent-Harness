@@ -61,6 +61,32 @@ def test_duplicate_tool_result_fails() -> None:
         assert_history_valid(messages)
 
 
+def test_unknown_and_duplicate_results_have_distinct_messages() -> None:
+    """Обе ошибки раньше делили одну формулировку про «неизвестный
+    tool_call_id» — по тексту нельзя было отличить лишний повторный
+    результат известного вызова от результата на несуществующий id."""
+    unknown_messages = [
+        _system(),
+        ChatMessage(role="tool", content="результат", tool_call_id="c9"),
+    ]
+    with pytest.raises(HistoryInvariantError, match="неизвестный") as unknown_exc:
+        assert_history_valid(unknown_messages)
+
+    duplicate_messages = [
+        _system(),
+        ChatMessage(role="assistant", tool_calls=(_call("c1"),)),
+        ChatMessage(role="tool", content="раз", tool_call_id="c1"),
+        ChatMessage(role="tool", content="два", tool_call_id="c1"),
+    ]
+    with pytest.raises(HistoryInvariantError, match="повторный") as duplicate_exc:
+        assert_history_valid(duplicate_messages)
+
+    assert "неизвестный" not in str(duplicate_exc.value)
+    assert "повторный" not in str(unknown_exc.value)
+    assert "объявлений: 1" in str(duplicate_exc.value)
+    assert "результатов: 2" in str(duplicate_exc.value)
+
+
 def test_empty_tool_call_name_fails() -> None:
     messages = [
         _system(),

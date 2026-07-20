@@ -273,10 +273,13 @@ class AgentLoop:
     async def _drive(self, run: Run, state: LoopState) -> RunOutcome:
         try:
             # Write-ahead: доисполнить вызовы, зафиксированные до остановки.
-            # tool_exec — та же фаза, что и в основном цикле (Minor 6): охват
-            # симметричен вложенным в неё memory_flush/checkpoint.
-            with self._phases.measure("tool_exec"):
-                await self._execute_pending(run, state)
+            # tool_exec — та же фаза, что и в основном цикле: охват симметричен
+            # вложенным в неё memory_flush/checkpoint. Замер — только если
+            # действительно есть что исполнять: иначе счётчик фазы рос бы у
+            # run'а без единого write-ahead вызова, хотя события не было.
+            if state.pending_tool_calls:
+                with self._phases.measure("tool_exec"):
+                    await self._execute_pending(run, state)
             # Resume после refuel-приостановки: пересобрать контекст из
             # task_state.md, отбросив прежнюю историю (§6.10, ADR-0005).
             if state.refuel_pending:
@@ -295,8 +298,11 @@ class AgentLoop:
                 # Микрокомпакция (§1.4): дешёвый слой без LLM между «всё в
                 # контексте» и refuel. Цена — разовая инвалидация префиксного
                 # кэша провайдера; порог держит число срабатываний малым.
-                with self._phases.measure("microcompact"):
-                    if self._should_microcompact(state):
+                # Замер только когда компакция реально сработала — иначе
+                # счётчик фазы рос бы на каждой итерации вне зависимости от
+                # того, была ли компакция вообще.
+                if self._should_microcompact(state):
+                    with self._phases.measure("microcompact"):
                         self._microcompact(state)
                 stream_callback = None if self._saved_file_contents else self._on_text_delta
                 # Инвариант истории (блок A §1): нарушение — баг loop'а, а не
@@ -440,8 +446,11 @@ class AgentLoop:
             had_success = had_success or tool_result.ok
             self._note_tool_call_result(state, call, tool_result)
             await self._flush_skill_loads(run)
-            with self._phases.measure("memory_flush"):
-                await self._flush_memory(run)
+            # Замер только когда есть заявки remember в очереди — иначе
+            # счётчик фазы рос бы даже при полном отсутствии сброса памяти.
+            if self._memory_sink:
+                with self._phases.measure("memory_flush"):
+                    await self._flush_memory(run)
             self._flush_plan_updates(state)
             rendered = self._render_tool_result(run, call, tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
@@ -666,6 +675,7 @@ class AgentLoop:
         call: ToolCallRequest,
         arguments: dict[str, Any],
         decision: PolicyDecision,
+        repairs: list[str],
     ) -> ToolResult | None:
         """Применить решение человека по approval для этого вызова.
 
@@ -683,7 +693,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -699,6 +709,7 @@ class AgentLoop:
         call: ToolCallRequest,
         arguments: dict[str, Any],
         decision: PolicyDecision,
+        repairs: list[str],
     ) -> ToolResult | None:
         """ask_user: вернуть ответ человека либо (по таймауту) продолжить (§6.5).
 
@@ -713,13 +724,15 @@ class AgentLoop:
         if approval.status is ApprovalStatus.APPROVED:
             answer = (approval.reason or "").strip()
             message = f"ответ пользователя: {answer}" if answer else _QUESTION_NO_ANSWER_MSG
-            return await self._record_question_result(run, call, arguments, decision, message)
+            return await self._record_question_result(
+                run, call, arguments, decision, message, repairs
+            )
         if approval.status is ApprovalStatus.PENDING:
             if not self._question_deadline_passed(approval):
                 raise _ApprovalRequiredError(call, arguments, decision)
             await self._recorder.expire_approval(approval)
             return await self._record_question_result(
-                run, call, arguments, decision, _QUESTION_TIMEOUT_MSG
+                run, call, arguments, decision, _QUESTION_TIMEOUT_MSG, repairs
             )
         # DENIED или EXPIRED — ответа нет, продолжаем по best-guess.
         message = (
@@ -727,7 +740,7 @@ class AgentLoop:
             if approval.status is ApprovalStatus.EXPIRED
             else _QUESTION_NO_ANSWER_MSG
         )
-        return await self._record_question_result(run, call, arguments, decision, message)
+        return await self._record_question_result(run, call, arguments, decision, message, repairs)
 
     async def _record_question_result(
         self,
@@ -736,12 +749,13 @@ class AgentLoop:
         arguments: dict[str, Any],
         decision: PolicyDecision,
         message: str,
+        repairs: list[str],
     ) -> ToolResult:
         """Записать исход ask_user в trace и вернуть его модели как результат."""
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -952,9 +966,9 @@ class AgentLoop:
             return result
         if decision.action is PolicyAction.REQUIRE_APPROVAL:
             if call.name == ASK_USER_TOOL_NAME:
-                verdict = await self._consume_question(run, call, arguments, decision)
+                verdict = await self._consume_question(run, call, arguments, decision, repairs)
             else:
-                verdict = await self._consume_approval(run, call, arguments, decision)
+                verdict = await self._consume_approval(run, call, arguments, decision, repairs)
             if verdict is not None:
                 return verdict
         if decision.action is PolicyAction.NOTIFY and self._on_notify is not None:

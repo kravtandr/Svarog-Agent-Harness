@@ -654,7 +654,14 @@ sandbox:
   `restore()`) считает `{ms, count}` по фазам `llm_call`, `tool_exec`,
   `microcompact`, `memory_flush`, `checkpoint`, `approval_wait`; агрегат
   пишется в `Run.meta["phases"]` (поле уже существовало, миграция не нужна)
-  и отображается в `traces show`. Без FSM: у nanobot ход — конечный автомат
+  и отображается в `traces show`. `count` — число фактических срабатываний
+  фазы, а не число итераций цикла: замер стоит ВНУТРИ условия, которое решает,
+  было ли событие (`if state.pending_tool_calls`/`if self._should_microcompact
+  (state)`/`if self._memory_sink`) — run без единого tool call не показывает
+  `tool_exec`, run без единой компакции не показывает `microcompact`, run без
+  единого `remember` не показывает `memory_flush`. Иначе счётчики отвечали бы
+  на вопрос «сколько было итераций», а не «куда ушло время». Без FSM: у
+  nanobot ход — конечный автомат
   с явной таблицей переходов (`loop.py:102,256`; отсутствие перехода —
   `RuntimeError`), оправданный у них множеством входов в ход (слэш-команды,
   восстановление checkpoint'а, автокомпакция, mid-turn инъекции субагентов);
@@ -686,11 +693,14 @@ sandbox:
   `await self._db.refresh(run, attribute_names=["meta"])` перед слиянием в
   обоих методах — узко, только атрибут `meta`, а не весь объект `run`:
   голый `refresh(run)` откатил бы другие несохранённые атрибуты того же
-  вызова (`iterations`, `tokens_used`, `cost_usd`, `heartbeat_at`). Фикс
-  относится не только к таймингам — метод общий, поэтому он защищает любого
-  вызывающего `merge_run_meta`/`update_progress` (в т.ч. `external.py`,
-  `request_cancel`) и восстанавливает гарантию cooperative-cancel из
-  ADR-0017 §2. Reproducer'ы:
+  вызова (`iterations`, `tokens_used`, `cost_usd`, `heartbeat_at`). Тот же
+  узкий refresh — и в `cancel_requested` (метод, который сам этот флаг
+  читает): по тому же принципу, чтобы точка чтения не расходилась с точками
+  записи и голый `refresh(run)` не оказался единственным широким местом в
+  файле. Фикс относится не только к таймингам — метод общий, поэтому он
+  защищает любого вызывающего `merge_run_meta`/`update_progress` (в т.ч.
+  `external.py`, `request_cancel`) и восстанавливает гарантию
+  cooperative-cancel из ADR-0017 §2. Reproducer'ы:
   `tests/test_resume.py::test_merge_run_meta_preserves_concurrent_cancel_flag`,
   `tests/test_resume.py::test_update_progress_preserves_concurrent_cancel_flag_with_cached_tokens`,
   `tests/test_cloud_sessions.py::test_cancel_running_cooperative`.
