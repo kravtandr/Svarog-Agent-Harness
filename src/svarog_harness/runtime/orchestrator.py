@@ -593,7 +593,9 @@ class TaskRunner:
             # require_approval (action_type mcp.*), риск из конфига сервера.
             # При defer_schemas (ADR-0015 фаза 2) схема в промпт не грузится,
             # пока модель не вызовет load_tool.
-            registry.register(mcp_tool, deferred=defer_schemas)
+            # external: MCP-схемы дописываются после встроенных, чтобы смена
+            # discovery не сдвигала кэшируемый префикс промпта (блок A §3).
+            registry.register(mcp_tool, deferred=defer_schemas, external=True)
         if defer_schemas:
             registry.register(LoadToolTool(registry))
         if skills:
