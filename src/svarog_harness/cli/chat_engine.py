@@ -100,6 +100,7 @@ class ChatEngineProtocol(Protocol):
     async def send(self, task: str) -> RunOutcome: ...
     async def resume(self, run_id: str) -> RunOutcome: ...
     async def rebuild_resources(self) -> None: ...
+    async def reconfigure(self, cfg: SvarogConfig, autonomy: AutonomyMode) -> None: ...
     async def pending_approvals(self, run_id: str) -> list[Approval]: ...
     async def decide_approval(
         self, approval_id: str, *, approved: bool, reason: str | None, decided_by: str
@@ -298,6 +299,18 @@ class ChatEngine:
         self._resources = await runner.prepare_session_resources(self._autonomy)
         self._mcp_tools = build_mcp_tools(self._resources.backends)
         self._resources_dirty = False
+
+    async def reconfigure(self, cfg: SvarogConfig, autonomy: AutonomyMode) -> None:
+        """Сменить cfg/autonomy mid-session и пересобрать sandbox (/executor и др.)."""
+        self._cfg = cfg
+        self._autonomy = autonomy
+        self._external = cfg.executor.type == "external"
+        if self._runner is None:
+            return
+        self._runner = TaskRunner(
+            cfg, self._workspace, allow_layout_overlap=self._allow_layout_overlap
+        )
+        await self.rebuild_resources()
 
     async def pending_approvals(self, run_id: str) -> list[Approval]:
         _, _, _, recorder = self._require_started()

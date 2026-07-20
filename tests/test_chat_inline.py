@@ -1,6 +1,7 @@
 """Inline-режим chat (ADR-0018): диалог с фейковым движком и скриптованным вводом."""
 
 import io
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ class FakeEngine:
         self.approvals: list[Approval] = []
         self.reset_calls = 0
         self._session_id: str | None = None
+        self.reconfigured: list[tuple[str, str]] = []
 
     @property
     def session_id(self) -> str | None:
@@ -73,6 +75,9 @@ class FakeEngine:
 
     async def rebuild_resources(self) -> None:
         pass
+
+    async def reconfigure(self, cfg: SvarogConfig, autonomy: AutonomyMode) -> None:
+        self.reconfigured.append((cfg.executor.type, autonomy.value))
 
     async def pending_approvals(self, run_id: str) -> list[Approval]:
         pending, self.approvals = self.approvals, []
@@ -123,7 +128,13 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SvarogConfig:
 
 
 def _chat(
-    cfg: SvarogConfig, tmp_path: Path, inputs: list[str]
+    cfg: SvarogConfig,
+    tmp_path: Path,
+    inputs: list[str],
+    *,
+    workspace: Path | None = None,
+    pick_option_fn: Callable[[str, Sequence[tuple[str, str]], str | None], Awaitable[str | None]]
+    | None = None,
 ) -> tuple[InlineChat, list[FakeEngine], Console]:
     console = Console(file=io.StringIO(), width=100, force_terminal=False)
     engines: list[FakeEngine] = []
@@ -141,13 +152,14 @@ def _chat(
 
     chat = InlineChat(
         cfg,
-        tmp_path,
+        workspace if workspace is not None else tmp_path,
         AutonomyMode.YOLO,
         RunHooks(),
         console=console,
         read_line=read_line,
         engine_factory=factory,
         history_path=tmp_path / "chat_history",
+        pick_option_fn=pick_option_fn,
     )
     return chat, engines, console
 
@@ -230,3 +242,29 @@ async def test_switch_session_prints_history(cfg: SvarogConfig, tmp_path: Path) 
     out = _output(console)
     assert "продолжаю сессию abc12345" in out
     assert "из истории" in out
+
+
+async def test_policies_command_saves_yaml_and_reconfigures(
+    cfg: SvarogConfig, tmp_path: Path
+) -> None:
+    ws = tmp_path / "ws"
+
+    async def pick(
+        title: str, values: Sequence[tuple[str, str]], default: str | None
+    ) -> str | None:
+        assert title == "policies"
+        return "supervised"
+
+    chat, engines, console = _chat(
+        cfg,
+        tmp_path,
+        ["/policies", "/quit"],
+        workspace=ws,
+        pick_option_fn=pick,
+    )
+    await chat.run()
+    assert engines[0].reconfigured == [("native", "supervised")]
+    assert chat._autonomy is AutonomyMode.SUPERVISED
+    raw = (ws / "svarog.yaml").read_text(encoding="utf-8")
+    assert "autonomy: supervised" in raw
+    assert "policies → supervised" in _output(console)

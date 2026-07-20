@@ -88,11 +88,13 @@ fast-code — проприетарный форк Claude Code («research use on
    На `resume` подтверждение запрашивается по факту отказа гейта
    (workspace checkpoint'а известен только после загрузки).
 8. **Презентация — раскладка Claude Code / fast-code, свой бренд.**
-   Welcome Panel: две колонки — workspace/статус слева, tips справа; title
+   Welcome Panel: две колонки — слева workspace + мини-таблица
+   `executors` / `mode` / `policies` (активное — акцент, остальные dim;
+   external-адаптеры — только detected/configured), справа tips; title
    в рамке `Svarog chat v…`. Акцент — синий (`dodger_blue2`), не оранжевый.
-   Tool-карточки (`✎ Write path (2.1 KB)`). Полоса над промптом; статус
-   автономии/executor — `bottom_toolbar` prompt_toolkit (не постоянный
-   список `/help · /new`). Полноэкранный chrome (toolbar pills) не
+   Tool-карточки (`✎ Write path (2.1 KB)`). Компактный статус над промптом
+   (`▶▶ yolo · native/docker · local · default`); нижняя полоса —
+   `bottom_toolbar` prompt_toolkit. Полноэкранный chrome (toolbar pills) не
    переносится: требует alt-screen (п.1).
 9. **Подсказки `/` и `@` — только при наборе.** Логика в
    `chat_completion.py` (порт смысла `useCommandCompletion` qwen-code):
@@ -105,7 +107,9 @@ fast-code — проприетарный форк Claude Code («research use on
 ```text
 cli/chat_engine.py       ChatEngine, ChatEngineProtocol, with_db
 cli/chat_inline.py       InlineChat: Live-стрим, слэш-команды, approvals
-cli/chat_display.py      welcome Panel, format_tool_call, executor_view
+cli/chat_display.py      welcome Panel, chat_status_view, format_tool_call
+cli/chat_settings.py     /executor /mode /policies → cfg + project yaml
+cli/chat_picker.py       RadioList (↑↓ + Enter) для выбора
 cli/chat_completion.py   CompletionMode IDLE/SLASH/AT, slash/at suggestions
 cli/chat_prompt.py       PromptSession + ChatCompleter (prompt_toolkit)
 cli/chat_commands.py     реестр /help… + parse
@@ -128,4 +132,5 @@ cli/chat_commands.py     реестр /help… + parse
 * очередь сообщений во время активного run;
 * fuzzy-поиск файлов (fzf) и MCP-resource `@server:uri` как в qwen-code;
 * просмотр diff/артефактов из чата (карточка Write с превью diff);
-* cycle автономии по hotkey (как shift+tab у Claude Code) — сейчас только флаг CLI.
+* cycle автономии по hotkey (как shift+tab у Claude Code) — сейчас `/policies`
+  (меню) и флаги CLI; hotkey не покрыт.

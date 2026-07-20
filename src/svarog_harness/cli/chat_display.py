@@ -1,13 +1,14 @@
 """Презентация chat/run: welcome как Claude Code, tool-карточки, chrome ввода.
 
-Макет референса (Claude Code / fast-code): двухколоночный welcome (workspace/
-статус слева, tips справа), тонкая полоса над промптом, статус внизу. Акцент —
-синий (не оранжевый Claude).
+Макет референса (Claude Code / fast-code): двухколоночный welcome (workspace +
+мини-таблица executors/mode/policies слева, tips справа), компактный статус над
+промптом. Акцент — синий (не оранжевый Claude).
 Подсказки `/` и `@` — только при наборе (см. chat_completion / chat_prompt).
 """
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,22 @@ from rich.text import Text
 
 from svarog_harness import __version__
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+
+_EXTERNAL_ADAPTERS = ("claude-code", "codex", "opencode")
+_ADAPTER_BINARIES = {
+    "claude-code": "claude",
+    "codex": "codex",
+    "opencode": "opencode",
+}
+_MODE_LOCAL = "локальный loop"
+_MODE_CLOUD = "cloud-агент"
+MODE_LOCAL = _MODE_LOCAL
+MODE_CLOUD = _MODE_CLOUD
+_AUTONOMY_MARKS = {
+    AutonomyMode.YOLO: "▶▶",
+    AutonomyMode.AUTO: "▶",
+    AutonomyMode.SUPERVISED: "⏸",
+}
 
 # Синий акцент (референс Claude Code по раскладке, свой цвет).
 ACCENT = "dodger_blue2"
@@ -164,23 +181,70 @@ def _summarize_args(args: dict[str, object]) -> str:
 
 
 @dataclass(frozen=True)
-class ExecutorView:
-    """Как показать текущий data-plane в UI (ADR-0016)."""
+class ChatStatusView:
+    """Snapshot для welcome/status: списки + активные значения (ADR-0016/0018)."""
 
-    kind: str  # native | external
-    detail: str  # local | docker | claude-code | …
-    role: str  # локальный loop | cloud-агент
+    autonomy: AutonomyMode
+    executors: tuple[str, ...]
+    active_executor: str
+    modes: tuple[str, ...]
+    active_mode: str
+    policy_profile: str
 
 
-def executor_view(cfg: SvarogConfig) -> ExecutorView:
-    """Тип executor'а и среда: native/local vs external/claude-code и т.п."""
+def _native_executor_label(cfg: SvarogConfig) -> str:
+    sandbox = cfg.sandbox.type
+    detail = "local" if sandbox == "local-trusted" else sandbox
+    return f"native/{detail}"
+
+
+def _adapter_available(name: str) -> bool:
+    """Host CLI адаптера в PATH (detection для каталога external)."""
+    binary = _ADAPTER_BINARIES.get(name)
+    return binary is not None and shutil.which(binary) is not None
+
+
+def chat_status_view(cfg: SvarogConfig, autonomy: AutonomyMode) -> ChatStatusView:
+    """Доступные executors (каталог + detection), mode local/cloud, policy profile."""
+    native = _native_executor_label(cfg)
+    configured = cfg.executor.external.adapter if cfg.executor.external is not None else None
+
+    executors: list[str] = [native]
+    for adapter in _EXTERNAL_ADAPTERS:
+        if adapter == configured or _adapter_available(adapter):
+            label = f"external/{adapter}"
+            if label not in executors:
+                executors.append(label)
+
     if cfg.executor.type == "native":
-        sandbox = cfg.sandbox.type
-        detail = "local" if sandbox == "local-trusted" else sandbox
-        return ExecutorView(kind="native", detail=detail, role="локальный loop")
-    external = cfg.executor.external
-    adapter = external.adapter if external is not None else "external"
-    return ExecutorView(kind="external", detail=adapter, role="cloud-агент")
+        active_executor = native
+        active_mode = _MODE_LOCAL
+    else:
+        adapter = configured if configured is not None else "external"
+        active_executor = f"external/{adapter}"
+        active_mode = _MODE_CLOUD
+        if active_executor not in executors:
+            executors.append(active_executor)
+
+    policy_profile = autonomy.value if autonomy.value in cfg.policies.profiles else "default"
+    return ChatStatusView(
+        autonomy=autonomy,
+        executors=tuple(executors),
+        active_executor=active_executor,
+        modes=(_MODE_LOCAL, _MODE_CLOUD),
+        active_mode=active_mode,
+        policy_profile=policy_profile,
+    )
+
+
+def status_summary(view: ChatStatusView) -> str:
+    """Компактная строка над промптом: активные значения."""
+    mark = _AUTONOMY_MARKS[view.autonomy]
+    mode_short = "local" if view.active_mode == _MODE_LOCAL else "cloud"
+    return (
+        f"{mark} {view.autonomy.value} · {view.active_executor} · "
+        f"{mode_short} · {view.policy_profile}"
+    )
 
 
 def session_model_label(cfg: SvarogConfig) -> str | None:
@@ -199,25 +263,51 @@ def input_separator() -> RenderableType:
     return Rule(style=ACCENT)
 
 
+def _options_text(options: tuple[str, ...], active: str) -> Text:
+    text = Text()
+    for i, option in enumerate(options):
+        if i:
+            text.append(" · ", style=_DIM)
+        style = ACCENT if option == active else _DIM
+        text.append(option, style=style)
+    return text
+
+
+def _policies_text(status: ChatStatusView) -> Text:
+    """Автономия — акцент; профиль default — dim, именованный — акцент."""
+    text = Text()
+    text.append(status.autonomy.value, style=ACCENT)
+    text.append(" / ", style=_DIM)
+    profile_style = ACCENT if status.policy_profile != "default" else _DIM
+    text.append(status.policy_profile, style=profile_style)
+    return text
+
+
 def welcome_panel(
     workspace: Path,
-    autonomy: AutonomyMode,
-    executor: ExecutorView,
+    status: ChatStatusView,
     *,
     model: str | None = None,
 ) -> Panel:
-    """Стартовый бокс: слева workspace/статус, справа tips — раскладка Claude Code."""
-    info = Text()
-    info.append("Welcome\n", style="bold")
-    info.append(_home_short(workspace), style="bold")
-    info.append("\n")
-    info.append(f"{autonomy.value}", style=ACCENT)
-    info.append(" · ", style=_DIM)
-    info.append(f"{executor.kind}/{executor.detail}", style=ACCENT)
-    info.append(f"  ({executor.role})", style=_DIM)
+    """Стартовый бокс: слева workspace + таблица статуса, справа tips."""
+    header = Text()
+    header.append("Welcome\n", style="bold")
+    header.append(_home_short(workspace), style="bold")
+
+    # padding top/bottom даёт воздух между executors / mode / policies.
+    status_table = Table.grid(padding=(1, 1), pad_edge=False)
+    status_table.add_column(style=_DIM, no_wrap=True)
+    status_table.add_column(overflow="fold")
+    status_table.add_row("executors", _options_text(status.executors, status.active_executor))
+    status_table.add_row("mode", _options_text(status.modes, status.active_mode))
+    status_table.add_row("policies", _policies_text(status))
     if model:
-        info.append("\n")
-        info.append(model, style=_DIM)
+        status_table.add_row("", Text(model, style=_DIM))
+
+    info = Table.grid(padding=(0, 0))
+    info.add_row(header)
+    info.add_row(Text(""))
+    info.add_row(status_table)
 
     tips = Text()
     tips.append("Tips for getting started\n", style=f"bold {ACCENT}")

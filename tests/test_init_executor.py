@@ -214,9 +214,7 @@ def test_executor_opencode_without_opencode_requested_errors() -> None:
 
 
 def test_opencode_conflicting_creds_flags_errors() -> None:
-    with pytest.raises(
-        ExecutorSetupError, match=r"opencode-same-as-native.*opencode-own-creds"
-    ):
+    with pytest.raises(ExecutorSetupError, match=r"opencode-same-as-native.*opencode-own-creds"):
         resolve_executor_setup(
             executor=None,
             claude=_NO_CLAUDE,

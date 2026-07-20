@@ -5,8 +5,10 @@ Node (сам агент `claude`), Python (hook-скрипт tier 2), git (Flow 
 
 ## Сборка
 
+`svarog init` собирает образ автоматически, когда настроен Claude Code. Для
+ручной пересборки из корня репозитория:
+
 ```bash
-# из корня репозитория
 docker build -t svarog/agent-claude:latest docker/agent-claude
 ```
 
