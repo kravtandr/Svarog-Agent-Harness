@@ -33,6 +33,7 @@ from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEng
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
 from svarog_harness.runtime.history_invariant import assert_history_valid
+from svarog_harness.runtime.phase_timer import PhaseTimer
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
@@ -206,6 +207,10 @@ class AgentLoop:
         self._on_run_started = on_run_started
         # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
         self._parent_run_id = parent_run_id
+        # Тайминги фаз хода (блок A §5): экземпляр AgentLoop создаётся заново
+        # на каждый run, поэтому пустой таймер здесь безопасен — run()/resume()
+        # восстанавливают накопленное из Run.meta["phases"] через restore().
+        self._phases = PhaseTimer()
 
     async def run(
         self,
@@ -231,6 +236,7 @@ class AgentLoop:
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
+        self._phases.restore(dict((run.meta or {}).get("phases", {})))
         messages = build_initial_messages(
             task,
             self._workspace,
@@ -251,6 +257,7 @@ class AgentLoop:
         # Восстановить раскрытые deferred-схемы (ADR-0015 фаза 2): реестр
         # собран заново и без этого «забыл» бы загруженное моделью.
         self._registry.restore_loaded(state.loaded_tools)
+        self._phases.restore(dict((run.meta or {}).get("phases", {})))
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)
 
@@ -276,17 +283,19 @@ class AgentLoop:
                 # Микрокомпакция (§1.4): дешёвый слой без LLM между «всё в
                 # контексте» и refuel. Цена — разовая инвалидация префиксного
                 # кэша провайдера; порог держит число срабатываний малым.
-                if self._should_microcompact(state):
-                    self._microcompact(state)
+                with self._phases.measure("microcompact"):
+                    if self._should_microcompact(state):
+                        self._microcompact(state)
                 stream_callback = None if self._saved_file_contents else self._on_text_delta
                 # Инвариант истории (блок A §1): нарушение — баг loop'а, а не
                 # дефект модели; падаем громко, историю не правим.
                 assert_history_valid(state.messages)
-                result = await self._provider.complete(
-                    state.messages,
-                    self._registry.definitions(),
-                    on_text_delta=stream_callback,
-                )
+                with self._phases.measure("llm_call"):
+                    result = await self._provider.complete(
+                        state.messages,
+                        self._registry.definitions(),
+                        on_text_delta=stream_callback,
+                    )
                 result_content = self._sanitize_model_content(result.content)
                 if stream_callback is None and self._on_text_delta is not None and result_content:
                     self._on_text_delta(result_content)
@@ -301,6 +310,9 @@ class AgentLoop:
                     cost_usd=state.cost_usd,
                     cached_tokens=state.cached_tokens,
                 )
+                # Тайминги фаз (блок A §5) — вместе с прогрессом, тем же путём,
+                # что и остальные метрики run'а.
+                await self._recorder.merge_run_meta(run, {"phases": self._phases.as_meta()})
                 if self._on_progress is not None:
                     context_ratio = result.usage.prompt_tokens / self._cfg.max_context_tokens
                     self._on_progress(
@@ -359,7 +371,8 @@ class AgentLoop:
                 if budget_error is not None:
                     return await self._suspend(run, state, budget_error)
 
-                had_tool_success = await self._execute_pending(run, state)
+                with self._phases.measure("tool_exec"):
+                    had_tool_success = await self._execute_pending(run, state)
 
                 # Детектор затухающей отдачи (§1.6): suspended (решает человек),
                 # не failed. Счётчики сбрасываются при suspend — resume после
@@ -415,13 +428,15 @@ class AgentLoop:
             had_success = had_success or tool_result.ok
             self._note_tool_call_result(state, call, tool_result)
             await self._flush_skill_loads(run)
-            await self._flush_memory(run)
+            with self._phases.measure("memory_flush"):
+                await self._flush_memory(run)
             self._flush_plan_updates(state)
             rendered = self._render_tool_result(run, call, tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
             state.pending_tool_calls = state.pending_tool_calls[1:]
-            await self._save_checkpoint(run, state)
+            with self._phases.measure("checkpoint"):
+                await self._save_checkpoint(run, state)
         return had_success
 
     def _concurrency_safe_prefix(
@@ -746,27 +761,28 @@ class AgentLoop:
         в payload добавляется дедлайн: по нему resume решает, ждать ли дальше
         или продолжать без ответа (§6.5).
         """
-        existing = await self._recorder.find_approval_for_call(run, approval.call.id)
-        if existing is None:
-            # Approval показывает фактические аргументы, не пересказ агента (§12).
-            payload: dict[str, Any] = {
-                "call_id": approval.call.id,
-                "tool": approval.call.name,
-                "arguments": self._redact_json(approval.arguments),
-                "reason": self._redact_text(approval.decision.reason),
-            }
-            if approval.call.name == ASK_USER_TOOL_NAME:
-                payload["question"] = approval.arguments.get("question", "")
-                payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
-            await self._recorder.create_approval(
-                run,
-                action_type=approval.decision.action_type,
-                payload=payload,
+        with self._phases.measure("approval_wait"):
+            existing = await self._recorder.find_approval_for_call(run, approval.call.id)
+            if existing is None:
+                # Approval показывает фактические аргументы, не пересказ агента (§12).
+                payload: dict[str, Any] = {
+                    "call_id": approval.call.id,
+                    "tool": approval.call.name,
+                    "arguments": self._redact_json(approval.arguments),
+                    "reason": self._redact_text(approval.decision.reason),
+                }
+                if approval.call.name == ASK_USER_TOOL_NAME:
+                    payload["question"] = approval.arguments.get("question", "")
+                    payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
+                await self._recorder.create_approval(
+                    run,
+                    action_type=approval.decision.action_type,
+                    payload=payload,
+                )
+            await self._save_checkpoint(run, state)
+            await self._recorder.set_run_state(
+                run, RunState.WAITING_APPROVAL, error=approval.decision.reason
             )
-        await self._save_checkpoint(run, state)
-        await self._recorder.set_run_state(
-            run, RunState.WAITING_APPROVAL, error=approval.decision.reason
-        )
         return self._outcome(run, RunState.WAITING_APPROVAL, state, "", approval.decision.reason)
 
     def _note_tool_call_result(
