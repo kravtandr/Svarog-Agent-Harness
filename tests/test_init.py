@@ -7,7 +7,12 @@ from typer.testing import CliRunner
 
 from svarog_harness.cli import main as cli_main
 from svarog_harness.config.loader import load_config
-from svarog_harness.scaffold import scaffold_agent_home
+from svarog_harness.scaffold import (
+    ClaudeExecutorSetup,
+    ExecutorSetup,
+    OpencodeExecutorSetup,
+    scaffold_agent_home,
+)
 from svarog_harness.secrets import is_secret_path
 from svarog_harness.skills import scan_skills
 
@@ -127,3 +132,100 @@ def test_init_adds_home_to_project_gitignore(
     assert result.exit_code == 0, result.output
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "agent-home/" in gitignore.splitlines()
+
+
+def test_scaffold_no_executor_omits_section(tmp_path: Path) -> None:
+    scaffold_agent_home(tmp_path)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "executor:" not in yaml
+
+
+def test_scaffold_claude_api_key_executor_block(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="claude-code",
+        claude=ClaudeExecutorSetup(
+            auth="api-key", api_key_ref="CLAUDE_CODE_KEY", oauth_token_ref=None
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "executor:\n  type: external\n  external:\n    adapter: claude-code" in yaml
+    assert "    image: svarog/agent-claude:latest" in yaml
+    assert "    auth: api-key" in yaml
+    assert "    api_key_ref: CLAUDE_CODE_KEY" in yaml
+    assert "тоже настроен" not in yaml
+
+
+def test_scaffold_claude_api_key_without_value_comments_ref(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="claude-code",
+        claude=ClaudeExecutorSetup(auth="api-key", api_key_ref=None, oauth_token_ref=None),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "    # api_key_ref: CLAUDE_CODE_KEY" in yaml
+    assert "\n    api_key_ref:" not in yaml
+
+
+def test_scaffold_claude_subscription_ref_always_active(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="claude-code",
+        claude=ClaudeExecutorSetup(
+            auth="subscription", api_key_ref=None, oauth_token_ref="CLAUDE_CODE_OAUTH_TOKEN"
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "    auth: subscription" in yaml
+    assert "\n    oauth_token_ref: CLAUDE_CODE_OAUTH_TOKEN" in yaml
+
+
+def test_scaffold_opencode_own_creds(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="opencode",
+        opencode=OpencodeExecutorSetup(
+            model="qwen3-coder",
+            base_url="https://openrouter.ai/api/v1",
+            api_key_ref="OPENCODE_API_KEY",
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "    adapter: opencode" in yaml
+    assert "    image: svarog/agent-opencode:latest" in yaml
+    assert "    model: qwen3-coder" in yaml
+    assert "    base_url: https://openrouter.ai/api/v1" in yaml
+    assert "    api_key_ref: OPENCODE_API_KEY" in yaml
+
+
+def test_scaffold_opencode_without_ref_comments_line(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="opencode",
+        opencode=OpencodeExecutorSetup(
+            model="qwen3-coder", base_url="http://localhost:8000/v1", api_key_ref=None
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "    # api_key_ref: OPENCODE_API_KEY" in yaml
+
+
+def test_scaffold_standby_adapter_rendered_as_comment(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="claude-code",
+        claude=ClaudeExecutorSetup(
+            auth="api-key", api_key_ref="CLAUDE_CODE_KEY", oauth_token_ref=None
+        ),
+        opencode=OpencodeExecutorSetup(
+            model="qwen3-coder", base_url="http://localhost:8000/v1", api_key_ref="PROVIDER_API_KEY"
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "OpenCode тоже настроен и готов" in yaml
+    assert "# executor:" in yaml
+    assert "#   external:" in yaml
+    assert "#     adapter: opencode" in yaml
+    assert "#     api_key_ref: PROVIDER_API_KEY" in yaml
+    # активный блок остаётся некомментированным
+    assert "\n    adapter: claude-code" in yaml
