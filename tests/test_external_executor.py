@@ -276,6 +276,66 @@ async def test_end_to_end_completed_run(db: AsyncSession, tmp_path: Path) -> Non
     assert call.result == {"output": "hello.py"}
 
 
+async def test_reasoning_fallback_when_no_text_events(db: AsyncSession, tmp_path: Path) -> None:
+    """gpt-oss/harmony: ответ уходит только в reasoning-канал (content пуст) —
+    финал берётся из последнего reasoning, а не теряется как «(без ответа)»."""
+    from svarog_harness.runtime.agents.opencode import OpencodeAdapter
+
+    class _OpencodeScriptAdapter(OpencodeAdapter):
+        def __init__(self, argv: list[str]) -> None:
+            super().__init__()
+            self._argv = argv
+
+        def command(self, launch: AgentLaunch) -> list[str]:
+            return list(self._argv)
+
+    stream: list[dict[str, Any]] = [
+        {
+            "type": "step_start",
+            "sessionID": "ses_1",
+            "part": {"id": "prt_1", "type": "step-start"},
+        },
+        {"type": "reasoning", "sessionID": "ses_1", "part": {"text": "прикидываю план"}},
+        {
+            "type": "reasoning",
+            "sessionID": "ses_1",
+            "part": {"text": "В workspace только index.html — заготовка веб-страницы."},
+        },
+        {
+            "type": "step_finish",
+            "sessionID": "ses_1",
+            "reason": "stop",
+            "cost": 0,
+            "tokens": {"input": 10, "output": 1},
+        },
+    ]
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    executor = ExternalAgentExecutor(
+        _OpencodeScriptAdapter(_agent_script(tmp_path, stream)),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+    )
+    outcome = await executor.run("что в проекте", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.error is None
+    assert outcome.final_answer == "В workspace только index.html — заготовка веб-страницы."
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    # Reasoning в trace не пишется — только финал (фолбэк) assistant-сообщением.
+    assistant = [m for m in messages if m.role == "assistant"]
+    assert [m.content["content"] for m in assistant] == [outcome.final_answer]
+
+
+async def test_text_event_wins_over_reasoning_fallback(db: AsyncSession, tmp_path: Path) -> None:
+    """Обычный прогон: есть text-реплика — reasoning финал не подменяет."""
+    executor = _executor(db, tmp_path, [_INIT, _ASSISTANT, _TOOL_RESULT, {**_RESULT, "result": ""}])
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "смотрю workspace"
+
+
 async def test_nonzero_exit_fails_and_closes_pending_calls(
     db: AsyncSession, tmp_path: Path
 ) -> None:

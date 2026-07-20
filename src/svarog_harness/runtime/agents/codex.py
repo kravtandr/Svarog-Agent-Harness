@@ -200,8 +200,15 @@ class CodexAdapter:
                         )
                     ]
                 return []
-            case "reasoning" | "todo_list":
-                return []  # не события trace
+            case "reasoning":
+                # Фолбэк финала (см. AgentEventKind): reasoning не пишется в
+                # trace, но executor держит последний на случай пустого ответа.
+                text = item.get("text")
+                if completed and isinstance(text, str) and text:
+                    return [AgentEvent(kind="reasoning", text=text)]
+                return []
+            case "todo_list":
+                return []  # не событие trace
             case _:
                 return [AgentEvent(kind="opaque", raw=payload)]
 
