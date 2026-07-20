@@ -15,6 +15,10 @@ docker build -t svarog/agent-claude:latest docker/agent-claude
 Тег `svarog/agent-claude:latest` — то, что ждёт `executor.external.image`
 (см. `agent-home/svarog.yaml`).
 
+При сборке образ получает latest release Superpowers. Wrapper Claude Code
+после mount'а persistent state подключает его skills, а MCP bridge Svarog
+остаётся единственным источником memory/governance tools.
+
 ## «Всегда свежий» claude-code
 
 Версия CLI намеренно не пиннится — образ ставит `@anthropic-ai/claude-code@latest`.

@@ -21,3 +21,26 @@ RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Бинарь на месте — иначе сборка падает здесь, а не в первом run.
 RUN claude --version
+
+# Superpowers — latest upstream release. Wrapper below exposes its skills
+# after Svarog mounts the persistent Claude state directory.
+RUN SUPERPOWERS_TAG="$(git ls-remote --refs --tags https://github.com/obra/superpowers.git \
+        | awk -F/ '{print $3}' | sort -V | tail -n 1)" \
+    && test -n "$SUPERPOWERS_TAG" \
+    && echo "Installing Superpowers $SUPERPOWERS_TAG" \
+    && git clone --depth 1 --branch "$SUPERPOWERS_TAG" \
+        https://github.com/obra/superpowers.git /opt/superpowers \
+    && rm -rf /opt/superpowers/.git
+
+RUN mv /usr/local/bin/claude /usr/local/bin/claude-real \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'mkdir -p "$HOME/.claude/skills"' \
+        'for skill in /opt/superpowers/skills/*; do' \
+        '  target="$HOME/.claude/skills/$(basename "$skill")"' \
+        '  [ -e "$target" ] || ln -s "$skill" "$target"' \
+        'done' \
+        'exec /usr/local/bin/claude-real "$@"' \
+        > /usr/local/bin/claude \
+    && chmod +x /usr/local/bin/claude

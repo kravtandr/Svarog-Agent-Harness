@@ -273,7 +273,11 @@ def test_opencode_provider_files_pin_chat_completions_provider() -> None:
     assert provider["options"]["baseURL"] == "{env:OPENAI_BASE_URL}"
     assert "openai/gpt-oss-120b" in provider["models"]
     assert config["model"] == "svarog/openai/gpt-oss-120b"
+    assert config["plugin"] == ["/opt/superpowers/node_modules/superpowers"]
 
 
-def test_opencode_provider_files_absent_without_model() -> None:
-    assert OpencodeAdapter().provider_files(None) == {}
+def test_opencode_provider_files_enable_superpowers_without_model() -> None:
+    files = OpencodeAdapter().provider_files(None)
+    config = json.loads(files[".config/opencode/opencode.jsonc"])
+    assert config["plugin"] == ["/opt/superpowers/node_modules/superpowers"]
+    assert "provider" not in config and "model" not in config

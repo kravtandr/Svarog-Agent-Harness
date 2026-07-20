@@ -24,3 +24,12 @@ RUN npm install -g opencode-ai@latest
 
 # Бинарь на месте — иначе сборка падает здесь, а не в первом run.
 RUN opencode --version
+
+# OpenCode loads Superpowers from a local plugin installed in this image.
+# Resolve the latest upstream release during image build; sandbox runs stay offline.
+RUN SUPERPOWERS_TAG="$(git ls-remote --refs --tags https://github.com/obra/superpowers.git \
+        | awk -F/ '{print $3}' | sort -V | tail -n 1)" \
+    && test -n "$SUPERPOWERS_TAG" \
+    && echo "Installing Superpowers $SUPERPOWERS_TAG" \
+    && npm install --omit=dev --prefix /opt/superpowers \
+        "superpowers@git+https://github.com/obra/superpowers.git#$SUPERPOWERS_TAG"
