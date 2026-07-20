@@ -187,3 +187,27 @@ def test_both_requested_with_explicit_executor_builds_standby() -> None:
     assert result.active == "opencode"
     assert result.claude is not None  # standby, но собран
     assert result.opencode is not None
+
+
+def test_executor_claude_code_without_claude_requested_errors() -> None:
+    with pytest.raises(ExecutorSetupError, match="claude-code"):
+        resolve_executor_setup(
+            executor="claude-code",
+            claude=ClaudeAnswers(requested=False),
+            opencode=OpencodeAnswers(requested=True, reuse_native=True),
+            native_model="m",
+            native_base_url="http://x",
+            native_api_key_ref=None,
+        )
+
+
+def test_executor_opencode_without_opencode_requested_errors() -> None:
+    with pytest.raises(ExecutorSetupError, match="opencode"):
+        resolve_executor_setup(
+            executor="opencode",
+            claude=ClaudeAnswers(requested=True, auth="api-key", api_key="sk-x"),
+            opencode=OpencodeAnswers(requested=False),
+            native_model="m",
+            native_base_url="http://x",
+            native_api_key_ref=None,
+        )
