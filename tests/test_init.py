@@ -180,6 +180,20 @@ def test_scaffold_claude_subscription_ref_always_active(tmp_path: Path) -> None:
     assert "\n    oauth_token_ref: CLAUDE_CODE_OAUTH_TOKEN" in yaml
 
 
+def test_scaffold_claude_subscription_without_ref_falls_back_to_default(tmp_path: Path) -> None:
+    executor = ExecutorSetup(
+        active="claude-code",
+        claude=ClaudeExecutorSetup(
+            auth="subscription", api_key_ref=None, oauth_token_ref=None
+        ),
+    )
+    scaffold_agent_home(tmp_path, executor=executor)
+    yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")
+    assert "    auth: subscription" in yaml
+    # Должна быть активная строка с дефолтным значением, не закомментирована и не "None"
+    assert "\n    oauth_token_ref: CLAUDE_CODE_OAUTH_TOKEN" in yaml
+
+
 def test_scaffold_opencode_own_creds(tmp_path: Path) -> None:
     executor = ExecutorSetup(
         active="opencode",
