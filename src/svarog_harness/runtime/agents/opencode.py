@@ -80,11 +80,12 @@ class OpencodeAdapter:
         провайдер на @ai-sdk/openai-compatible (chat-completions) поверх
         bridge-endpoint'а из env; модель — из executor.external.model.
         """
-        if model is None:
-            return {}
-        config = {
+        config: dict[str, object] = {
             "$schema": "https://opencode.ai/config.json",
-            "provider": {
+            "plugin": ["/opt/superpowers/node_modules/superpowers"],
+        }
+        if model is not None:
+            config["provider"] = {
                 "svarog": {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "Svarog bridge",
@@ -94,9 +95,8 @@ class OpencodeAdapter:
                     },
                     "models": {model: {"name": model}},
                 }
-            },
-            "model": f"svarog/{model}",
-        }
+            }
+            config["model"] = f"svarog/{model}"
         return {
             ".config/opencode/opencode.jsonc": json.dumps(config, ensure_ascii=False, indent=2)
             + "\n"

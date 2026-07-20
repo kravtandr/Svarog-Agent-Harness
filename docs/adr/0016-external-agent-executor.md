@@ -393,6 +393,17 @@ executor:
 часть per-tenant cfg, standard-роль уже заклампана в docker; agent-state
 volume и метеринг прокси — per-tenant.
 
+### 11. Superpowers в образах executor
+
+Superpowers — библиотека workflow-skills, а не MCP-сервер. Поэтому Claude
+Code и OpenCode получают её нативно из собственных образов: во время build
+выбирается latest semver release `obra/superpowers`. Claude wrapper подключает
+skills в persistent state после его mount'а, а
+OpenCode получает путь к уже установленному локальному plugin через managed
+config. Сетевой доступ sandbox к GitHub не требуется. MCP bridge Svarog не
+заменяется: он остаётся единственным каналом memory, approvals и governance
+tools.
+
 ## Сводка тонких проблем → механизм
 
 | Проблема | Механизм |

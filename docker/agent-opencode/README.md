@@ -20,6 +20,10 @@ docker build -t svarog/agent-opencode:latest docker/agent-opencode
 Тег `svarog/agent-opencode:latest` — то, что ждёт `executor.external.image`
 (см. `agent-home/svarog.yaml`).
 
+При сборке образ получает latest release Superpowers. Managed-конфиг Svarog
+подключает локальный plugin из образа; во время run OpenCode не обращается к
+GitHub за ним.
+
 ## «Всегда свежий» opencode
 
 Версия CLI намеренно не пинится — образ ставит `opencode-ai@latest`. Docker
@@ -55,10 +59,11 @@ executor:
 ```
 
 С `model` Svarog при каждом запуске пишет в state volume агента managed-конфиг
-`.config/opencode/opencode.jsonc` с custom-провайдером на
+`.config/opencode/opencode.jsonc` с Superpowers plugin и custom-провайдером на
 `@ai-sdk/openai-compatible` (chat-completions поверх bridge). Это ещё и
 обходит Responses API, который встроенный провайдер `openai` использует по
 умолчанию: у произвольных OpenAI-совместимых upstream'ов (OpenRouter, LiteLLM,
 vLLM) resume сессии через Responses API падает с «Invalid Responses API
-request». Без `model` конфиг не генерируется — OpenCode выбирает провайдера
-и модель сам. Только `auth: api-key` — subscription не поддержан адаптером.
+request». Без `model` файл всё равно включает Superpowers, а OpenCode выбирает
+провайдера и модель сам. Только `auth: api-key` — subscription не поддержан
+адаптером.
