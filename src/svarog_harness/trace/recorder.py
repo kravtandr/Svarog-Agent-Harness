@@ -390,6 +390,12 @@ class TraceRecorder:
         run.cost_usd = cost_usd
         run.heartbeat_at = utcnow()  # lease heartbeat (ADR-0015 §0.5)
         if cached_tokens:
+            # Та же гонка, что и в merge_run_meta (см. её docstring): локальная
+            # копия meta устарела бы без refresh и затёрла бы флаг, выставленный
+            # параллельно другой сессией (cancel_requested, ADR-0017 §2). Refresh
+            # сужен до одного атрибута — голый refresh(run) откатил бы только что
+            # выставленные выше iterations/tokens_used/cost_usd/heartbeat_at.
+            await self._db.refresh(run, attribute_names=["meta"])
             # JSON-колонка отслеживает только переприсваивание.
             run.meta = {**run.meta, "cached_tokens": cached_tokens}
         await self._db.commit()
@@ -398,13 +404,17 @@ class TraceRecorder:
         """Дописать ключи в Run.meta (executor/adapter/agent_session_id, ADR-0016).
 
         JSON-колонка отслеживает только переприсваивание — мутировать словарь
-        на месте нельзя. Перед слиянием обновляем run из БД: без этого
+        на месте нельзя. Перед слиянием обновляем meta из БД: без этого
         локальный (устаревший) meta затёр бы флаг, выставленный параллельно
         другой сессией (например, cancel_requested из cooperative-cancel,
-        ADR-0017 §2) — сама фаза (блок A §5) пишется в этом же месте на
-        каждой итерации, так что окно гонки было бы открыто постоянно.
+        ADR-0017 §2) — фаза (блок A §5) пишется в этом же месте на каждой
+        итерации, так что окно гонки было бы открыто постоянно.
+
+        Refresh сужен до атрибута meta (`attribute_names=["meta"]`), а не всего
+        run: метод общий, и голый refresh(run) молча откатил бы любые другие
+        несохранённые изменения объекта, выставленные вызывающим до слияния.
         """
-        await self._db.refresh(run)
+        await self._db.refresh(run, attribute_names=["meta"])
         run.meta = {**run.meta, **extra}
         await self._db.commit()
 
