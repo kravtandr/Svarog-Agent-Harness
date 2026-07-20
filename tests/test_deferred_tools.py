@@ -264,6 +264,17 @@ def test_loop_state_roundtrip_keeps_loaded_tools(tmp_path: Path) -> None:
     assert LoopState.from_dict(raw).loaded_tools == []
 
 
+def test_loop_state_roundtrip_keeps_cached_tokens(tmp_path: Path) -> None:
+    """Блок A §3: cached_tokens переживает round-trip сериализации."""
+    state = LoopState(workspace=tmp_path, messages=[], cached_tokens=42)
+    restored = LoopState.from_dict(state.to_dict())
+    assert restored.cached_tokens == 42
+    # Старые checkpoint'ы без поля cached_tokens читаются с нулём.
+    raw = state.to_dict()
+    del raw["cached_tokens"]
+    assert LoopState.from_dict(raw).cached_tokens == 0
+
+
 async def test_loop_defers_schema_until_load_tool(db: AsyncSession, tmp_path: Path) -> None:
     provider = _DefsCapturingProvider(
         [

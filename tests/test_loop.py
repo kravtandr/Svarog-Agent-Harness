@@ -860,3 +860,31 @@ async def test_cached_tokens_accumulate_in_run_meta(db: AsyncSession, tmp_path: 
     run = await db.get(Run, outcome.run_id)
     assert run is not None
     assert run.meta["cached_tokens"] == 64
+
+
+async def test_cached_tokens_accumulate_across_iterations(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §3: cached-токены суммируются через несколько итераций."""
+    # Подготовка файла для инструмента.
+    (tmp_path / "note.txt").write_text("текст", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            # Первая итерация: вызов инструмента с кэшированными токенами.
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "note.txt"}'),
+                usage=Usage(prompt_tokens=100, completion_tokens=0, cached_tokens=32),
+            ),
+            # Вторая итерация: финальный ответ тоже с кэшированными токенами.
+            _final(
+                "Содержимое файла: текст",
+                usage=Usage(prompt_tokens=50, completion_tokens=5, cached_tokens=16),
+            ),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("прочитай файл", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.iterations == 2
+
+    # cached_tokens должны быть суммой: 32 + 16 = 48.
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta["cached_tokens"] == 48

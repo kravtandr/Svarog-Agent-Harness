@@ -653,7 +653,7 @@ def _console_hooks() -> RunHooks:
         iterations: int, tokens: int, cost: float, context_ratio: float, cached: int
     ) -> None:
         # Cost/context-индикатор (ADR-0015 фаза 5): одна dim-строка на итерацию.
-        cached_suffix = f", кэш {cached}" if cached else ""
+        cached_suffix = f", кэш {cached}" if cached > 0 else ""
         console.print(
             f"\n[dim]итерация {iterations} | {tokens} ток.{cached_suffix} | ${cost:.4f} | "
             f"контекст {context_ratio:.0%}[/dim]",
