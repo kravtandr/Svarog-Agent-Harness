@@ -207,9 +207,13 @@ class AgentLoop:
         self._on_run_started = on_run_started
         # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
         self._parent_run_id = parent_run_id
-        # Тайминги фаз хода (блок A §5): экземпляр AgentLoop создаётся заново
-        # на каждый run, поэтому пустой таймер здесь безопасен — run()/resume()
-        # восстанавливают накопленное из Run.meta["phases"] через restore().
+        # Тайминги фаз хода (блок A §5): __init__ заводит пустой таймер на
+        # случай использования без resume(). run() всегда стартует свежий Run
+        # без phases (start_run) — там таймер переинициализируется, а не
+        # восстанавливается (Minor 11: restore() был бы no-op для нового run'а,
+        # но протёк бы накопленное прошлого run'а при переиспользовании
+        # экземпляра AgentLoop). resume() поверх этого восстанавливает
+        # накопленное из Run.meta["phases"] через restore() — там это осмысленно.
         self._phases = PhaseTimer()
 
     async def run(
@@ -236,7 +240,9 @@ class AgentLoop:
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
-        self._phases.restore(dict((run.meta or {}).get("phases", {})))
+        # Свежий Run от start_run никогда не несёт phases — чистый таймер,
+        # а не restore() (Minor 11, см. комментарий в __init__).
+        self._phases = PhaseTimer()
         messages = build_initial_messages(
             task,
             self._workspace,
@@ -257,14 +263,20 @@ class AgentLoop:
         # Восстановить раскрытые deferred-схемы (ADR-0015 фаза 2): реестр
         # собран заново и без этого «забыл» бы загруженное моделью.
         self._registry.restore_loaded(state.loaded_tools)
-        self._phases.restore(dict((run.meta or {}).get("phases", {})))
+        # Critical 2: без dict(...) обёртки — на не-словаре (строка/число из
+        # испорченного meta) PhaseTimer.restore делает ранний возврат вместо
+        # ValueError/TypeError, которые раньше улетали из resume() до try.
+        self._phases.restore((run.meta or {}).get("phases", {}))
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)
 
     async def _drive(self, run: Run, state: LoopState) -> RunOutcome:
         try:
             # Write-ahead: доисполнить вызовы, зафиксированные до остановки.
-            await self._execute_pending(run, state)
+            # tool_exec — та же фаза, что и в основном цикле (Minor 6): охват
+            # симметричен вложенным в неё memory_flush/checkpoint.
+            with self._phases.measure("tool_exec"):
+                await self._execute_pending(run, state)
             # Resume после refuel-приостановки: пересобрать контекст из
             # task_state.md, отбросив прежнюю историю (§6.10, ADR-0005).
             if state.refuel_pending:
