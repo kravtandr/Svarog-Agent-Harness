@@ -31,6 +31,7 @@ from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 from svarog_harness.tools.file_tools import ListDirTool, ReadFileTool
 from svarog_harness.tools.registry import LoadToolTool, ToolRegistry, UnknownToolError
 from svarog_harness.trace.recorder import TraceRecorder
+from tests.conftest import tmp_workspace
 
 
 class _Args(BaseModel):
@@ -64,15 +65,6 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def tmp_workspace() -> Path:
-    """Одноразовый workspace для file-tools в тестах реестра.
-
-    Конструкторам ReadFileTool/ListDirTool достаточно валидного Path — они не
-    трогают диск, пока не вызван execute(), поэтому фикстура pytest не нужна.
-    """
-    return Path("workspace")
-
-
 class _FakeMCPArgs(BaseModel):
     text: str = Field(description="Что вернуть обратно")
 
@@ -90,10 +82,6 @@ class _FakeMCPTool(Tool[_FakeMCPArgs]):
 
     async def execute(self, args: _FakeMCPArgs) -> ToolResult:
         return ToolResult.success(args.text)
-
-
-def _fake_mcp_tool(name: str) -> Tool[_FakeMCPArgs]:
-    return _FakeMCPTool(name)
 
 
 # --- 2.1 ToolRegistry: core/deferred ------------------------------------------
@@ -349,7 +337,7 @@ def test_definitions_keep_builtin_prefix_stable_when_external_added() -> None:
     registry.register(ListDirTool(tmp_workspace()))
     before = [d.name for d in registry.definitions()]
 
-    registry.register(_fake_mcp_tool("mcp_alpha"), external=True)
+    registry.register(_FakeMCPTool("mcp_alpha"), external=True)
     after = [d.name for d in registry.definitions()]
 
     assert after[: len(before)] == before
@@ -361,7 +349,7 @@ def test_load_tool_is_always_last() -> None:
     deferred-схемы и не должен сдвигать ничего за собой."""
     registry = ToolRegistry()
     registry.register(ReadFileTool(tmp_workspace()))
-    registry.register(_fake_mcp_tool("mcp_alpha"), deferred=True, external=True)
+    registry.register(_FakeMCPTool("mcp_alpha"), deferred=True, external=True)
     registry.register(LoadToolTool(registry))
 
     assert [d.name for d in registry.definitions()][-1] == "load_tool"

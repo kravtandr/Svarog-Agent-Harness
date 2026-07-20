@@ -44,7 +44,7 @@ class PhaseTimer:
         meta["last"] = self._last
         return meta
 
-    def restore(self, meta: dict[str, Any]) -> None:
+    def restore(self, meta: object) -> None:
         """Восстановить агрегат после resume; испорченные записи пропускаются.
 
         Сам meta может оказаться не словарём (битая ручная правка БД,
