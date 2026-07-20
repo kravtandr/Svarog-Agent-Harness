@@ -82,6 +82,18 @@ uv run svarog init ./agent-home --no-input \
 
 `init` создаёт skills, memory (Flow A), policies, `.gitignore` для секретов; если agent-home лежит внутри проекта — добавляет его в `.gitignore` проекта. Введённый ключ **не** записывается в `svarog.yaml` — он сохраняется в SecretStore, а в конфиг попадает только имя (`api_key_ref`). Runtime-состояние (traces, SQLite) живёт в `./.svarog/` внутри agent-home и в Git не попадает.
 
+Чтобы сразу настроить Claude Code или OpenCode как исполнителя
+(`executor.external`, ADR-0016) — независимо друг от друга, credentials
+можно не вводить и добавить позже:
+
+```bash
+uv run svarog init ./agent-home --no-input \
+  --executor claude-code --claude-auth subscription   # OAuth-токен потом: svarog secrets set CLAUDE_CODE_OAUTH_TOKEN
+
+uv run svarog init ./agent-home --no-input \
+  --executor opencode --opencode-same-as-native        # те же креды, что и у models.local
+```
+
 Конфиг (`svarog.yaml`) создаётся **внутри** agent-home, а `svarog` ищет его в текущей директории — поэтому после `init` перейдите в agent-home:
 
 ```bash

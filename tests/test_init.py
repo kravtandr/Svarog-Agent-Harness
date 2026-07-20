@@ -243,3 +243,218 @@ def test_scaffold_standby_adapter_rendered_as_comment(tmp_path: Path) -> None:
     assert "#     api_key_ref: PROVIDER_API_KEY" in yaml
     # активный блок остаётся некомментированным
     assert "\n    adapter: claude-code" in yaml
+
+
+def test_init_no_executor_flags_omits_executor_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    home = tmp_path / "home"
+    result = runner.invoke(cli_main.app, ["init", str(home), "--no-input"])
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "executor:" not in yaml
+
+
+def test_init_claude_api_key_writes_executor_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--executor",
+            "claude-code",
+            "--claude-auth",
+            "api-key",
+            "--claude-api-key",
+            "sk-claude-x",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "adapter: claude-code" in yaml
+    assert "auth: api-key" in yaml
+    assert "api_key_ref: CLAUDE_CODE_KEY" in yaml
+    assert "sk-claude-x" not in yaml
+    secrets = (tmp_path / "fakehome" / ".svarog" / "secrets.json").read_text(encoding="utf-8")
+    assert "sk-claude-x" in secrets
+
+
+def test_init_claude_subscription_without_token_reminds_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--executor",
+            "claude-code",
+            "--claude-auth",
+            "subscription",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "auth: subscription" in yaml
+    assert "oauth_token_ref: CLAUDE_CODE_OAUTH_TOKEN" in yaml
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in result.output  # напоминание сохранить токен
+    secrets_path = tmp_path / "fakehome" / ".svarog" / "secrets.json"
+    assert not secrets_path.exists() or "CLAUDE_CODE_OAUTH_TOKEN" not in secrets_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_init_opencode_same_as_native_reuses_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--model",
+            "m",
+            "--base-url",
+            "http://localhost:9000/v1",
+            "--api-key",
+            "sk-native-x",
+            "--executor",
+            "opencode",
+            "--opencode-same-as-native",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "adapter: opencode" in yaml
+    assert "model: m" in yaml
+    assert "base_url: http://localhost:9000/v1" in yaml
+    # OpenCode ссылается на тот же ref, что и нативная модель — не создаёт новый
+    assert "OPENCODE_API_KEY" not in yaml
+    assert yaml.count("api_key_ref: PROVIDER_API_KEY") == 2  # models + executor
+
+
+def test_init_opencode_own_creds_writes_separate_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--executor",
+            "opencode",
+            "--opencode-own-creds",
+            "--opencode-model",
+            "m2",
+            "--opencode-base-url",
+            "http://localhost:9100/v1",
+            "--opencode-api-key",
+            "sk-opencode-y",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "model: m2" in yaml
+    assert "api_key_ref: OPENCODE_API_KEY" in yaml
+    secrets = (tmp_path / "fakehome" / ".svarog" / "secrets.json").read_text(encoding="utf-8")
+    assert "sk-opencode-y" in secrets
+
+
+def test_init_both_adapters_writes_standby_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--executor",
+            "claude-code",
+            "--claude-auth",
+            "api-key",
+            "--claude-api-key",
+            "sk-claude-x",
+            "--opencode-own-creds",
+            "--opencode-model",
+            "m2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    yaml = (home / "svarog.yaml").read_text(encoding="utf-8")
+    assert "\n    adapter: claude-code" in yaml
+    assert "тоже настроен и готов" in yaml
+    assert "#     adapter: opencode" in yaml
+
+
+def test_init_both_adapters_without_executor_flag_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--claude-api-key",
+            "sk-claude-x",
+            "--opencode-model",
+            "m2",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_init_conflicting_opencode_creds_flags_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "init",
+            str(home),
+            "--no-input",
+            "--opencode-same-as-native",
+            "--opencode-own-creds",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_init_executor_native_with_claude_flags_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    home = tmp_path / "home"
+    result = runner.invoke(
+        cli_main.app,
+        ["init", str(home), "--no-input", "--executor", "native", "--claude-api-key", "sk-x"],
+    )
+    assert result.exit_code != 0
