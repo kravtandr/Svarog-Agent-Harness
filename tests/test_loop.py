@@ -815,7 +815,7 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
             _final("готово", usage=Usage(2000, 5)),
         ]
     )
-    progress: list[tuple[int, int, float, float]] = []
+    progress: list[tuple[int, int, float, float, int]] = []
     cfg = RuntimeConfig(max_context_tokens=10_000)
     registry = ToolRegistry()
     for tool in file_tools(tmp_path):
@@ -828,7 +828,9 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
         PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
         tmp_path,
         model_name="test-model",
-        on_progress=lambda i, tok, cost, ratio: progress.append((i, tok, cost, ratio)),
+        on_progress=lambda i, tok, cost, ratio, cached: progress.append(
+            (i, tok, cost, ratio, cached)
+        ),
     )
     outcome = await loop.run("задача", AutonomyMode.YOLO)
     assert outcome.state is RunState.COMPLETED
@@ -840,3 +842,21 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
     assert progress[1][3] == pytest.approx(0.2)
     # Токены накапливаются.
     assert progress[1][1] == outcome.tokens_used
+
+
+# --- Блок A §3: cached_tokens — учёт эффекта стабильного префикса схем -------
+
+
+async def test_cached_tokens_accumulate_in_run_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §3: cached-токены копятся в Run.meta и видны в trace."""
+    provider = ScriptedProvider(
+        [
+            _final("готово", usage=Usage(prompt_tokens=100, completion_tokens=5, cached_tokens=64)),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta["cached_tokens"] == 64

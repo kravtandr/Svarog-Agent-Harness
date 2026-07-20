@@ -377,12 +377,21 @@ class TraceRecorder:
                 )
 
     async def update_progress(
-        self, run: Run, *, iterations: int, tokens_used: int, cost_usd: float
+        self,
+        run: Run,
+        *,
+        iterations: int,
+        tokens_used: int,
+        cost_usd: float,
+        cached_tokens: int = 0,
     ) -> None:
         run.iterations = iterations
         run.tokens_used = tokens_used
         run.cost_usd = cost_usd
         run.heartbeat_at = utcnow()  # lease heartbeat (ADR-0015 §0.5)
+        if cached_tokens:
+            # JSON-колонка отслеживает только переприсваивание.
+            run.meta = {**run.meta, "cached_tokens": cached_tokens}
         await self._db.commit()
 
     async def merge_run_meta(self, run: Run, extra: dict[str, object]) -> None:

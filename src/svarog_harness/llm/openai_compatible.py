@@ -102,6 +102,24 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _cached_tokens(usage: Any) -> int:
+    """Прочитать cached-токены из usage — диалекты провайдеров различаются.
+
+    OpenAI/Qwen/Mistral/Zhipu кладут их в prompt_tokens_details.cached_tokens,
+    StepFun/Moonshot — верхним уровнем, DeepSeek/SiliconFlow —
+    в prompt_cache_hit_tokens.
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    for candidate in (
+        getattr(details, "cached_tokens", None) if details is not None else None,
+        getattr(usage, "cached_tokens", None),
+        getattr(usage, "prompt_cache_hit_tokens", None),
+    ):
+        if isinstance(candidate, int) and candidate > 0:
+            return candidate
+    return 0
+
+
 class _ToolCallAccumulator:
     """Сборка tool call из streaming-дельт: id/name приходят один раз, аргументы — кусками."""
 
@@ -162,6 +180,7 @@ class OpenAICompatibleProvider(ModelProvider):
                 usage = Usage(
                     prompt_tokens=chunk.usage.prompt_tokens,
                     completion_tokens=chunk.usage.completion_tokens,
+                    cached_tokens=_cached_tokens(chunk.usage),
                 )
             if not chunk.choices:
                 continue

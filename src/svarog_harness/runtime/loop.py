@@ -171,7 +171,7 @@ class AgentLoop:
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
-        on_progress: Callable[[int, int, float, float], None] | None = None,
+        on_progress: Callable[[int, int, float, float, int], None] | None = None,
         parent_run_id: str | None = None,
     ) -> None:
         self._provider = provider
@@ -290,6 +290,7 @@ class AgentLoop:
                 if stream_callback is None and self._on_text_delta is not None and result_content:
                     self._on_text_delta(result_content)
                 state.tokens_used += result.usage.total_tokens
+                state.cached_tokens += result.usage.cached_tokens
                 state.cost_usd += result.cost_usd
                 state.last_prompt_tokens = result.usage.prompt_tokens
                 await self._recorder.update_progress(
@@ -297,11 +298,16 @@ class AgentLoop:
                     iterations=state.iterations,
                     tokens_used=state.tokens_used,
                     cost_usd=state.cost_usd,
+                    cached_tokens=state.cached_tokens,
                 )
                 if self._on_progress is not None:
                     context_ratio = result.usage.prompt_tokens / self._cfg.max_context_tokens
                     self._on_progress(
-                        state.iterations, state.tokens_used, state.cost_usd, context_ratio
+                        state.iterations,
+                        state.tokens_used,
+                        state.cost_usd,
+                        context_ratio,
+                        state.cached_tokens,
                     )
                 state.messages.append(
                     ChatMessage(

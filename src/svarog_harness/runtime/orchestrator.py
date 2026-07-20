@@ -108,7 +108,7 @@ class RunHooks:
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
-    on_progress: Callable[[int, int, float, float], None] | None = None
+    on_progress: Callable[[int, int, float, float, int], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
     on_verify_failed: Callable[[int], None] | None = None
     on_commit: Callable[[str, str, bool], None] | None = None
