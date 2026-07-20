@@ -71,8 +71,16 @@ def resolve_executor_setup(
 
     active: Literal["claude-code", "opencode"]
     if executor == "claude-code":
+        if not claude.requested:
+            raise ExecutorSetupError(
+                "--executor claude-code указан, но настройки Claude Code не заданы"
+            )
         active = "claude-code"
     elif executor == "opencode":
+        if not opencode.requested:
+            raise ExecutorSetupError(
+                "--executor opencode указан, но настройки OpenCode не заданы"
+            )
         active = "opencode"
     elif claude.requested and opencode.requested:
         raise ExecutorSetupError(
