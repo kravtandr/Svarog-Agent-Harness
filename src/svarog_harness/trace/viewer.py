@@ -263,6 +263,14 @@ def render_run(
         "итог",
         f"{run.iterations} итераций, {run.tokens_used} токенов{cached_suffix}, ${run.cost_usd:.4f}",
     )
+    phases = (run.meta or {}).get("phases") or {}
+    if phases:
+        parts = [
+            f"{name} {entry['ms']}мс×{entry['count']}"
+            for name, entry in sorted(phases.items())
+            if isinstance(entry, dict)
+        ]
+        header.add_row("фазы", ", ".join(parts) + f" | последняя: {phases.get('last', '?')}")
     if run.error:
         header.add_row("ошибка", Text(run.error, style="red"))
 

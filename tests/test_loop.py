@@ -120,7 +120,10 @@ async def test_completes_on_final_answer(db: AsyncSession, tmp_path: Path) -> No
     assert run.autonomy == "yolo"
     assert run.task == "скажи готово"
     assert run.finished_at is not None
-    assert run.meta == {"model": "test-model"}
+    # phases (блок A §5) пишутся вместе с update_progress — meta больше не
+    # ограничивается одним ключом model.
+    assert run.meta["model"] == "test-model"
+    assert run.meta["phases"]["llm_call"]["count"] == 1
 
 
 async def test_executes_tool_calls_and_feeds_results_back(db: AsyncSession, tmp_path: Path) -> None:
@@ -149,6 +152,28 @@ async def test_executes_tool_calls_and_feeds_results_back(db: AsyncSession, tmp_
     assert tool_call.arguments == {"path": "note.txt"}
     assert tool_call.result is not None
     assert "17" in tool_call.result["output"]
+
+
+async def test_phase_timings_land_in_run_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §5: тайминги фаз пишутся в Run.meta и переживают завершение run."""
+    (tmp_path / "a.txt").write_text("содержимое", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}')
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    phases = run.meta["phases"]
+    assert phases["llm_call"]["count"] == 2
+    assert phases["tool_exec"]["count"] >= 1
+    assert phases["last"]
 
 
 async def test_update_plan_is_saved_in_checkpoint(db: AsyncSession, tmp_path: Path) -> None:
