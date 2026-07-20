@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.cli import remote as remote_module
+from svarog_harness.cli.chat_display import format_tool_call
 from svarog_harness.cli.chat_engine import (
     ChatEngine,
     record_gate_answer,
@@ -382,9 +383,7 @@ def _console_hooks() -> RunHooks:
         on_recovered=on_recovered,
         on_progress=on_progress,
         on_text_delta=lambda delta: console.print(delta, end="", highlight=False),
-        on_tool_call=lambda name, args: console.print(
-            f"\n[dim]→ {name} {args}[/dim]", highlight=False
-        ),
+        on_tool_call=lambda name, args: console.print(format_tool_call(name, args)),
         on_notify=lambda name, reason: console.print(
             f"\n[bold yellow]⚡ notify:[/bold yellow] {name} — {reason}", highlight=False
         ),
