@@ -162,7 +162,13 @@ class OpencodeAdapter:
             case "step_start":
                 return [AgentEvent(kind="opaque", session_id=session, raw=payload)]
             case "reasoning":
-                return []  # thinking — не событие trace
+                # gpt-oss/harmony: часть провайдеров кладёт финальный ответ в
+                # reasoning-канал при пустом content — executor держит последний
+                # reasoning как фолбэк финала; в trace он не пишется.
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    return [AgentEvent(kind="reasoning", text=text, session_id=session)]
+                return []
             case _:
                 return [AgentEvent(kind="opaque", session_id=session, raw=payload)]
 
