@@ -1,3 +1,4 @@
+import yaml
 from typer.testing import CliRunner
 
 from svarog_harness import __version__
@@ -15,6 +16,61 @@ def test_version_command() -> None:
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
     assert "svarog" in result.output.lower()
+
+
+def test_policies_configure_updates_selected_profile(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "svarog.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "policies:\n"
+        "  protected_branches: [main]\n"
+        "  profiles:\n"
+        "    yolo:\n"
+        "      require_approval: [git.push]\n"
+        "      notify: [file.delete]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["policies", "configure", "--profile", "yolo"],
+        input="file.delete, service.restart\nbash.network\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["policies"] == {
+        "protected_branches": ["main"],
+        "profiles": {
+            "yolo": {
+                "require_approval": ["file.delete", "service.restart"],
+                "notify": ["bash.network"],
+            }
+        },
+    }
+    assert "Critical-действия" in result.output
+
+
+def test_policies_configure_cancel_keeps_config_unchanged(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "svarog.yaml"
+    original = "policies:\n  profiles: {}\n"
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["policies", "configure", "--profile", "auto"],
+        input="git.push\nfile.delete\nn\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_serve_refuses_external_bind_without_gateway_token(tmp_path, monkeypatch) -> None:

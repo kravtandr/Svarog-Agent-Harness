@@ -12,7 +12,7 @@ import contextlib
 import json
 import signal
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,7 +26,8 @@ from rich.text import Text
 from svarog_harness.cli.chat_commands import COMMANDS, SlashCommand, parse
 from svarog_harness.cli.chat_display import (
     ACCENT,
-    executor_view,
+    ChatStatusView,
+    chat_status_view,
     format_tool_call,
     format_user_message,
     input_separator,
@@ -35,7 +36,17 @@ from svarog_harness.cli.chat_display import (
     welcome_panel,
 )
 from svarog_harness.cli.chat_engine import ChatEngine, ChatEngineProtocol
+from svarog_harness.cli.chat_picker import pick_option
 from svarog_harness.cli.chat_prompt import make_prompt_session, prompt_chat_line
+from svarog_harness.cli.chat_settings import (
+    SettingsApplyError,
+    apply_executor_label,
+    apply_mode,
+    apply_policies,
+    executor_yaml_patch,
+    patch_project_config,
+    policies_yaml_patch,
+)
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
@@ -48,10 +59,12 @@ _TAIL_LINES = 12  # строк хвоста стрима в живой обла�
 _KEYS_HELP = (
     ("Ctrl+C (во время run)", "прервать run (будет suspended)"),
     ("Ctrl+C / Ctrl+D (в промпте)", "выход"),
-    ("↑ / ↓", "история ввода"),
+    ("↑ / ↓", "история ввода / меню выбора"),
     ("/ …", "меню слэш-команд при наборе"),
     ("@ …", "подсказки файлов workspace"),
 )
+
+PickOptionFn = Callable[[str, Sequence[tuple[str, str]], str | None], Awaitable[str | None]]
 
 
 def default_history_path() -> Path:
@@ -99,6 +112,7 @@ class InlineChat:
         engine_factory: Callable[[RunHooks], ChatEngineProtocol] | None = None,
         history_path: Path | None = None,
         allow_layout_overlap: bool = False,
+        pick_option_fn: PickOptionFn | None = None,
     ) -> None:
         self._cfg = cfg
         self._workspace = workspace
@@ -120,6 +134,9 @@ class InlineChat:
         self._buffer = ""
         self._progress = ""
         self._last_answer = ""
+        self._pick_option = pick_option_fn or (
+            lambda title, values, default: pick_option(title, values, default=default)
+        )
 
     # ------------------------------------------------------------- hooks
 
@@ -193,13 +210,11 @@ class InlineChat:
         console = self._console
         engine = self._engine_factory(self._hooks)
         self._engine = engine
-        exec_view = executor_view(self._cfg)
+        status = chat_status_view(self._cfg, self._autonomy)
         model = session_model_label(self._cfg)
         if self._use_prompt_toolkit:
-            self._prompt_session = make_prompt_session(
-                self._workspace, self._history_path, self._autonomy, exec_view
-            )
-        console.print(welcome_panel(self._workspace, self._autonomy, exec_view, model=model))
+            self._prompt_session = make_prompt_session(self._workspace, self._history_path, status)
+        console.print(welcome_panel(self._workspace, status, model=model))
         with console.status("[dim]поднимаю sandbox…[/dim]", spinner="dots"):
             start = await engine.start(continue_ref=continue_ref, fork_ref=fork_ref)
         try:
@@ -408,7 +423,96 @@ class InlineChat:
                     await self._switch(args, fork=True)
             case "sessions":
                 await self._pick_session()
+            case "executor":
+                await self._cmd_executor()
+            case "mode":
+                await self._cmd_mode()
+            case "policies":
+                await self._cmd_policies()
         return False
+
+    def _status_view(self) -> ChatStatusView:
+        return chat_status_view(self._cfg, self._autonomy)
+
+    def _refresh_prompt_status(self) -> None:
+        if self._use_prompt_toolkit:
+            self._prompt_session = make_prompt_session(
+                self._workspace, self._history_path, self._status_view()
+            )
+
+    async def _apply_cfg(
+        self,
+        cfg: SvarogConfig,
+        autonomy: AutonomyMode,
+        *,
+        yaml_patch: dict[str, object],
+        label: str,
+    ) -> None:
+        engine = self._engine
+        assert engine is not None
+        try:
+            path = patch_project_config(self._workspace, yaml_patch)
+        except SettingsApplyError as exc:
+            self._console.print(f"[red]{exc}[/red]")
+            return
+        self._cfg = cfg
+        self._autonomy = autonomy
+        await engine.reconfigure(cfg, autonomy)
+        self._refresh_prompt_status()
+        self._console.print(f"[dim]{label} · сохранено в {path.name}[/dim]")
+
+    async def _cmd_executor(self) -> None:
+        status = self._status_view()
+        values = [(label, label) for label in status.executors]
+        choice = await self._pick_option("executor", values, status.active_executor)
+        if choice is None or choice == status.active_executor:
+            return
+        try:
+            cfg = apply_executor_label(self._cfg, choice)
+        except SettingsApplyError as exc:
+            self._console.print(f"[yellow]{exc}[/yellow]")
+            return
+        await self._apply_cfg(
+            cfg,
+            self._autonomy,
+            yaml_patch=executor_yaml_patch(cfg),
+            label=f"executor → {choice}",
+        )
+
+    async def _cmd_mode(self) -> None:
+        status = self._status_view()
+        values = [(mode, mode) for mode in status.modes]
+        choice = await self._pick_option("mode", values, status.active_mode)
+        if choice is None or choice == status.active_mode:
+            return
+        try:
+            cfg = apply_mode(self._cfg, choice)
+        except SettingsApplyError as exc:
+            self._console.print(f"[yellow]{exc}[/yellow]")
+            return
+        await self._apply_cfg(
+            cfg,
+            self._autonomy,
+            yaml_patch=executor_yaml_patch(cfg),
+            label=f"mode → {choice}",
+        )
+
+    async def _cmd_policies(self) -> None:
+        values = [(mode.value, mode.value) for mode in AutonomyMode]
+        choice = await self._pick_option("policies", values, self._autonomy.value)
+        if choice is None or choice == self._autonomy.value:
+            return
+        try:
+            cfg, autonomy = apply_policies(self._cfg, choice)
+        except SettingsApplyError as exc:
+            self._console.print(f"[yellow]{exc}[/yellow]")
+            return
+        await self._apply_cfg(
+            cfg,
+            autonomy,
+            yaml_patch=policies_yaml_patch(autonomy),
+            label=f"policies → {autonomy.value}",
+        )
 
     def _print_help(self) -> None:
         lines = ["[bold]слэш-команды[/bold]"]

@@ -7,12 +7,14 @@ OpenCode) из уже собранных ответов.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from svarog_harness.scaffold import (
     DEFAULT_CLAUDE_API_KEY_REF,
+    DEFAULT_CLAUDE_IMAGE,
     DEFAULT_CLAUDE_OAUTH_TOKEN_REF,
     DEFAULT_OPENCODE_API_KEY_REF,
+    DEFAULT_OPENCODE_IMAGE,
     ClaudeExecutorSetup,
     ExecutorSetup,
     OpencodeExecutorSetup,
@@ -29,7 +31,7 @@ class ExecutorSetupError(ValueError):
 @dataclass(frozen=True)
 class ClaudeAnswers:
     requested: bool
-    auth: str = "api-key"
+    auth: str = "subscription"
     api_key: str | None = None
     oauth_token: str | None = None
 
@@ -58,16 +60,13 @@ def resolve_executor_setup(
             f"--executor: неизвестное значение {executor!r} ({'|'.join(_VALID_EXECUTORS)})"
         )
     if executor == "native" and (claude.requested or opencode.requested):
-        raise ExecutorSetupError(
-            "--executor native конфликтует с --claude-*/--opencode-* флагами"
-        )
+        raise ExecutorSetupError("--executor native конфликтует с --claude-*/--opencode-* флагами")
     if not claude.requested and not opencode.requested:
         return None
 
     if claude.requested and claude.auth not in _VALID_CLAUDE_AUTH:
         raise ExecutorSetupError(
-            f"--claude-auth: неизвестное значение {claude.auth!r} "
-            f"({'|'.join(_VALID_CLAUDE_AUTH)})"
+            f"--claude-auth: неизвестное значение {claude.auth!r} ({'|'.join(_VALID_CLAUDE_AUTH)})"
         )
 
     active: Literal["claude-code", "opencode"]
@@ -79,14 +78,11 @@ def resolve_executor_setup(
         active = "claude-code"
     elif executor == "opencode":
         if not opencode.requested:
-            raise ExecutorSetupError(
-                "--executor opencode указан, но настройки OpenCode не заданы"
-            )
+            raise ExecutorSetupError("--executor opencode указан, но настройки OpenCode не заданы")
         active = "opencode"
     elif claude.requested and opencode.requested:
         raise ExecutorSetupError(
-            "настроены и Claude Code, и OpenCode — уточните "
-            "`--executor claude-code|opencode`"
+            "настроены и Claude Code, и OpenCode — уточните `--executor claude-code|opencode`"
         )
     elif claude.requested:
         active = "claude-code"
@@ -128,3 +124,32 @@ def resolve_executor_setup(
             )
 
     return ExecutorSetup(active=active, claude=claude_setup, opencode=opencode_setup)
+
+
+def executor_setup_yaml_patch(executor: ExecutorSetup) -> dict[str, Any]:
+    """YAML-фрагмент активного external executor для существующего agent-home."""
+    setup = executor.claude if executor.active == "claude-code" else executor.opencode
+    assert setup is not None
+    external: dict[str, Any] = {
+        "adapter": executor.active,
+        "image": (
+            DEFAULT_CLAUDE_IMAGE if executor.active == "claude-code" else DEFAULT_OPENCODE_IMAGE
+        ),
+    }
+    if isinstance(setup, ClaudeExecutorSetup):
+        external["auth"] = setup.auth
+        if setup.api_key_ref is not None:
+            external["api_key_ref"] = setup.api_key_ref
+        if setup.oauth_token_ref is not None:
+            external["oauth_token_ref"] = setup.oauth_token_ref
+    else:
+        external.update(
+            {
+                "auth": "api-key",
+                "model": setup.model,
+                "base_url": setup.base_url,
+            }
+        )
+        if setup.api_key_ref is not None:
+            external["api_key_ref"] = setup.api_key_ref
+    return {"executor": {"type": "external", "external": external}}

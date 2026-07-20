@@ -10,8 +10,10 @@ MCP) с этим адаптером недоступен, только containme
 
 ## Сборка
 
+`svarog init` собирает образ автоматически, когда настроен OpenCode. Для
+ручной пересборки из корня репозитория:
+
 ```bash
-# из корня репозитория
 docker build -t svarog/agent-opencode:latest docker/agent-opencode
 ```
 

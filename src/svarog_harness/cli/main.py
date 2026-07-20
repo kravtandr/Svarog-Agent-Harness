@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from prompt_toolkit.shortcuts import prompt as prompt_toolkit
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,12 +28,20 @@ from svarog_harness.cli.chat_engine import (
 from svarog_harness.cli.chat_engine import (
     with_db as _with_db,
 )
+from svarog_harness.cli.chat_settings import patch_project_config
 from svarog_harness.cli.init_executor import (
     ClaudeAnswers,
     ExecutorSetupError,
     OpencodeAnswers,
+    executor_setup_yaml_patch,
     resolve_executor_setup,
 )
+from svarog_harness.cli.init_images import (
+    ExecutorAdapter,
+    ExecutorImageBuildError,
+    build_executor_image,
+)
+from svarog_harness.cli.policies import policies_app
 from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import (
     WorkspaceLayoutError,
@@ -124,6 +133,7 @@ approvals_app = typer.Typer(help="Approval-запросы: список и ре�
 app.add_typer(approvals_app, name="approvals")
 skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
 app.add_typer(skills_app, name="skills")
+app.add_typer(policies_app, name="policies")
 # Thin CLI cloud-режима (ADR-0017 §3): svarog remote … / svarog login.
 app.add_typer(remote_module.remote_app, name="remote")
 app.command("login")(remote_module.login)
@@ -142,6 +152,11 @@ def version() -> None:
 
 
 _DOCTOR_STYLE = {"ok": "green", "warn": "yellow", "fail": "red"}
+
+
+def _prompt_secret(text: str) -> str:
+    """Запросить секрет с маской ``*``, не выводя его в scrollback."""
+    return prompt_toolkit(f"{text}: ", is_password=True)
 
 
 @app.command()
@@ -264,22 +279,50 @@ def init(
         path = Path(typer.prompt("Каталог agent-home", default="./agent-home"))
     target = (path or Path.cwd() / "agent-home").expanduser().resolve()
 
-    if interactive:
-        model = model or typer.prompt("Модель", default=DEFAULT_MODEL)
-        base_url = base_url or typer.prompt("Base URL endpoint", default=DEFAULT_BASE_URL)
-        if api_key is None:
-            api_key = (
-                typer.prompt(
-                    "API-ключ (Enter — пропустить; для локальной модели не нужен)",
-                    default="",
-                    hide_input=True,
-                    show_default=False,
-                )
-                or None
+    existing_cfg: SvarogConfig | None = None
+    config_path = target / "svarog.yaml"
+    if config_path.is_file():
+        try:
+            # `init` настраивает именно agent-home, поэтому user-конфиг не
+            # должен подменять его значения в подсказках.
+            existing_cfg = load_config(
+                project_dir=target, user_config_path=target / ".no-user-config.yaml"
             )
-    model = model or DEFAULT_MODEL
-    base_url = base_url or DEFAULT_BASE_URL
-    api_key_ref = DEFAULT_API_KEY_REF if api_key else None
+        except ConfigError as exc:
+            console.print(
+                f"[yellow]не удалось прочитать существующий {config_path.name}: {exc}[/yellow]"
+            )
+
+    existing_model: str | None = None
+    existing_base_url: str | None = None
+    existing_api_key_ref: str | None = None
+    existing_api_key_is_set = False
+    if existing_cfg is not None:
+        provider = existing_cfg.models.providers[existing_cfg.models.default]
+        existing_model = provider.model
+        existing_base_url = provider.base_url
+        existing_api_key_ref = provider.api_key_ref
+        if existing_api_key_ref is not None:
+            store = default_secret_store(
+                existing_cfg.secrets.path, env_fallback=existing_cfg.secrets.env_fallback
+            )
+            existing_api_key_is_set = store.get(existing_api_key_ref) is not None
+
+    if interactive:
+        if model is None:
+            model = typer.prompt("Модель", default=existing_model or DEFAULT_MODEL)
+        if base_url is None:
+            base_url = typer.prompt(
+                "Base URL endpoint", default=existing_base_url or DEFAULT_BASE_URL
+            )
+        if api_key is None:
+            key_prompt = "API-ключ (Enter — пропустить; для локальной модели не нужен)"
+            if existing_api_key_ref is not None:
+                key_prompt = "API-ключ (Enter — оставить настроенный ключ)"
+            api_key = _prompt_secret(key_prompt) or None
+    model = model or existing_model or DEFAULT_MODEL
+    base_url = base_url or existing_base_url or DEFAULT_BASE_URL
+    api_key_ref = DEFAULT_API_KEY_REF if api_key else existing_api_key_ref
 
     claude_requested = bool(
         claude_auth or claude_api_key or claude_oauth_token or executor == "claude-code"
@@ -294,41 +337,31 @@ def init(
     )
 
     if interactive and not claude_requested:
-        claude_requested = typer.confirm(
-            "Настроить Claude Code как исполнителя?", default=False
-        )
+        claude_requested = typer.confirm("Настроить Claude Code как исполнителя?", default=True)
     if interactive and not opencode_requested:
-        opencode_requested = typer.confirm(
-            "Настроить OpenCode как исполнителя?", default=False
-        )
+        opencode_requested = typer.confirm("Настроить OpenCode как исполнителя?", default=True)
 
     if claude_requested:
         if interactive and claude_auth is None:
             claude_auth = typer.prompt(
-                "Режим авторизации Claude Code (api-key/subscription)", default="api-key"
+                "Режим авторизации Claude Code (api-key/subscription)", default="subscription"
             )
-        claude_auth = claude_auth or "api-key"
+        # Явно переданный ключ подразумевает API-режим; во всех прочих
+        # сценариях Claude Code использует привычную подписку по умолчанию.
+        claude_auth = claude_auth or ("api-key" if claude_api_key else "subscription")
         if claude_auth == "subscription":
             if interactive and claude_oauth_token is None:
                 claude_oauth_token = (
-                    typer.prompt(
+                    _prompt_secret(
                         "OAuth-токен подписки (`claude setup-token`, Enter — пропустить, "
-                        "добавить позже)",
-                        default="",
-                        hide_input=True,
-                        show_default=False,
+                        "добавить позже)"
                     )
                     or None
                 )
         else:
             if interactive and claude_api_key is None:
                 claude_api_key = (
-                    typer.prompt(
-                        "Anthropic API-ключ (Enter — пропустить, добавить позже)",
-                        default="",
-                        hide_input=True,
-                        show_default=False,
-                    )
+                    _prompt_secret("Anthropic API-ключ (Enter — пропустить, добавить позже)")
                     or None
                 )
 
@@ -355,17 +388,10 @@ def init(
             if interactive and opencode_model is None:
                 opencode_model = typer.prompt("Модель для OpenCode", default=model)
             if interactive and opencode_base_url is None:
-                opencode_base_url = typer.prompt(
-                    "Base URL endpoint для OpenCode", default=base_url
-                )
+                opencode_base_url = typer.prompt("Base URL endpoint для OpenCode", default=base_url)
             if interactive and opencode_api_key is None:
                 opencode_api_key = (
-                    typer.prompt(
-                        "API-ключ для OpenCode (Enter — пропустить, добавить позже)",
-                        default="",
-                        hide_input=True,
-                        show_default=False,
-                    )
+                    _prompt_secret("API-ключ для OpenCode (Enter — пропустить, добавить позже)")
                     or None
                 )
 
@@ -378,7 +404,7 @@ def init(
 
     claude_answers = ClaudeAnswers(
         requested=claude_requested,
-        auth=claude_auth or "api-key",
+        auth=claude_auth or ("api-key" if claude_api_key else "subscription"),
         api_key=claude_api_key,
         oauth_token=claude_oauth_token,
     )
@@ -403,6 +429,24 @@ def init(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
+    if executor_setup is not None:
+        adapters: list[ExecutorAdapter] = [executor_setup.active]
+        if executor_setup.claude is not None and executor_setup.active != "claude-code":
+            adapters.append("claude-code")
+        if executor_setup.opencode is not None and executor_setup.active != "opencode":
+            adapters.append("opencode")
+        for adapter in adapters:
+            console.print(f"[dim]собираю образ {adapter}…[/dim]")
+            try:
+                image = build_executor_image(
+                    adapter,
+                    on_progress=lambda line: console.print(f"[dim]{line}[/dim]"),
+                )
+            except ExecutorImageBuildError as exc:
+                console.print(f"[red]не удалось подготовить образ executor:[/red] {exc}")
+                raise typer.Exit(code=1) from None
+            console.print(f"[green]образ готов[/green] ({image})")
+
     result = scaffold_agent_home(
         target,
         force=force,
@@ -411,6 +455,24 @@ def init(
         api_key_ref=api_key_ref,
         executor=executor_setup,
     )
+    if existing_cfg is not None and not force:
+        models_patch: dict[str, object] = {
+            "base_url": base_url,
+            "model": model,
+        }
+        if api_key_ref is not None:
+            models_patch["api_key_ref"] = api_key_ref
+        config_patch: dict[str, object] = {
+            "models": {
+                "providers": {
+                    existing_cfg.models.default: models_patch,
+                }
+            }
+        }
+        if executor_setup is not None:
+            config_patch.update(executor_setup_yaml_patch(executor_setup))
+        patch_project_config(target, config_patch)
+        console.print(f"[green]настройки сохранены[/green] в {config_path.name}")
     for created in result.created:
         console.print(f"[green]+[/green] {created.relative_to(target)}")
     for skipped in result.skipped:
@@ -467,7 +529,7 @@ def init(
     asyncio.run(init_subrepos())
 
     pending_refs: list[str] = []
-    if api_key_ref and not api_key:
+    if api_key_ref and not api_key and not existing_api_key_is_set:
         pending_refs.append(api_key_ref)
     if executor_setup is not None and executor_setup.claude is not None:
         claude_setup = executor_setup.claude
@@ -493,9 +555,7 @@ def init(
         next_step = f"добавьте ключи: {reminders}"
     else:
         next_step = 'запустите `svarog run "…"`'
-    executor_note = (
-        f"; исполнитель: {executor_setup.active}" if executor_setup is not None else ""
-    )
+    executor_note = f"; исполнитель: {executor_setup.active}" if executor_setup is not None else ""
     console.print(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
         f"[dim]модель {model} @ {base_url}{executor_note}; {next_step}[/dim]"

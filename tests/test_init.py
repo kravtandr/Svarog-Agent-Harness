@@ -1,6 +1,7 @@
 """Тесты scaffolding agent-home (#19, §8) и команды svarog init."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -14,9 +15,18 @@ from svarog_harness.scaffold import (
     scaffold_agent_home,
 )
 from svarog_harness.secrets import is_secret_path
+from svarog_harness.secrets.store import FileSecretStore
 from svarog_harness.skills import scan_skills
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _skip_executor_image_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI-тесты не должны скачивать Node/agent CLI через Docker."""
+    monkeypatch.setattr(
+        cli_main, "build_executor_image", lambda _adapter, **_kwargs: "svarog/test-image:latest"
+    )
 
 
 def test_scaffold_creates_structure(tmp_path: Path) -> None:
@@ -123,6 +133,95 @@ def test_init_stores_api_key_outside_config(
     assert "sk-secret-xyz" in secrets
 
 
+def test_init_reuses_existing_native_settings_on_enter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Повторный интерактивный init не просит заново настроить provider."""
+    monkeypatch.setenv("COLUMNS", "200")
+    fake_home = tmp_path / "fakehome"
+    monkeypatch.setenv("HOME", str(fake_home))
+    home = tmp_path / "home"
+    scaffold_agent_home(
+        home,
+        model="existing-model",
+        base_url="https://models.example.test/v1",
+        api_key_ref="EXISTING_PROVIDER_KEY",
+    )
+    FileSecretStore(fake_home / ".svarog" / "secrets.json").set(
+        "EXISTING_PROVIDER_KEY", "test-existing-key"
+    )
+    monkeypatch.setattr(
+        cli_main, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    secret_prompts: list[str] = []
+
+    def empty_secret(text: str) -> str:
+        secret_prompts.append(text)
+        return ""
+
+    monkeypatch.setattr(cli_main, "_prompt_secret", empty_secret)
+
+    result = runner.invoke(cli_main.app, ["init", str(home)], input="\n\nn\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Модель [existing-model]" in result.output
+    assert "Base URL endpoint [https://models.example.test/v1]" in result.output
+    assert "API-ключ (Enter — оставить настроенный ключ)" in secret_prompts
+    assert "добавьте ключи" not in result.output
+
+
+def test_init_saves_selected_executor_to_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    home = tmp_path / "home"
+    scaffold_agent_home(home)
+    monkeypatch.setattr(
+        cli_main, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    monkeypatch.setattr(cli_main, "_prompt_secret", lambda _text: "")
+    built: list[str] = []
+    monkeypatch.setattr(
+        cli_main,
+        "build_executor_image",
+        lambda adapter, **_kwargs: built.append(adapter) or f"svarog/agent-{adapter}:latest",
+    )
+
+    result = runner.invoke(
+        cli_main.app,
+        ["init", str(home)],
+        input="\n\n\n\n\n\n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(project_dir=home, user_config_path=home / "no-user.yaml")
+    assert cfg.executor.type == "external"
+    assert cfg.executor.external is not None
+    assert cfg.executor.external.adapter == "claude-code"
+    assert cfg.executor.external.auth == "subscription"
+    assert cfg.executor.external.oauth_token_ref == "CLAUDE_CODE_OAUTH_TOKEN"
+    assert "Настроить Claude Code как исполнителя? [Y/n]" in result.output
+    assert "Настроить OpenCode как исполнителя? [Y/n]" in result.output
+    assert "использовать те же креды, что и у нативного provider'а? [Y/n]" in result.output
+    assert "Режим авторизации Claude Code (api-key/subscription) [subscription]" in result.output
+    assert "настройки сохранены" in result.output
+    assert built == ["claude-code", "opencode"]
+
+
+def test_secret_prompt_masks_typed_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def fake_prompt(text: str, *, is_password: bool) -> str:
+        calls.append((text, is_password))
+        return "secret"
+
+    monkeypatch.setattr(cli_main, "prompt_toolkit", fake_prompt)
+
+    assert cli_main._prompt_secret("API-ключ") == "secret"
+    assert calls == [("API-ключ: ", True)]
+
+
 def test_init_adds_home_to_project_gitignore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,9 +282,7 @@ def test_scaffold_claude_subscription_ref_always_active(tmp_path: Path) -> None:
 def test_scaffold_claude_subscription_without_ref_falls_back_to_default(tmp_path: Path) -> None:
     executor = ExecutorSetup(
         active="claude-code",
-        claude=ClaudeExecutorSetup(
-            auth="subscription", api_key_ref=None, oauth_token_ref=None
-        ),
+        claude=ClaudeExecutorSetup(auth="subscription", api_key_ref=None, oauth_token_ref=None),
     )
     scaffold_agent_home(tmp_path, executor=executor)
     yaml = (tmp_path / "svarog.yaml").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Презентация chat: tool-карточки, executor, welcome, синий chrome."""
+"""Презентация chat: tool-карточки, status snapshot, welcome, синий chrome."""
 
 from pathlib import Path
 
@@ -7,10 +7,11 @@ from rich.console import Console
 
 from svarog_harness.cli.chat_display import (
     ACCENT,
-    ExecutorView,
-    executor_view,
+    ChatStatusView,
+    chat_status_view,
     format_tool_call,
     input_separator,
+    status_summary,
     welcome_panel,
 )
 from svarog_harness.config.loader import load_config
@@ -28,6 +29,19 @@ def _cfg(tmp_path: Path, body: str) -> SvarogConfig:
     ws.mkdir()
     (ws / "svarog.yaml").write_text(body, encoding="utf-8")
     return load_config(project_dir=ws)
+
+
+def _minimal_yaml(tmp_path: Path, extra: str = "") -> str:
+    return (
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n"
+        f"{extra}"
+    )
 
 
 def test_write_hides_content_shows_path_and_size() -> None:
@@ -71,55 +85,140 @@ def test_unknown_tool_summarizes_without_bulk() -> None:
     assert "content=<12 chars>" in out or "content=" in out
 
 
-def test_executor_view_native_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_view_native_lists_modes_and_default_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "svarog_harness.cli.chat_display._adapter_available",
+        lambda name: False,
+    )
+    cfg = _cfg(tmp_path, _minimal_yaml(tmp_path, "sandbox:\n  type: local-trusted\n"))
+    view = chat_status_view(cfg, AutonomyMode.YOLO)
+    assert view.active_executor == "native/local"
+    assert "native/local" in view.executors
+    assert "external/claude-code" not in view.executors
+    assert view.modes == ("локальный loop", "cloud-агент")
+    assert view.active_mode == "локальный loop"
+    assert view.policy_profile == "default"
+    assert view.autonomy is AutonomyMode.YOLO
+
+
+def test_status_view_includes_detected_and_configured_adapters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "svarog_harness.cli.chat_display._adapter_available",
+        lambda name: name == "codex",
+    )
     cfg = _cfg(
         tmp_path,
-        "models:\n"
-        "  default: local\n"
-        "  providers:\n"
-        "    local:\n"
-        "      base_url: http://localhost:9/v1\n"
-        "      model: fake-model\n"
-        "sandbox:\n  type: local-trusted\n"
-        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        _minimal_yaml(
+            tmp_path,
+            "sandbox:\n  type: docker\n"
+            "executor:\n"
+            "  type: external\n"
+            "  external:\n"
+            "    adapter: claude-code\n"
+            "    image: svarog/claude:test\n",
+        ),
     )
-    view = executor_view(cfg)
-    assert view == ExecutorView(kind="native", detail="local", role="локальный loop")
+    view = chat_status_view(cfg, AutonomyMode.AUTO)
+    assert view.active_executor == "external/claude-code"
+    assert view.active_mode == "cloud-агент"
+    assert "native/docker" in view.executors
+    assert "external/claude-code" in view.executors  # из конфига
+    assert "external/codex" in view.executors  # which
+    assert "external/opencode" not in view.executors
+    assert view.policy_profile == "default"
 
 
-def test_executor_view_external_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_view_policy_profile_matches_autonomy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "svarog_harness.cli.chat_display._adapter_available",
+        lambda _name: False,
+    )
     cfg = _cfg(
         tmp_path,
-        "models:\n"
-        "  default: local\n"
-        "  providers:\n"
-        "    local:\n"
-        "      base_url: http://localhost:9/v1\n"
-        "      model: fake-model\n"
-        "sandbox:\n  type: docker\n"
-        "executor:\n"
-        "  type: external\n"
-        "  external:\n"
-        "    adapter: claude-code\n"
-        "    image: svarog/claude:test\n"
-        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        _minimal_yaml(
+            tmp_path,
+            "sandbox:\n  type: docker\npolicies:\n  profiles:\n    yolo:\n      notify: ['bash']\n",
+        ),
     )
-    view = executor_view(cfg)
-    assert view.kind == "external" and view.detail == "claude-code"
-    assert view.role == "cloud-агент"
+    view = chat_status_view(cfg, AutonomyMode.YOLO)
+    assert view.policy_profile == "yolo"
+    assert chat_status_view(cfg, AutonomyMode.AUTO).policy_profile == "default"
 
 
-def test_welcome_layout_and_separator() -> None:
+def test_status_summary_is_compact() -> None:
+    view = ChatStatusView(
+        autonomy=AutonomyMode.YOLO,
+        executors=("native/docker", "external/claude-code"),
+        active_executor="native/docker",
+        modes=("локальный loop", "cloud-агент"),
+        active_mode="локальный loop",
+        policy_profile="default",
+    )
+    assert status_summary(view) == "▶▶ yolo · native/docker · local · default"
+
+
+def test_welcome_layout_table_and_separator() -> None:
     assert ACCENT == "dodger_blue2"
-    view = ExecutorView(kind="external", detail="opencode", role="cloud-агент")
-    panel = welcome_panel(Path("/tmp/demo"), AutonomyMode.YOLO, view, model="openai/gpt")
+    view = ChatStatusView(
+        autonomy=AutonomyMode.YOLO,
+        executors=("native/docker", "external/opencode"),
+        active_executor="external/opencode",
+        modes=("локальный loop", "cloud-агент"),
+        active_mode="cloud-агент",
+        policy_profile="default",
+    )
+    panel = welcome_panel(Path("/tmp/demo"), view, model="openai/gpt")
     out = _plain(panel)
     assert "Svarog chat" in out
     assert "Welcome" in out
     assert "Tips for getting started" in out
-    assert "opencode" in out and "cloud-агент" in out
+    assert "executors" in out
+    assert "native/docker" in out and "external/opencode" in out
+    assert "mode" in out
+    assert "локальный loop" in out and "cloud-агент" in out
+    assert "policies" in out
+    assert "yolo" in out and "default" in out
     assert "openai/gpt" in out
-    # Постоянного списка /help · /new у промпта больше нет — только полоса.
     assert "/help · /new" not in _plain(input_separator())
+
+
+def test_policies_text_default_profile_is_dim() -> None:
+    from svarog_harness.cli.chat_display import _policies_text
+
+    default_view = ChatStatusView(
+        autonomy=AutonomyMode.YOLO,
+        executors=("native/docker",),
+        active_executor="native/docker",
+        modes=("локальный loop", "cloud-агент"),
+        active_mode="локальный loop",
+        policy_profile="default",
+    )
+    text = _policies_text(default_view)
+    assert text.plain == "yolo / default"
+    by_style = {text.plain[s.start : s.end]: str(s.style) for s in text.spans}
+    assert by_style["yolo"] == ACCENT
+    assert by_style["default"] == "dim"
+
+    named = ChatStatusView(
+        autonomy=AutonomyMode.YOLO,
+        executors=("native/docker",),
+        active_executor="native/docker",
+        modes=("локальный loop", "cloud-агент"),
+        active_mode="локальный loop",
+        policy_profile="yolo",
+    )
+    named_text = _policies_text(named)
+    assert named_text.plain == "yolo / yolo"
+    named_styles = [
+        str(s.style) for s in named_text.spans if named_text.plain[s.start : s.end] == "yolo"
+    ]
+    assert named_styles == [ACCENT, ACCENT]

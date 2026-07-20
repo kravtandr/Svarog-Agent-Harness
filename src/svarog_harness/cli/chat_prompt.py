@@ -2,7 +2,7 @@
 
 Раскладка (пока курсор в поле)::
 
-    ▶▶ автономия · executor …
+    ▶▶ yolo · native/docker · local · default
     ─────────────────────────
     › текст
     ─────────────────────────
@@ -32,8 +32,7 @@ from svarog_harness.cli.chat_completion import (
     detect_completion,
     slash_suggestions,
 )
-from svarog_harness.cli.chat_display import ACCENT_HEX, ExecutorView
-from svarog_harness.config.schema import AutonomyMode
+from svarog_harness.cli.chat_display import ACCENT_HEX, ChatStatusView, status_summary
 
 _STYLE = Style.from_dict(
     {
@@ -85,20 +84,10 @@ class ChatCompleter(Completer):
             )
 
 
-def _prompt_message(autonomy: AutonomyMode, executor: ExecutorView) -> StyleAndTextTuples:
-    """Статус + верхняя полоса + ›  (верх сэндвича Claude Code)."""
-    marks = {
-        AutonomyMode.YOLO: "▶▶",
-        AutonomyMode.AUTO: "▶",
-        AutonomyMode.SUPERVISED: "⏸",
-    }
-    mark = marks[autonomy]
-    status = (
-        f"{mark} автономия: {autonomy.value}  ·  "
-        f"executor: {executor.kind}/{executor.detail} ({executor.role})"
-    )
+def _prompt_message(status: ChatStatusView) -> StyleAndTextTuples:
+    """Компактный статус + верхняя полоса + ›  (верх сэндвича Claude Code)."""
     return [
-        ("class:status", status + "\n"),
+        ("class:status", status_summary(status) + "\n"),
         ("class:separator", _hrule() + "\n"),
         ("class:prompt", "› "),
     ]
@@ -107,12 +96,11 @@ def _prompt_message(autonomy: AutonomyMode, executor: ExecutorView) -> StyleAndT
 def make_prompt_session(
     workspace: Path,
     history_path: Path,
-    autonomy: AutonomyMode,
-    executor: ExecutorView,
+    status: ChatStatusView,
 ) -> PromptSession[str]:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     return PromptSession(
-        message=lambda: _prompt_message(autonomy, executor),
+        message=lambda: _prompt_message(status),
         history=FileHistory(str(history_path)),
         completer=ChatCompleter(workspace),
         complete_while_typing=True,

@@ -1,6 +1,6 @@
 """Слэш-команды inline-чата: парсинг."""
 
-from svarog_harness.cli.chat_commands import parse
+from svarog_harness.cli.chat_commands import COMMANDS, parse
 
 
 def test_parse_plain_message_is_none() -> None:
@@ -27,3 +27,14 @@ def test_parse_unknown_command_returns_none_command() -> None:
     assert parsed is not None
     command, _ = parsed
     assert command is None
+
+
+def test_settings_commands_registered() -> None:
+    names = {cmd.name for cmd in COMMANDS}
+    assert {"executor", "mode", "policies"} <= names
+    for name in ("executor", "mode", "policies"):
+        parsed = parse(f"/{name}")
+        assert parsed is not None
+        command, args = parsed
+        assert command is not None and command.name == name
+        assert args == ""

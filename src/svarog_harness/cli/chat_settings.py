@@ -1,0 +1,140 @@
+"""Смена executor / mode / policies из chat + запись в project svarog.yaml."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+
+from svarog_harness.cli.chat_display import MODE_CLOUD, MODE_LOCAL
+from svarog_harness.config.loader import PROJECT_CONFIG_NAME, deep_merge
+from svarog_harness.config.schema import (
+    AutonomyMode,
+    ExecutorConfig,
+    SvarogConfig,
+)
+
+
+class SettingsApplyError(ValueError):
+    """Нельзя применить выбор (нет секции external, неизвестный label и т.п.)."""
+
+
+def _read_project_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise SettingsApplyError(f"невалидный YAML в {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise SettingsApplyError(f"{path}: верхний уровень должен быть mapping")
+    return data
+
+
+def _write_yaml(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def patch_project_config(workspace: Path, patch: dict[str, Any]) -> Path:
+    """Deep-merge patch в project ``svarog.yaml`` и атомарно сохранить."""
+    path = workspace / PROJECT_CONFIG_NAME
+    raw = _read_project_config(path)
+    merged = deep_merge(raw, patch)
+    _write_yaml(path, merged)
+    return path
+
+
+def apply_executor_label(cfg: SvarogConfig, label: str) -> SvarogConfig:
+    """Применить label вида ``native/docker`` или ``external/claude-code``."""
+    kind, _, detail = label.partition("/")
+    if kind == "native":
+        if detail == "local":
+            sandbox_type: Literal["docker", "local-trusted"] = "local-trusted"
+        elif detail == "docker":
+            sandbox_type = "docker"
+        else:
+            raise SettingsApplyError(f"неизвестный native sandbox: {label}")
+        return cfg.model_copy(
+            update={
+                "executor": ExecutorConfig(type="native", external=cfg.executor.external),
+                "sandbox": cfg.sandbox.model_copy(update={"type": sandbox_type}),
+            }
+        )
+    if kind == "external":
+        if not detail:
+            raise SettingsApplyError(f"неполный executor: {label}")
+        if cfg.executor.external is None:
+            raise SettingsApplyError(
+                "для external нужен executor.external в svarog.yaml (image и adapter)"
+            )
+        external = cfg.executor.external.model_copy(update={"adapter": detail})
+        return cfg.model_copy(
+            update={"executor": ExecutorConfig(type="external", external=external)}
+        )
+    raise SettingsApplyError(f"неизвестный executor: {label}")
+
+
+def apply_mode(cfg: SvarogConfig, mode: str) -> SvarogConfig:
+    """``локальный loop`` → native; ``cloud-агент`` → external (нужна секция)."""
+    if mode == MODE_LOCAL:
+        return cfg.model_copy(
+            update={
+                "executor": ExecutorConfig(type="native", external=cfg.executor.external),
+            }
+        )
+    if mode == MODE_CLOUD:
+        if cfg.executor.external is None:
+            raise SettingsApplyError(
+                "cloud-агент требует executor.external в svarog.yaml (image и adapter)"
+            )
+        return cfg.model_copy(
+            update={
+                "executor": ExecutorConfig(type="external", external=cfg.executor.external),
+            }
+        )
+    raise SettingsApplyError(f"неизвестный mode: {mode}")
+
+
+def apply_policies(cfg: SvarogConfig, autonomy_value: str) -> tuple[SvarogConfig, AutonomyMode]:
+    """Сменить runtime.autonomy (профиль policies берётся по имени режима)."""
+    try:
+        autonomy = AutonomyMode(autonomy_value)
+    except ValueError as exc:
+        raise SettingsApplyError(f"неизвестная автономия: {autonomy_value}") from exc
+    runtime = cfg.runtime.model_copy(update={"autonomy": autonomy})
+    return cfg.model_copy(update={"runtime": runtime}), autonomy
+
+
+def executor_yaml_patch(cfg: SvarogConfig) -> dict[str, Any]:
+    """Фрагмент YAML для текущего executor + sandbox."""
+    patch: dict[str, Any] = {
+        "executor": {"type": cfg.executor.type},
+        "sandbox": {"type": cfg.sandbox.type},
+    }
+    if cfg.executor.external is not None:
+        ext = cfg.executor.external
+        external: dict[str, Any] = {
+            "adapter": ext.adapter,
+            "image": ext.image,
+            "auth": ext.auth,
+        }
+        if ext.model is not None:
+            external["model"] = ext.model
+        if ext.api_key_ref is not None:
+            external["api_key_ref"] = ext.api_key_ref
+        if ext.oauth_token_ref is not None:
+            external["oauth_token_ref"] = ext.oauth_token_ref
+        patch["executor"]["external"] = external
+    return patch
+
+
+def policies_yaml_patch(autonomy: AutonomyMode) -> dict[str, Any]:
+    return {"runtime": {"autonomy": autonomy.value}}
