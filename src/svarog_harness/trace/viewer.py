@@ -257,9 +257,11 @@ def render_run(
     header.add_row("задача", run.task)
     header.add_row("автономия", run.autonomy)
     header.add_row("модель", str((run.meta or {}).get("model", "?")))
+    cached = int((run.meta or {}).get("cached_tokens", 0))
+    cached_suffix = f", из них {cached} из кэша" if cached else ""
     header.add_row(
         "итог",
-        f"{run.iterations} итераций, {run.tokens_used} токенов, ${run.cost_usd:.4f}",
+        f"{run.iterations} итераций, {run.tokens_used} токенов{cached_suffix}, ${run.cost_usd:.4f}",
     )
     if run.error:
         header.add_row("ошибка", Text(run.error, style="red"))

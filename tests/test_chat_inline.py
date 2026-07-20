@@ -65,7 +65,7 @@ class FakeEngine:
             self.hooks.on_text_delta("**гото")
             self.hooks.on_text_delta("во**")
         if self.hooks.on_progress is not None:
-            self.hooks.on_progress(2, 100, 0.0123, 0.05)
+            self.hooks.on_progress(2, 100, 0.0123, 0.05, 0)
         self._session_id = "sess5678"
         return self.outcomes.pop(0) if self.outcomes else _outcome()
 

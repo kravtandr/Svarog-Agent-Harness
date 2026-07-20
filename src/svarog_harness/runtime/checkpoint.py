@@ -23,6 +23,8 @@ class LoopState:
     iterations: int = 0  # всего за run (стоп-кран max_iterations)
     tokens_used: int = 0
     cost_usd: float = 0.0
+    # Сумма prompt-токенов, пришедших из prefix cache провайдера (блок A §3).
+    cached_tokens: int = 0
     # prompt_tokens последнего ответа провайдера — триггер микрокомпакции (§1.4).
     last_prompt_tokens: int = 0
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
@@ -53,6 +55,7 @@ class LoopState:
             "task": self.task,
             "iterations": self.iterations,
             "tokens_used": self.tokens_used,
+            "cached_tokens": self.cached_tokens,
             "cost_usd": self.cost_usd,
             "last_prompt_tokens": self.last_prompt_tokens,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
@@ -75,6 +78,7 @@ class LoopState:
             task=raw.get("task", ""),
             iterations=raw["iterations"],
             tokens_used=raw["tokens_used"],
+            cached_tokens=raw.get("cached_tokens", 0),
             cost_usd=raw["cost_usd"],
             last_prompt_tokens=raw.get("last_prompt_tokens", 0),
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
