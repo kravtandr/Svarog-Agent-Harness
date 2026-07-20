@@ -248,6 +248,69 @@ async def test_workspace_lease_free_after_stale_heartbeat(db: AsyncSession) -> N
     await recorder.acquire_workspace_lease("/ws/a")
 
 
+async def test_merge_run_meta_preserves_concurrent_cancel_flag(tmp_path: Path) -> None:
+    """Critical 1/3: merge_run_meta не должен затирать флаг, выставленный
+    параллельно другой сессией БД, устаревшей локальной копией run.meta.
+
+    Две независимые AsyncSession на одном engine имитируют реальный сценарий:
+    loop держит run в памяти своей сессии, а gateway ставит cancel_requested
+    через свою (например, HTTP-запрос /runs/{id}/cancel, ADR-0017 §2).
+    """
+    path = tmp_path / "db" / "svarog.sqlite3"
+    init_db(path)
+    engine = create_engine(path)
+    factory = create_session_factory(engine)
+    async with factory() as session_a, factory() as session_b:
+        recorder_a = TraceRecorder(session_a)
+        recorder_b = TraceRecorder(session_b)
+        run_a = await recorder_a.start_run(task="гонка", autonomy="yolo", model="m")
+
+        # Другая сессия ставит флаг на своей копии — session_a об этом не знает.
+        run_b = await recorder_b.get_run(run_a.id)
+        assert run_b is not None
+        await recorder_b.request_cancel(run_b)
+
+        # Локальная копия session_a устарела (без cancel_requested), но
+        # merge_run_meta обязан подтянуть актуальный meta перед слиянием.
+        await recorder_a.merge_run_meta(run_a, {"phases": {"llm_call": {"ms": 10, "count": 1}}})
+
+        assert run_a.meta["cancel_requested"] is True
+        assert run_a.meta["phases"]["llm_call"]["count"] == 1
+    await engine.dispose()
+
+
+async def test_update_progress_preserves_concurrent_cancel_flag_with_cached_tokens(
+    tmp_path: Path,
+) -> None:
+    """Critical 1: тот же сценарий гонки на пути update_progress с ненулевыми
+    cached-токенами — штатный путь у любого провайдера с prompt-кэшем.
+    """
+    path = tmp_path / "db" / "svarog.sqlite3"
+    init_db(path)
+    engine = create_engine(path)
+    factory = create_session_factory(engine)
+    async with factory() as session_a, factory() as session_b:
+        recorder_a = TraceRecorder(session_a)
+        recorder_b = TraceRecorder(session_b)
+        run_a = await recorder_a.start_run(task="гонка кэша", autonomy="yolo", model="m")
+
+        run_b = await recorder_b.get_run(run_a.id)
+        assert run_b is not None
+        await recorder_b.request_cancel(run_b)
+
+        await recorder_a.update_progress(
+            run_a, iterations=1, tokens_used=100, cost_usd=0.02, cached_tokens=40
+        )
+
+        assert run_a.meta["cancel_requested"] is True
+        assert run_a.meta["cached_tokens"] == 40
+        # Refresh обязан быть узким: метрики прогресса не должны откатиться.
+        assert run_a.iterations == 1
+        assert run_a.tokens_used == 100
+        assert run_a.cost_usd == pytest.approx(0.02)
+    await engine.dispose()
+
+
 async def test_load_resumable_rejects_completed_run(db: AsyncSession, tmp_path: Path) -> None:
     provider = ScriptedProvider([_final("готово")])
     outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
