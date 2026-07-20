@@ -29,13 +29,16 @@ class ToolRegistry:
         # схема скрыта из definitions(), пока имя не попадёт в _loaded.
         self._deferred: set[str] = set()
         self._loaded: set[str] = set()
+        self._external: set[str] = set()
 
-    def register(self, tool: Tool[Any], *, deferred: bool = False) -> None:
+    def register(self, tool: Tool[Any], *, deferred: bool = False, external: bool = False) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool '{tool.name}' уже зарегистрирован")
         self._tools[tool.name] = tool
         if deferred:
             self._deferred.add(tool.name)
+        if external:
+            self._external.add(tool.name)
 
     def get(self, name: str) -> Tool[Any]:
         try:
@@ -47,11 +50,21 @@ class ToolRegistry:
         return sorted(self._tools)
 
     def definitions(self) -> list[ToolDefinition]:
-        return [
-            self._tools[name].definition()
-            for name in self.names()
-            if name not in self._deferred or name in self._loaded
+        """Схемы для промпта: встроенные → внешние → load_tool.
+
+        Порядок стабилизирует префикс промпта (блок A §3): появление и
+        загрузка MCP-инструментов дописываются в хвост и не сдвигают
+        встроенную часть. load_tool идёт последним намеренно — его
+        description содержит сводку незагруженных deferred-схем и меняется
+        при каждой загрузке.
+        """
+        visible = [
+            name for name in self.names() if name not in self._deferred or name in self._loaded
         ]
+        builtin = [n for n in visible if n not in self._external and n != _LOAD_TOOL_NAME]
+        external = [n for n in visible if n in self._external]
+        trailing = [n for n in visible if n == _LOAD_TOOL_NAME]
+        return [self._tools[name].definition() for name in builtin + external + trailing]
 
     def deferred_summaries(self) -> list[tuple[str, str]]:
         """(имя, первая строка description) незагруженных deferred-tools."""
@@ -124,3 +137,8 @@ class LoadToolTool(Tool[LoadToolArgs]):
         return ToolResult.success(
             f"схема tool '{args.name}' загружена; вызов доступен со следующей итерации"
         )
+
+
+# Берём значение с атрибута класса, а не дублируем строковый литерал: имя
+# load_tool используется в definitions() для сортировки его в самый конец.
+_LOAD_TOOL_NAME = LoadToolTool.name

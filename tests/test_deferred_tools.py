@@ -5,6 +5,7 @@ Deferred-tool зарегистрирован и исполним, но его п
 строка «имя — однострочное назначение» внутри описания load_tool.
 """
 
+import tempfile
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Checkpoint, RunState
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
+from svarog_harness.tools.file_tools import ListDirTool, ReadFileTool
 from svarog_harness.tools.registry import LoadToolTool, ToolRegistry, UnknownToolError
 from svarog_harness.trace.recorder import TraceRecorder
 
@@ -61,6 +63,38 @@ def _registry() -> ToolRegistry:
     registry.register(_CoreTool())
     registry.register(_DeferredTool(), deferred=True)
     return registry
+
+
+def tmp_workspace() -> Path:
+    """Одноразовый workspace для file-tools в тестах реестра.
+
+    Конструкторам ReadFileTool/ListDirTool достаточно валидного Path — они не
+    трогают диск, пока не вызван execute(), поэтому фикстура pytest не нужна.
+    """
+    return Path(tempfile.mkdtemp())
+
+
+class _FakeMCPArgs(BaseModel):
+    text: str = Field(description="Что вернуть обратно")
+
+
+class _FakeMCPTool(Tool[_FakeMCPArgs]):
+    """Минимальная MCP-подобная реализация: имя задаётся на инстансе, как это
+    делает настоящий MCPTool при discovery (svarog_harness.mcp.tool)."""
+
+    args_model = _FakeMCPArgs
+    risk_level = RiskLevel.HIGH
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = f"Фейковый MCP tool {name}"
+
+    async def execute(self, args: _FakeMCPArgs) -> ToolResult:
+        return ToolResult.success(args.text)
+
+
+def _fake_mcp_tool(name: str) -> Tool[_FakeMCPArgs]:
+    return _FakeMCPTool(name)
 
 
 # --- 2.1 ToolRegistry: core/deferred ------------------------------------------
@@ -292,3 +326,37 @@ async def test_resume_restores_loaded_tools(db: AsyncSession, tmp_path: Path) ->
     assert result.state is RunState.COMPLETED
     # Первая же итерация после resume видит полную схему rare_gadget.
     assert "rare_gadget" in resumed_provider.seen_tool_names[0]
+
+
+# --- 3: стабильный порядок definitions() (блок A §3) ----------------------------
+
+
+def test_definitions_keep_builtin_prefix_stable_when_external_added() -> None:
+    """Блок A §3: встроенные идут первыми и не сдвигаются при добавлении
+    MCP-инструментов — префикс промпта остаётся кэшируемым."""
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(tmp_workspace()))
+    registry.register(ListDirTool(tmp_workspace()))
+    before = [d.name for d in registry.definitions()]
+
+    registry.register(_fake_mcp_tool("mcp_alpha"), external=True)
+    after = [d.name for d in registry.definitions()]
+
+    assert after[: len(before)] == before
+    assert after[-1] == "mcp_alpha"
+
+
+def test_load_tool_is_always_last() -> None:
+    """load_tool стоит последним: его description меняется при каждой загрузке
+    deferred-схемы и не должен сдвигать ничего за собой."""
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(tmp_workspace()))
+    registry.register(_fake_mcp_tool("mcp_alpha"), deferred=True, external=True)
+    registry.register(LoadToolTool(registry))
+
+    assert [d.name for d in registry.definitions()][-1] == "load_tool"
+
+    registry.load("mcp_alpha")
+    names = [d.name for d in registry.definitions()]
+    assert names[-1] == "load_tool"
+    assert names[0] == "read_file"
