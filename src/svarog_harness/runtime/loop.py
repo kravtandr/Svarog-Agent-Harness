@@ -32,6 +32,7 @@ from svarog_harness.llm.provider import (
 from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
+from svarog_harness.runtime.history_invariant import assert_history_valid
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
@@ -277,6 +278,9 @@ class AgentLoop:
                 if self._should_microcompact(state):
                     self._microcompact(state)
                 stream_callback = None if self._saved_file_contents else self._on_text_delta
+                # Инвариант истории (блок A §1): нарушение — баг loop'а, а не
+                # дефект модели; падаем громко, историю не правим.
+                assert_history_valid(state.messages)
                 result = await self._provider.complete(
                     state.messages,
                     self._registry.definitions(),
