@@ -5,7 +5,6 @@ Deferred-tool зарегистрирован и исполним, но его п
 строка «имя — однострочное назначение» внутри описания load_tool.
 """
 
-import tempfile
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -71,7 +70,7 @@ def tmp_workspace() -> Path:
     Конструкторам ReadFileTool/ListDirTool достаточно валидного Path — они не
     трогают диск, пока не вызван execute(), поэтому фикстура pytest не нужна.
     """
-    return Path(tempfile.mkdtemp())
+    return Path("workspace")
 
 
 class _FakeMCPArgs(BaseModel):
@@ -360,3 +359,21 @@ def test_load_tool_is_always_last() -> None:
     names = [d.name for d in registry.definitions()]
     assert names[-1] == "load_tool"
     assert names[0] == "read_file"
+
+
+def test_load_tool_not_duplicated_when_registered_external() -> None:
+    """LoadToolTool зарегистрирован с external=True не дублируется в definitions.
+
+    Инвариант: load_tool исключен из внешней категории, чтобы остаться только в
+    хвосте (trailing), не попадая в пересечение builtin/external/trailing.
+    """
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(tmp_workspace()))
+    load_tool = LoadToolTool(registry)
+    registry.register(load_tool, external=True)
+
+    names = [d.name for d in registry.definitions()]
+    # Ровно один load_tool в результате.
+    assert names.count("load_tool") == 1
+    # Он остаётся последним.
+    assert names[-1] == "load_tool"
