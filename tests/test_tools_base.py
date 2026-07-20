@@ -1,7 +1,6 @@
 """Тесты Tool base и ToolRegistry: валидация, timeout, definitions."""
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,6 +10,7 @@ from svarog_harness.llm.provider import ToolCallRequest
 from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult
 from svarog_harness.tools.file_tools import ReadFileTool
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
+from tests.conftest import tmp_workspace
 
 
 class EchoArgs(BaseModel):
@@ -123,15 +123,6 @@ def test_concurrency_safe_follows_read_only_override() -> None:
     args = EchoArgs(text="x")
     assert tool.is_read_only(args) is True
     assert tool.is_concurrency_safe(args) is True
-
-
-def tmp_workspace() -> Path:
-    """Одноразовый workspace для file-tools в тестах реестра.
-
-    Конструктору ReadFileTool достаточно валидного Path — он не трогает
-    диск, пока не вызван execute(), поэтому фикстура pytest не нужна.
-    """
-    return Path("workspace")
 
 
 class _ArgsWithArgumentsField(BaseModel):

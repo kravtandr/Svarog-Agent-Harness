@@ -152,8 +152,8 @@ async def test_suspended_run_resumes_and_completes(db: AsyncSession, tmp_path: P
     assert result.iterations == 3
     # Токены накоплены за все итерации, включая до приостановки.
     assert result.tokens_used == 45
-    # Important 5: накопитель фаз (блок A §5) тоже учитывает вызовы модели
-    # и до приостановки, и после — центральное требование к resume.
+    # Накопитель фаз (блок A §5) тоже учитывает вызовы модели и до
+    # приостановки, и после — центральное требование к resume.
     assert run.meta["phases"]["llm_call"]["count"] == 3
 
     # Нумерация сообщений продолжилась без конфликтов UniqueConstraint.
@@ -163,9 +163,9 @@ async def test_suspended_run_resumes_and_completes(db: AsyncSession, tmp_path: P
 
 
 async def test_resume_survives_malformed_phase_meta(db: AsyncSession, tmp_path: Path) -> None:
-    """Critical 2: Run.meta["phases"] со строкой/числом вместо словаря не
-    должен ронять resume() исключением до перевода run в failed — таймер
-    просто игнорирует испорченный агрегат и продолжает с нуля."""
+    """Run.meta["phases"] со строкой/числом вместо словаря не должен ронять
+    resume() исключением до перевода run в failed — таймер просто игнорирует
+    испорченный агрегат и продолжает с нуля."""
     provider = ScriptedProvider([_final("после resume")])
     recorder = TraceRecorder(db)
     run = await recorder.start_run(task="задача", autonomy="yolo", model="test-model")
@@ -277,8 +277,8 @@ async def test_workspace_lease_free_after_stale_heartbeat(db: AsyncSession) -> N
 
 
 async def test_merge_run_meta_preserves_concurrent_cancel_flag(tmp_path: Path) -> None:
-    """Critical 1/3: merge_run_meta не должен затирать флаг, выставленный
-    параллельно другой сессией БД, устаревшей локальной копией run.meta.
+    """merge_run_meta не должен затирать флаг, выставленный параллельно
+    другой сессией БД, устаревшей локальной копией run.meta.
 
     Две независимые AsyncSession на одном engine имитируют реальный сценарий:
     loop держит run в памяти своей сессии, а gateway ставит cancel_requested
@@ -310,7 +310,7 @@ async def test_merge_run_meta_preserves_concurrent_cancel_flag(tmp_path: Path) -
 async def test_update_progress_preserves_concurrent_cancel_flag_with_cached_tokens(
     tmp_path: Path,
 ) -> None:
-    """Critical 1: тот же сценарий гонки на пути update_progress с ненулевыми
+    """Тот же сценарий гонки на пути update_progress с ненулевыми
     cached-токенами — штатный путь у любого провайдера с prompt-кэшем.
     """
     path = tmp_path / "db" / "svarog.sqlite3"

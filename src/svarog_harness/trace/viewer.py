@@ -265,8 +265,8 @@ def render_run(
     )
     phases = (run.meta or {}).get("phases")
     # Испорченный meta (не словарь целиком, либо словарь без ожидаемых ключей
-    # в записи фазы) не должен ронять traces show (Minor 10) — .get(..., 0)
-    # и явная проверка типа phases вместо голого доступа к ключам.
+    # в записи фазы) не должен ронять traces show — .get(..., 0) и явная
+    # проверка типа phases вместо голого доступа к ключам.
     if isinstance(phases, dict) and phases:
         parts = [
             f"{name} {entry.get('ms', 0)}мс×{entry.get('count', 0)}"

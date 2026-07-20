@@ -210,8 +210,8 @@ class AgentLoop:
         # Тайминги фаз хода (блок A §5): __init__ заводит пустой таймер на
         # случай использования без resume(). run() всегда стартует свежий Run
         # без phases (start_run) — там таймер переинициализируется, а не
-        # восстанавливается (Minor 11: restore() был бы no-op для нового run'а,
-        # но протёк бы накопленное прошлого run'а при переиспользовании
+        # восстанавливается (restore() был бы no-op для нового run'а, но
+        # протёк бы накопленное прошлого run'а при переиспользовании
         # экземпляра AgentLoop). resume() поверх этого восстанавливает
         # накопленное из Run.meta["phases"] через restore() — там это осмысленно.
         self._phases = PhaseTimer()
@@ -241,7 +241,7 @@ class AgentLoop:
         if self._on_run_started is not None:
             self._on_run_started(run)
         # Свежий Run от start_run никогда не несёт phases — чистый таймер,
-        # а не restore() (Minor 11, см. комментарий в __init__).
+        # а не restore() (см. комментарий в __init__).
         self._phases = PhaseTimer()
         messages = build_initial_messages(
             task,
@@ -263,9 +263,9 @@ class AgentLoop:
         # Восстановить раскрытые deferred-схемы (ADR-0015 фаза 2): реестр
         # собран заново и без этого «забыл» бы загруженное моделью.
         self._registry.restore_loaded(state.loaded_tools)
-        # Critical 2: без dict(...) обёртки — на не-словаре (строка/число из
-        # испорченного meta) PhaseTimer.restore делает ранний возврат вместо
-        # ValueError/TypeError, которые раньше улетали из resume() до try.
+        # Без dict(...) обёртки — на не-словаре (строка/число из испорченного
+        # meta) PhaseTimer.restore делает ранний возврат вместо ValueError/
+        # TypeError, которые иначе улетели бы из resume() до try.
         self._phases.restore((run.meta or {}).get("phases", {}))
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)

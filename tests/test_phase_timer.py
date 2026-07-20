@@ -8,14 +8,27 @@ from svarog_harness.runtime.phase_timer import PhaseTimer
 
 def _fake_clock(monkeypatch: pytest.MonkeyPatch, ticks: list[float]) -> None:
     """Подменить time.monotonic() детерминированной последовательностью
-    отсчётов (Minor 9): без этого `ms >= 0`/`ms >= 500` проходят даже у
-    реализации, где длительность всегда ноль, и ничего не доказывают.
+    отсчётов: без этого `ms >= 0`/`ms >= 500` проходят даже у реализации,
+    где длительность всегда ноль, и ничего не доказывают.
+
+    Подмена локализована атрибутом модуля `phase_timer` (`phase_timer.time`),
+    а не полем глобального модуля `time` — иначе любой посторонний вызов
+    `time.monotonic()` в процессе (например, из другого теста или библиотеки)
+    съедал бы тик из итератора и портил точные утверждения ниже.
 
     Тики — двоично-точные дроби (1/4, 1/8...), чтобы вычитание в measure()
     не зависело от округления float и итоговые ms проверялись точным числом.
+    Генератор без значения по умолчанию: исчерпание тиков роняет измеряемый
+    код громко (StopIteration), а не тихо возвращает произвольное время.
     """
     values = iter(ticks)
-    monkeypatch.setattr(phase_timer_module.time, "monotonic", lambda: next(values))
+
+    class _FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return next(values)
+
+    monkeypatch.setattr(phase_timer_module, "time", _FakeTime())
 
 
 def test_measure_accumulates_time_and_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,11 +98,11 @@ def test_restore_ignores_malformed_meta(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_restore_ignores_non_dict_meta(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Critical 2: meta целиком не словарь (строка/число) — ранний возврат,
-    а не ValueError/TypeError (регрессия на реальный вызов из resume())."""
+    """meta целиком не словарь (строка/число) — ранний возврат, а не
+    ValueError/TypeError (регрессия на реальный вызов из resume())."""
     _fake_clock(monkeypatch, [0.0, 0.25])
     timer = PhaseTimer()
-    timer.restore("мусор целиком")  # type: ignore[arg-type]
+    timer.restore("мусор целиком")
     with timer.measure("llm_call"):
         pass
 
