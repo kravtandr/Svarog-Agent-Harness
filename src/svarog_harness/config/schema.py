@@ -258,6 +258,16 @@ class CloudConfig(StrictModel):
     warm_session_ttl_sec: int = Field(default=900, ge=0)
 
 
+class SchedulerConfig(StrictModel):
+    """Демон расписания `svarog scheduler` (ADR-0019).
+
+    Отдельный процесс: `serve` джобы НЕ исполняет. Джоба, чей workspace занят
+    интерактивной работой, пропускает тик и пробует на следующем.
+    """
+
+    interval_sec: int = Field(default=30, gt=0)
+
+
 class SupervisorConfig(StrictModel):
     """Авто-поднятие refuel-suspended runs в долгоживущих процессах (§6.10).
 
@@ -423,6 +433,7 @@ class SvarogConfig(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
