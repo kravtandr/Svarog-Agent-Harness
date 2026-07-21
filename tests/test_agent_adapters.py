@@ -239,8 +239,12 @@ def test_claude_context_steers_memory_to_mcp() -> None:
 
 def test_capability_matrix() -> None:
     claude = adapter_for(ExternalExecutorConfig(image="i", adapter="claude-code"))
-    codex = adapter_for(ExternalExecutorConfig(image="i", adapter="codex"))
-    opencode = adapter_for(ExternalExecutorConfig(image="i", adapter="opencode"))
+    codex = adapter_for(
+        ExternalExecutorConfig(image="i", adapter="codex", base_url="https://openrouter.ai/api")
+    )
+    opencode = adapter_for(
+        ExternalExecutorConfig(image="i", adapter="opencode", base_url="https://openrouter.ai/api")
+    )
     # Полный tier 2 — только у claude-code; supervised с другими — fail-closed.
     assert claude.capabilities().hooks and claude.capabilities().mcp
     assert not codex.capabilities().hooks and not codex.capabilities().mcp

@@ -6,7 +6,7 @@
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Self
+from typing import ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
@@ -378,6 +378,28 @@ class ExternalExecutorConfig(StrictModel):
     enforcement: Literal["containment", "cooperative"] = "containment"
     # Grace-ожидание решения человека до suspend всего run (§7).
     approval_grace_sec: int = Field(default=120, gt=0)
+
+    # Адаптеры с openai-совместимым LLM-трафиком (wire=openai): дефолтный
+    # anthropic-endpoint для них — гарантированная ошибка в рантайме
+    # («Invalid Anthropic API Key», найдено прогоном 21.07.2026).
+    _OPENAI_WIRE_ADAPTERS: ClassVar[frozenset[str]] = frozenset({"opencode", "codex"})
+
+    @model_validator(mode="after")
+    def _check_base_url(self) -> Self:
+        if self.adapter in self._OPENAI_WIRE_ADAPTERS:
+            if self.base_url == "https://api.anthropic.com":
+                raise ValueError(
+                    f"adapter='{self.adapter}' шлёт openai-трафик: задайте "
+                    "executor.external.base_url вашего OpenAI-совместимого "
+                    "провайдера (например https://openrouter.ai/api — БЕЗ /v1)"
+                )
+            if self.base_url.rstrip("/").endswith("/v1"):
+                raise ValueError(
+                    "executor.external.base_url задаётся БЕЗ суффикса /v1 — "
+                    "адаптер добавляет его сам (в отличие от "
+                    "models.providers.*.base_url, где /v1 нужен)"
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_auth(self) -> Self:
