@@ -75,6 +75,14 @@ class OpencodeAdapter:
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
         sections.append(ask_user_guide("svarog_ask_user"))
+        # Наблюдение 21.07.2026 (S13): модель дописывала файл через write с
+        # одним лишь новым фрагментом — write перезаписывает файл целиком.
+        sections.append(
+            "# Работа с файлами\n\n"
+            "`write` перезаписывает файл ЦЕЛИКОМ. Чтобы дописать или изменить "
+            "существующий файл, используй `edit`; если всё же пишешь через "
+            "`write` — передавай ПОЛНОЕ итоговое содержимое файла."
+        )
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
         return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
