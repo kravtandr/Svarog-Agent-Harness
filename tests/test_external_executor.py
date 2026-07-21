@@ -156,7 +156,11 @@ def test_subscription_requires_oauth_ref() -> None:
 def test_subscription_only_claude_code() -> None:
     with pytest.raises(ValidationError, match="claude-code"):
         ExternalExecutorConfig(
-            image="img:1", adapter="codex", auth="subscription", oauth_token_ref="TOK"
+            image="img:1",
+            adapter="codex",
+            base_url="https://openrouter.ai/api",
+            auth="subscription",
+            oauth_token_ref="TOK",
         )
 
 
@@ -575,7 +579,11 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
     (ws3 / "svarog.yaml").write_text(
         (ws2 / "svarog.yaml")
         .read_text(encoding="utf-8")
-        .replace("    image: img:1\n", "    image: img:1\n    adapter: codex\n"),
+        .replace(
+            "    image: img:1\n",
+            "    image: img:1\n    adapter: codex\n"
+            "    base_url: https://openrouter.ai/api\n",
+        ),
         encoding="utf-8",
     )
     runner3 = TaskRunner(
@@ -616,3 +624,26 @@ async def test_autonomy_gate_fires_before_task_branch(
         ["git", "branch", "--list", "svarog/*"], cwd=ws, capture_output=True, text=True
     ).stdout.strip()
     assert branches == ""
+
+
+def test_openai_wire_adapter_rejects_default_anthropic_base_url() -> None:
+    """wire=openai с anthropic-дефолтом — гарантированный рантайм-отказ
+    («Invalid Anthropic API Key», кампания 21.07.2026) — ловим на конфиге."""
+    with pytest.raises(ValidationError, match="base_url"):
+        ExternalExecutorConfig(adapter="opencode", image="img", api_key_ref="K")
+
+
+def test_external_base_url_rejects_v1_suffix() -> None:
+    """Адаптер добавляет /v1 сам: суффикс в конфиге даёт …/v1/v1 → 404."""
+    with pytest.raises(ValidationError, match="/v1"):
+        ExternalExecutorConfig(
+            adapter="opencode",
+            image="img",
+            api_key_ref="K",
+            base_url="https://openrouter.ai/api/v1",
+            model="m",
+        )
+
+
+def test_claude_code_default_base_url_still_valid() -> None:
+    ExternalExecutorConfig(adapter="claude-code", image="img", api_key_ref="K")
