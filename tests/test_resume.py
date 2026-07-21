@@ -21,7 +21,14 @@ from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import Approval, Checkpoint, Message, Run, RunState
+from svarog_harness.storage.models import (
+    Approval,
+    Checkpoint,
+    Message,
+    Run,
+    RunState,
+    ToolCall,
+)
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
@@ -49,6 +56,8 @@ class _HighRiskTool(Tool[_NoArgs]):
 class ScriptedProvider(ModelProvider):
     def __init__(self, turns: list[CompletionResult]) -> None:
         self.turns = list(turns)
+        # Запросы к модели — сырьё для проверок того, что именно она увидела.
+        self.seen_messages: list[list[ChatMessage]] = []
 
     async def complete(
         self,
@@ -57,6 +66,7 @@ class ScriptedProvider(ModelProvider):
         *,
         on_text_delta: Callable[[str], None] | None = None,
     ) -> CompletionResult:
+        self.seen_messages.append(list(messages))
         return self.turns.pop(0)
 
 
@@ -430,3 +440,66 @@ async def test_manual_resume_resets_refuel_round_cap(db: AsyncSession, tmp_path:
 
     assert resumed.state is RunState.COMPLETED
     assert resumed.final_answer == "готово"
+
+
+async def test_resume_history_comes_only_from_checkpoint(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок B §6: история при resume берётся ТОЛЬКО из блоба checkpoint'а.
+
+    Слияния с сообщениями из trace не происходит, поэтому дублирования быть
+    не может по построению. Тест запирает инвариант, который иначе держится
+    только на устройстве кода.
+    """
+    provider = ScriptedProvider([_final("готово")])
+    loop = _loop(provider, db, tmp_path)
+    recorder = TraceRecorder(db)
+    run = await recorder.start_run(task="задача", autonomy="yolo", model="test-model")
+
+    messages = [
+        ChatMessage(role="system", content="системный промпт"),
+        ChatMessage(role="user", content="задача"),
+    ]
+    # В trace кладём ЛИШНЕЕ сообщение, которого нет в checkpoint: если resume
+    # подмешивал бы историю из trace, модель увидела бы его.
+    await recorder.add_message(run, "assistant", {"content": "постороннее из trace"})
+
+    state = LoopState(workspace=tmp_path, messages=list(messages), task="задача")
+    outcome = await loop.resume(run, state)
+
+    assert outcome.state is RunState.COMPLETED
+    sent = provider.seen_messages[0]
+    assert [(m.role, m.content) for m in sent] == [(m.role, m.content) for m in messages]
+    assert all("постороннее" not in m.content for m in sent)
+
+
+async def test_resume_reexecutes_write_ahead_calls_at_least_once(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Блок B §6: незакрытые write-ahead вызовы доисполняются при resume.
+
+    Это документированное свойство ADR-0005 (at-least-once, а не at-most-once),
+    а не дефект: тест фиксирует его, чтобы будущая правка не «починила» его
+    случайно.
+    """
+    (tmp_path / "a.txt").write_text("содержимое", encoding="utf-8")
+    provider = ScriptedProvider([_final("готово")])
+    loop = _loop(provider, db, tmp_path)
+    recorder = TraceRecorder(db)
+    run = await recorder.start_run(task="задача", autonomy="yolo", model="test-model")
+
+    pending = ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}')
+    state = LoopState(
+        workspace=tmp_path,
+        messages=[
+            ChatMessage(role="system", content="системный промпт"),
+            ChatMessage(role="user", content="задача"),
+            ChatMessage(role="assistant", content="", tool_calls=(pending,)),
+        ],
+        task="задача",
+        pending_tool_calls=(pending,),
+    )
+    outcome = await loop.resume(run, state)
+
+    assert outcome.state is RunState.COMPLETED
+    calls = (await db.scalars(select(ToolCall).where(ToolCall.run_id == run.id))).all()
+    assert len(calls) == 1
+    assert calls[0].tool_name == "read_file"
