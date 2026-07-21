@@ -364,17 +364,29 @@ class TraceRecorder:
         не блокируют — их подберёт recovery. Single-writer у workspace: gateway
         не запускает второй run на залоченном рабочем дереве (ADR-0015 §0.5).
         """
+        run = await self.live_run_on_workspace(workspace)
+        if run is not None:
+            raise WorkspaceBusyError(
+                f"workspace занят активным run {run.id[:8]} "
+                f"(heartbeat {run.heartbeat_at.isoformat() if run.heartbeat_at else '—'}): "
+                f"дождитесь его завершения или приостановите (ADR-0015 §0.5)"
+            )
+
+    async def live_run_on_workspace(self, workspace: str) -> Run | None:
+        """Живой RUNNING-run на этом workspace, если он есть.
+
+        Read-only: планировщик спрашивает занятость, чтобы пропустить тик
+        (ADR-0019), а не чтобы упасть. Порог живости общий с lease — иначе два
+        механизма разошлись бы в понимании «процесс жив».
+        """
         cutoff = utcnow() - timedelta(seconds=_HEARTBEAT_STALE_SEC)
         result = await self._db.execute(
             select(Run).where(Run.state == RunState.RUNNING, Run.workspace == workspace)
         )
         for run in result.scalars():
             if run.heartbeat_at is not None and run.heartbeat_at >= cutoff:
-                raise WorkspaceBusyError(
-                    f"workspace занят активным run {run.id[:8]} "
-                    f"(heartbeat {run.heartbeat_at.isoformat()}): дождитесь его завершения "
-                    f"или приостановите (ADR-0015 §0.5)"
-                )
+                return run
+        return None
 
     async def update_progress(
         self,
