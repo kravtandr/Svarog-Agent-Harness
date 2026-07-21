@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -582,3 +583,36 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
     )
     with pytest.raises(SandboxError, match="hook"):
         runner3.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
+
+
+async def test_autonomy_gate_fires_before_task_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ гейта автономии не должен оставлять мусорную task-ветку (S15a,
+    кампания 21.07.2026: workspace оставался на svarog/*, а checkout master
+    терял svarog.yaml)."""
+    ws = _make_workspace(
+        tmp_path,
+        extra_yaml=(
+            "executor:\n  type: external\n  external:\n    image: img:1\n"
+            "    adapter: opencode\n"
+            "    base_url: https://openrouter.ai/api\n"
+            f"skills:\n  paths: ['{tmp_path / 'skills'}']\n"
+        ),
+    )
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.name=T", "-c", "user.email=t@localhost", "commit", "-qm", "init"],
+    ):
+        subprocess.run(argv, cwd=ws, check=True)
+
+    runner = TaskRunner(load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml"), ws)
+    # Сужаем тест до порядка гейтов: sandbox-проверка не должна требовать docker.
+    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
+    with pytest.raises(SandboxError, match="cooperative"):
+        await runner.run_once("задача", AutonomyMode.SUPERVISED, hooks=RunHooks())
+    branches = subprocess.run(
+        ["git", "branch", "--list", "svarog/*"], cwd=ws, capture_output=True, text=True
+    ).stdout.strip()
+    assert branches == ""
