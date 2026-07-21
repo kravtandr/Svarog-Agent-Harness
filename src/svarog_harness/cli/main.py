@@ -1058,13 +1058,51 @@ def _show_approval(approval: Approval) -> None:
         console.print(f"  причина: {payload['reason']}")
 
 
+def _pick_option_sync(
+    title: str, values: list[tuple[str, str]], default: str | None = None
+) -> str | None:
+    """Radiolist (↑↓ + Enter) из sync-контекста; None — Esc или нет tty.
+
+    Гейт-промпты вызываются из worker-потока bridge'а (§7) — свой event loop
+    через asyncio.run безопасен; при любом сбое терминала вызывающий обязан
+    откатиться на текстовый промпт.
+    """
+    from svarog_harness.cli.chat_picker import pick_option
+
+    try:
+        return asyncio.run(pick_option(title, values, default=default))
+    except Exception:  # noqa: BLE001 — нет tty/термкапс: фолбэк на текст
+        return None
+
+
+# Сентинел пункта «свой ответ…» в списке вариантов ask_user (не пересекается
+# с текстом вариантов — управляющий символ в ответах модели невозможен).
+_CUSTOM_ANSWER = "\x00custom"
+
+
 def _confirm_approval(cfg: SvarogConfig, approval: Approval, *, decided_by: str) -> None:
     """Показать действие и записать вердикт человека из терминала."""
     _show_approval(approval)
-    approved = typer.confirm("одобрить действие?", default=False)
-    reason = None
-    if not approved:
-        reason = typer.prompt("причина отказа", default="", show_default=False) or None
+    choice = _pick_option_sync(
+        "approval",
+        [
+            ("approve", "Одобрить"),
+            ("deny", "Отклонить"),
+            ("deny-reason", "Отклонить с причиной…"),
+        ],
+        default="deny",
+    )
+    if choice is None:
+        # Esc или терминал без диалогов — классический y/n.
+        approved = typer.confirm("одобрить действие?", default=False)
+        reason = None
+        if not approved:
+            reason = typer.prompt("причина отказа", default="", show_default=False) or None
+    else:
+        approved = choice == "approve"
+        reason = None
+        if choice == "deny-reason":
+            reason = typer.prompt("причина отказа", default="", show_default=False) or None
     record_gate_decision(cfg, approval.id, approved=approved, reason=reason, decided_by=decided_by)
 
 
@@ -1115,13 +1153,26 @@ def _interactive_approvals(
 
 
 def _answer_question_interactive(cfg: SvarogConfig, approval: Approval) -> None:
-    """ask_user: показать вопрос и записать текстовый ответ (§6.5)."""
+    """ask_user: показать вопрос и записать ответ (§6.5).
+
+    Если агент передал options — показать их radiolist'ом (↑↓ + Enter) с
+    пунктом «свой ответ…»; иначе (или при Esc/недоступном диалоге) —
+    свободный текстовый промпт.
+    """
     payload = approval.payload or {}
     console.print(f"[bold]вопрос {approval.id[:8]}[/bold] | run {approval.run_id[:8]}")
     console.print(f"  [cyan]{payload.get('question') or payload.get('reason') or ''}[/cyan]")
-    answer = typer.prompt(
-        "ваш ответ (Enter — продолжить без ответа)", default="", show_default=False
-    )
+    options = [o for o in payload.get("options") or [] if isinstance(o, str) and o.strip()]
+    answer: str | None = None
+    if options:
+        values = [(o, o) for o in options] + [(_CUSTOM_ANSWER, "свой ответ…")]
+        choice = _pick_option_sync("вопрос агента", values)
+        if choice is not None and choice != _CUSTOM_ANSWER:
+            answer = choice
+    if answer is None:
+        answer = typer.prompt(
+            "ваш ответ (Enter — продолжить без ответа)", default="", show_default=False
+        )
     record_gate_answer(cfg, approval.id, answer, answered_by="cli")
 
 

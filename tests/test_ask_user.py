@@ -165,3 +165,31 @@ async def test_pending_within_deadline_keeps_waiting(db: AsyncSession, tmp_path:
     assert resumed.state is RunState.WAITING_APPROVAL
     approvals = (await db.execute(select(Approval))).scalars().all()
     assert len(approvals) == 1
+
+
+async def test_ask_user_options_land_in_payload(db: AsyncSession, tmp_path: Path) -> None:
+    """options из аргументов tool'а доезжают до payload approval'а — UI
+    показывает их человеку списком (выбор стрелочками)."""
+    args = '{"question": "какой цвет?", "options": ["красный", "синий", "", 42]}'
+    turn = CompletionResult(
+        content="",
+        tool_calls=(ToolCallRequest(id="q1", name="ask_user", arguments_json=args),),
+        usage=Usage(10, 5),
+        finish_reason="tool_calls",
+    )
+    provider = ScriptedProvider([turn, _final("готово")])
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.WAITING_APPROVAL
+    approval = (await db.execute(select(Approval))).scalars().one()
+    # Пустые строки и не-строки отфильтрованы.
+    assert approval.payload["options"] == ["красный", "синий"]
+
+
+async def test_ask_user_without_options_keeps_payload_clean(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    provider = ScriptedProvider([_ask_turn(), _final("готово")])
+    await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+    approval = (await db.execute(select(Approval))).scalars().one()
+    assert "options" not in approval.payload

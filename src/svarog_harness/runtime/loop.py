@@ -45,7 +45,7 @@ from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
 from svarog_harness.tools.guidance import BoundaryKind, note_for
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
-from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME
+from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME, question_options
 from svarog_harness.trace.recorder import TraceRecorder
 
 # Сообщения агенту, когда ответа на ask_user нет (§6.5): не ошибка — сигнал
@@ -903,6 +903,9 @@ class AgentLoop:
                 if approval.call.name == ASK_USER_TOOL_NAME:
                     payload["question"] = approval.arguments.get("question", "")
                     payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
+                    options = question_options(approval.arguments)
+                    if options:
+                        payload["options"] = options
                 await self._recorder.create_approval(
                     run,
                     action_type=approval.decision.action_type,

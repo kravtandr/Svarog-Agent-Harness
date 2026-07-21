@@ -675,3 +675,39 @@ def test_handle_error_suppresses_connection_resets(capsys) -> None:
         assert "ValueError" in capsys.readouterr().err
     finally:
         server.server_close()
+
+
+async def test_ask_user_options_land_in_bridge_payload(db: AsyncSession, tmp_path: Path) -> None:
+    """options из MCP-вызова ask_user доезжают до payload approval'а — UI
+    показывает их списком (та же форма, что у нативного пути)."""
+    control = _control(tmp_path, grace_sec=0.3)
+    run_id = await _start_run(db, str(tmp_path))
+    control.run_id = run_id
+
+    async def answer_soon() -> None:
+        recorder = TraceRecorder(db)
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            approvals = list((await db.execute(select(Approval))).scalars())
+            if approvals:
+                await recorder.answer_question(approvals[0], answer="синий", answered_by="tester")
+                return
+
+    answer_task = asyncio.create_task(answer_soon())
+    await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "ask_user",
+                "arguments": {
+                    "question": "какой цвет?",
+                    "options": ["красный", "синий", "", 7],
+                },
+            },
+        }
+    )
+    await answer_task
+    approval = list((await db.execute(select(Approval))).scalars())[0]
+    assert approval.payload["options"] == ["красный", "синий"]
