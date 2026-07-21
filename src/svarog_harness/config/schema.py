@@ -199,6 +199,8 @@ class CuratorConfig(StrictModel):
     archive_after_days: int = Field(default=90, gt=0)
     # Слой 2 (LLM-консолидация) выключен по умолчанию — opt-in (ADR-0009).
     semantic: bool = False
+    # Блок D: как часто системная джоба планировщика гоняет слой 1 (ADR-0019).
+    prune_interval_sec: int = Field(default=86_400, gt=0)
 
     @model_validator(mode="after")
     def _check_thresholds(self) -> Self:
@@ -256,6 +258,16 @@ class CloudConfig(StrictModel):
     # секунд простоя. 0 — выключено (sandbox на каждый run, как раньше).
     # Trade-off для внешнего агента: budget bridge действует на серию (CLI-chat).
     warm_session_ttl_sec: int = Field(default=900, ge=0)
+
+
+class SchedulerConfig(StrictModel):
+    """Демон расписания `svarog scheduler` (ADR-0019).
+
+    Отдельный процесс: `serve` джобы НЕ исполняет. Джоба, чей workspace занят
+    интерактивной работой, пропускает тик и пробует на следующем.
+    """
+
+    interval_sec: int = Field(default=30, gt=0)
 
 
 class SupervisorConfig(StrictModel):
@@ -423,6 +435,7 @@ class SvarogConfig(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)

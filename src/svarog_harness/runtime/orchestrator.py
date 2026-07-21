@@ -49,6 +49,8 @@ from svarog_harness.sandbox import (
     create_environment,
     find_docker,
 )
+from svarog_harness.scheduler.schedule import next_run_after
+from svarog_harness.scheduler.store import JobStore
 from svarog_harness.secrets import (
     SecretStore,
     default_secret_store,
@@ -65,6 +67,7 @@ from svarog_harness.storage.locks import LockBackend, default_lock_backend
 from svarog_harness.storage.models import (
     Approval,
     ApprovalStatus,
+    JobOrigin,
     Run,
     RunState,
     SkillProposal,
@@ -81,6 +84,7 @@ from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import LoadToolTool, ToolRegistry
+from svarog_harness.tools.schedule_tools import ScheduleRequest, ScheduleTaskTool
 from svarog_harness.tools.shell import BashTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import AskUserTool
@@ -372,6 +376,7 @@ class TaskRunner:
         autonomy: AutonomyMode,
         hooks: RunHooks,
         proposal_sink: list[SkillProposalRequest] | None = None,
+        schedule_sink: list[ScheduleRequest] | None = None,
         *,
         excluded_skills: frozenset[str] = frozenset(),
         mcp_tools: list[MCPTool] | None = None,
@@ -413,6 +418,7 @@ class TaskRunner:
             memory_sink,
             plan_update_sink,
             proposal_sink,
+            schedule_sink,
             mem_dir=mem_dir,
             mcp_tools=mcp_tools,
             child_spawn=child_spawn,
@@ -565,6 +571,7 @@ class TaskRunner:
         memory_sink: list[dict[str, object]],
         plan_update_sink: list[dict[str, object]],
         proposal_sink: list[SkillProposalRequest] | None,
+        schedule_sink: list[ScheduleRequest] | None,
         *,
         mem_dir: Path | None,
         mcp_tools: list[MCPTool] | None = None,
@@ -615,6 +622,10 @@ class TaskRunner:
             )
             # Прогрессивная загрузка (ADR-0011): страницы памяти по требованию.
             registry.register(ReadMemoryTool(mem_dir))
+        if schedule_sink is not None:
+            # schedule.create — неотключаемый critical-набор (ADR-0010):
+            # approval требуется в любом режиме автономии.
+            registry.register(ScheduleTaskTool(on_enqueue=schedule_sink.append))
         if proposal_sink is not None:
             # Skill governance (Flow B, §18): агент предлагает скиллы через proposal,
             # прямые правки skills/ запрещены policy.
@@ -895,6 +906,7 @@ class TaskRunner:
                 # том же рабочем дереве отклоняется, пока первый жив (heartbeat).
                 await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
+                schedule_sink: list[ScheduleRequest] = []
                 if external:
                     # Data-plane — внешний агент (ADR-0016): память и скиллы
                     # доступны агенту через MCP-сервер bridge (§4).
@@ -943,6 +955,7 @@ class TaskRunner:
                         autonomy,
                         replace(hooks, on_run_started=_on_run_started),
                         proposal_sink,
+                        schedule_sink,
                         excluded_skills=excluded,
                         mcp_tools=mcp_tools,
                         child_spawn=spawn,
@@ -950,6 +963,7 @@ class TaskRunner:
                     outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
+                await self.drain_schedule(db, schedule_sink, self._workspace, hooks)
                 failed_checks = await self.verify(env, recorder, outcome, hooks)
                 if failed_checks:
                     error = f"verifier: {failed_checks} проверок не прошли"
@@ -1214,6 +1228,42 @@ class TaskRunner:
         for row in await writer.drain(known_values=self.known_secret_values()):
             if hooks.on_memory is not None:
                 hooks.on_memory(row.commit_sha, row.error)
+
+    async def drain_schedule(
+        self,
+        db: AsyncSession,
+        requests: list[ScheduleRequest],
+        workspace: Path,
+        hooks: RunHooks,
+    ) -> None:
+        """Материализовать одобренные заявки на джобы (ADR-0019, блок D §7).
+
+        Заявка сюда попадает только если инструмент реально исполнился, то есть
+        approval уже получен: `schedule.create` — неотключаемый critical-набор.
+        Поэтому джоба заводится сразу включённой; права замораживаются здесь —
+        автономия наследуется от run'а, дайджест конфига берётся текущий.
+        """
+        if not requests:
+            return
+        store = JobStore(db)
+        for request in requests:
+            first = next_run_after(request.kind, request.spec, request.tz, utcnow())
+            job = await store.create(
+                name=request.name,
+                kind=request.kind,
+                spec=request.spec,
+                tz=request.tz,
+                task=request.task,
+                workspace=str(workspace),
+                autonomy=self._cfg.runtime.autonomy.value,
+                config_digest=config_digest(self._cfg, workspace),
+                origin=JobOrigin.AGENT,
+                first_run_at=first,
+            )
+            await store.set_enabled(job, True)
+            if hooks.on_notify is not None:
+                hooks.on_notify("schedule", f"джоба «{job.name}» создана и включена ({job.id[:8]})")
+        requests.clear()
 
     async def drain_proposals(
         self,

@@ -20,11 +20,17 @@ from svarog_harness.llm.provider import (
 )
 from svarog_harness.runtime import orchestrator
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
+from svarog_harness.scheduler.store import JobStore
 from svarog_harness.skills.curator import CuratorStore, prune_layer1
 from svarog_harness.skills.loader import scan_skills
 from svarog_harness.skills.models import Skill
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import SkillLifecycleStatus, utcnow
+from svarog_harness.storage.models import (
+    JobOrigin,
+    ScheduleKind,
+    SkillLifecycleStatus,
+    utcnow,
+)
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.trace.viewer import fetch_run
 
@@ -178,3 +184,66 @@ async def test_archived_skill_excluded_from_run(
 
     text = await runner.with_db(tool_messages)
     assert "не найден" in text  # archived-скилл недоступен через read_skill
+
+
+# --- Блок D §8: скиллы, используемые джобами планировщика --------------------
+
+
+async def test_skill_used_by_enabled_job_is_not_archived(db: AsyncSession, tmp_path: Path) -> None:
+    """Скилл, загружавшийся в run'е включённой джобы, не архивируется.
+
+    Иначе редко срабатывающая автоматизация теряла бы свой скилл — точка
+    расширения, помеченная в pruning.py до появления планировщика.
+    """
+    skills = _make_skills(tmp_path / "skills", {"greeter": "agent"})
+    recorder = TraceRecorder(db)
+    store = JobStore(db)
+    job = await store.create(
+        name="ночная",
+        kind=ScheduleKind.EVERY,
+        spec="3600",
+        tz="UTC",
+        task="поздоровайся",
+        workspace=str(tmp_path),
+        autonomy="supervised",
+        config_digest="d",
+        origin=JobOrigin.HUMAN,
+        first_run_at=utcnow(),
+    )
+    await store.set_enabled(job, True)
+
+    run = await recorder.start_run(task="поздоровайся", autonomy="supervised", model="m")
+    await recorder.merge_run_meta(run, {"cron_job_id": job.id})
+    await recorder.log_skill_load(run, skill_name="greeter", skill_version=None)
+
+    transitions = await prune_layer1(db, skills, _CFG, now=utcnow() + timedelta(days=100))
+    assert transitions == []
+    assert await CuratorStore(db).archived_names() == set()
+
+
+async def test_skill_used_by_disabled_job_is_archived(db: AsyncSession, tmp_path: Path) -> None:
+    """Выключенная джоба скилл не защищает: автоматизации больше нет."""
+    skills = _make_skills(tmp_path / "skills", {"greeter": "agent"})
+    recorder = TraceRecorder(db)
+    store = JobStore(db)
+    job = await store.create(
+        name="выключенная",
+        kind=ScheduleKind.EVERY,
+        spec="3600",
+        tz="UTC",
+        task="поздоровайся",
+        workspace=str(tmp_path),
+        autonomy="supervised",
+        config_digest="d",
+        origin=JobOrigin.HUMAN,
+        first_run_at=utcnow(),
+    )
+
+    run = await recorder.start_run(task="поздоровайся", autonomy="supervised", model="m")
+    await recorder.merge_run_meta(run, {"cron_job_id": job.id})
+    await recorder.log_skill_load(run, skill_name="greeter", skill_version=None)
+
+    transitions = await prune_layer1(db, skills, _CFG, now=utcnow() + timedelta(days=100))
+    assert [(t.skill_name, t.new) for t in transitions] == [
+        ("greeter", SkillLifecycleStatus.ARCHIVED)
+    ]

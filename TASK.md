@@ -556,7 +556,7 @@ Postgres/SQLite используется для runtime-состояния.
 
 Qdrant/vector DB используется для semantic retrieval.
 
-Redis используется для очередей, locks и временного состояния.
+Очереди, locks и временное состояние — SQLite и файловый advisory-lock (`fcntl.flock`), см. ADR-0007; Redis не используется.
 
 Memory Manager должен поддерживать:
 
@@ -1102,6 +1102,9 @@ runtime:
   max_tokens_per_run: 2000000
   max_cost_usd_per_run: 5.0
 
+scheduler:
+  interval_sec: 30          # демон `svarog scheduler`; serve джобы не исполняет
+
 sandbox:
   type: docker            # docker (по умолчанию) | local-trusted (без изоляции, §17)
   network: disabled
@@ -1391,7 +1394,7 @@ Curator работает в два слоя:
 * новый скилл получает якорь `created_at`, чтобы не попасть под архивацию до первого использования;
 * содержательные изменения (consolidation, merge, правки текста скилла) — **только через skill proposals** (Flow B из 6.8); автоматически применяются лишь обратимые lifecycle-переходы слоя 1;
 * слой 2 работает на auxiliary-модели (см. §13) и выключен по умолчанию (opt-in);
-* запуск: в моменты простоя агента по интервалу, после добавления N новых скиллов, вручную через `svarog skills curate`;
+* запуск: системной джобой планировщика по интервалу (`curator.prune_interval_sec`, ADR-0019) и вручную через `svarog skills curate`; триггер «после добавления N новых скиллов» не реализован;
 * каждый прогон curator оставляет отчет (что найдено, что изменено, что предложено) в trace и в `artifacts/`;
 * consolidation не должна терять информацию: объединяемые скиллы архивируются, а не удаляются.
 
