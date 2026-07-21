@@ -57,9 +57,10 @@ async def tick(
         )
         try:
             status = await run_job(request)
-        except Exception as exc:  # noqa: BLE001 — исход джобы, а не отказ планировщика
-            # Упавшая задача не выключает джобу: расписание продолжает работать,
-            # а причина видна в last_status и в trace самого run'а.
+        except Exception as exc:
+            # Широкий except намеренный: это исход джобы, а не отказ
+            # планировщика — упавшая задача не должна ронять тик и не
+            # выключает джобу. Причина видна в last_status и в trace run'а.
             await store.finish(job, status=f"ошибка: {type(exc).__name__}", now=now)
             continue
         await store.finish(job, status=status, now=now)
