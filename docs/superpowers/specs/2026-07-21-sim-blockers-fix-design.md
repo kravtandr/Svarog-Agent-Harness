@@ -110,8 +110,10 @@ Bake-off вместо угадывания: драйвер S19 (4 файла + i
 без reasoning-протечек; кандидаты уточняются на месте по доступности, напр.
 `qwen/qwen3-coder`, `deepseek/deepseek-chat`, `z-ai/glm-4.7`). Критерий:
 `completed` с финальным ответом 2/2, все файлы созданы, цена сопоставима.
-Победитель прописывается как дефолт в: `scaffold.py` (svarog init),
-`simulation/README.md` §2, `simulation/scenarios.md` (секция группы).
+Победитель прописывается в `simulation/README.md` §2 и
+`simulation/scenarios.md` (секция группы). `scaffold.py::DEFAULT_MODEL`
+не трогаем: его дефолт (`qwen3-coder` на `localhost:8000/v1`) — про
+локальный серверинг, OpenRouter-победитель туда не относится.
 gpt-oss-120b остаётся поддержанным (фикс reasoning-канала в деле), но не
 дефолтом.
 
