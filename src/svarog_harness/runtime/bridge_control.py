@@ -35,6 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
+from svarog_harness.tools.user_tools import question_options
 from svarog_harness.runtime.bridge import ControlHandler
 from svarog_harness.secrets.redaction import redact
 from svarog_harness.skills import Skill
@@ -196,14 +197,18 @@ class BridgeControl:
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         if name == "ask_user":
+            payload: dict[str, Any] = {
+                "question": str(arguments.get("question", "")),
+                "deadline": (
+                    utcnow() + timedelta(seconds=self._ask_user_timeout_sec)
+                ).isoformat(),
+            }
+            options = question_options(arguments)
+            if options:
+                payload["options"] = options
             return await self._human_gate(
                 action_type="user.question",
-                payload={
-                    "question": str(arguments.get("question", "")),
-                    "deadline": (
-                        utcnow() + timedelta(seconds=self._ask_user_timeout_sec)
-                    ).isoformat(),
-                },
+                payload=payload,
                 pending_reason="ask_user: ждём ответа человека",
                 approved_prefix="ответ пользователя: ",
             )
@@ -397,7 +402,17 @@ _ASK_USER_DEF = {
     ),
     "inputSchema": {
         "type": "object",
-        "properties": {"question": {"type": "string", "description": "Вопрос человеку"}},
+        "properties": {
+            "question": {"type": "string", "description": "Вопрос человеку"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "2–5 коротких вариантов ответа, если выбор конечен: человек "
+                    "выберет один стрелочками или ответит свободным текстом"
+                ),
+            },
+        },
         "required": ["question"],
     },
 }
