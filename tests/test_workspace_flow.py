@@ -205,3 +205,42 @@ async def test_commit_step_skips_svarog_tree(tmp_path: Path) -> None:
     files = out.split()
     assert "code.py" in files
     assert not any(name.startswith(".svarog") for name in files)
+
+
+async def test_commit_step_excludes_project_config(tmp_path: Path) -> None:
+    """Project-конфиг (имена секретов) не принадлежит диффу run'а: попав в
+    task-ветку, он к тому же исчезает из рабочего дерева при checkout master
+    (кампания 21.07.2026, S11 Watch(6))."""
+    repo = await _init_repo(tmp_path / "ws")
+    await _seed_commit(repo)
+    flow = WorkspaceFlow(repo, GitConfig())
+    await flow.start("задача")
+
+    (repo.path / "svarog.yaml").write_text("models: {}\n", encoding="utf-8")
+    (repo.path / "result.md").write_text("работа\n", encoding="utf-8")
+    sha = await flow.commit_step("svarog: задача")
+    assert sha is not None
+    _, out, _ = await repo._git("show", "--name-only", "--format=", sha)
+    files = out.split()
+    assert "result.md" in files
+    assert "svarog.yaml" not in files
+    # рабочее дерево конфиг не потеряло
+    assert (repo.path / "svarog.yaml").exists()
+
+
+async def test_commit_step_keeps_tracked_project_config(tmp_path: Path) -> None:
+    """Если пользователь сам закоммитил свой svarog.yaml — поведение прежнее:
+    info/exclude не действует на уже отслеживаемые файлы."""
+    repo = await _init_repo(tmp_path / "ws")
+    (repo.path / "svarog.yaml").write_text("models: {}\n", encoding="utf-8")
+    (repo.path / "README.md").write_text("# проект\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("initial с конфигом")
+    flow = WorkspaceFlow(repo, GitConfig())
+    await flow.start("задача")
+
+    (repo.path / "svarog.yaml").write_text("models: {a: 1}\n", encoding="utf-8")
+    sha = await flow.commit_step("svarog: правка конфига")
+    assert sha is not None
+    _, out, _ = await repo._git("show", "--name-only", "--format=", sha)
+    assert "svarog.yaml" in out.split()
