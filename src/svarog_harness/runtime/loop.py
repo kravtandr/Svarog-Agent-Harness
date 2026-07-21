@@ -286,7 +286,11 @@ class AgentLoop:
             if state.refuel_pending:
                 await self._rebuild_after_refuel(run, state)
 
-            while state.iterations < self._cfg.max_iterations:
+            # Блок B §2: max_iterations ограничивает СЕГМЕНТ между refuel'ами.
+            # Общие стоп-краны — потолок раундов (max_refuel_rounds) и бюджеты
+            # токенов и стоимости; state.iterations остаётся тотальным
+            # счётчиком для отчётности и trace.
+            while state.iterations_since_refuel < self._cfg.max_iterations:
                 # Cooperative-cancel (ADR-0017 §2): флаг ставит gateway из
                 # другой сессии БД; проверяем на границе итерации — посреди
                 # LLM-вызова или tool-исполнения ногу не рвём, checkpoint цел.
@@ -403,18 +407,20 @@ class AgentLoop:
                     state.stagnation_low_progress_iters = 0
                     return await self._suspend(run, state, stagnation)
 
-                # Refuel: порог итераций с последнего сброса достигнут — сбросить
-                # контекст в task_state.md и ПРИОСТАНОВИТЬ run (§6.10, ADR-0005).
-                # Cross-process: процесс и sandbox освобождаются, resume поднимает
-                # задачу с пересобранным из task_state.md контекстом. max_iterations
-                # (total) остаётся жёстким стоп-краном поверх refuel.
+                # Refuel: порог итераций сегмента достигнут — сбросить контекст
+                # в task_state.md. Если потолок автопродолжений не исчерпан, run
+                # продолжает себя сам (§6.10, ADR-0005, блок B §3); иначе —
+                # приостановка, и продолжение через `svarog resume`.
                 if state.iterations_since_refuel >= self._cfg.refuel_after_iterations:
-                    return await self._refuel_suspend(run, state)
+                    if state.refuel_rounds >= self._cfg.max_refuel_rounds:
+                        return await self._refuel_suspend(run, state)
+                    await self._autocontinue(run, state)
+                    continue
 
             return await self._suspend(
                 run,
                 state,
-                f"достигнут лимит итераций ({self._cfg.max_iterations}); "
+                f"достигнут лимит итераций сегмента ({self._cfg.max_iterations}); "
                 f"увеличьте runtime.max_iterations и выполните resume",
             )
         except _ApprovalRequiredError as approval:
@@ -580,16 +586,12 @@ class AgentLoop:
         await self._recorder.set_run_state(run, RunState.SUSPENDED, error=reason)
         return self._outcome(run, RunState.SUSPENDED, state, "", reason)
 
-    async def _refuel_suspend(self, run: Run, state: LoopState) -> RunOutcome:
-        """Refuel как приостановка (§6.10, ADR-0005): сбросить контекст в
-        task_state.md и уйти в suspended.
+    async def _write_task_state(self, run: Run, state: LoopState) -> None:
+        """Сериализовать состояние задачи в task_state.md и закоммитить (§6.10).
 
-        Состояние сериализуется в task_state.md (+ коммит Flow C для durability),
-        раздутая история из checkpoint убирается — resume пересоберёт контекст с
-        нуля из task_state.md. Процесс и sandbox между refuel и resume
-        освобождаются; поднятие — `svarog resume` (авто-супервизор — пост-MVP).
-        Total-счётчик итераций не сбрасывается: max_iterations остаётся жёстким
-        стоп-краном поверх refuel.
+        Вызывается и при приостановке, и при автопродолжении: файл пишется ДО
+        сброса истории, поэтому падение процесса между записью и продолжением
+        не теряет прогресс — resume поднимет run с уже готовым файлом.
         """
         task_state = build_task_state(state.task, state.messages, state.iterations, plan=state.plan)
         (state.workspace / task_state_path()).write_text(task_state, encoding="utf-8")
@@ -599,17 +601,57 @@ class AgentLoop:
                 await self._workspace_flow.commit_step(
                     "svarog refuel: task_state.md", run_id=run.id
                 )
+
+    async def _autocontinue(self, run: Run, state: LoopState) -> None:
+        """Сбросить контекст и продолжить run без участия человека (блок B §3).
+
+        Порядок как при приостановке: task_state.md пишется и коммитится ДО
+        сброса истории. Счётчик раундов увеличивается здесь и обнуляется только
+        ручным resume — человек, продолживший run руками, выдаёт новый бюджет.
+        """
+        await self._write_task_state(run, state)
+        state.refuel_rounds += 1
+        state.refuel_pending = True
+        state.pending_tool_calls = ()
+        state.last_prompt_tokens = 0
+        # _rebuild_after_refuel снимает refuel_pending, обнуляет счётчик
+        # сегмента, пересобирает историю, пишет её в trace и сохраняет checkpoint.
+        await self._rebuild_after_refuel(run, state)
+        await self._recorder.merge_run_meta(run, {"refuel_rounds": state.refuel_rounds})
+        if self._on_notify is not None:
+            self._on_notify(
+                "refuel",
+                f"контекст сброшен в task_state.md, продолжаю "
+                f"(раунд {state.refuel_rounds} из {self._cfg.max_refuel_rounds})",
+            )
+
+    async def _refuel_suspend(self, run: Run, state: LoopState) -> RunOutcome:
+        """Refuel как приостановка (§6.10, ADR-0005): сбросить контекст в
+        task_state.md и уйти в suspended.
+
+        Путь для случая, когда автопродолжение выключено (max_refuel_rounds=0)
+        или потолок раундов исчерпан. Раздутая история из checkpoint убирается —
+        resume пересоберёт контекст с нуля из task_state.md. Процесс и sandbox
+        между refuel и resume освобождаются.
+        """
+        await self._write_task_state(run, state)
         state.refuel_pending = True
         # Раздутую историю в checkpoint не тащим — resume пересоберёт из файла.
         state.messages = []
         state.pending_tool_calls = ()
         state.iterations_since_refuel = 0
         state.last_prompt_tokens = 0
-        return await self._suspend(
-            run,
-            state,
-            "refuel: контекст сброшен в task_state.md; выполните svarog resume для продолжения",
-        )
+        if self._cfg.max_refuel_rounds:
+            reason = (
+                f"исчерпан потолок автопродолжений "
+                f"(max_refuel_rounds={self._cfg.max_refuel_rounds}); контекст сброшен "
+                f"в task_state.md — поднимите потолок или выполните svarog resume"
+            )
+        else:
+            reason = (
+                "refuel: контекст сброшен в task_state.md; выполните svarog resume для продолжения"
+            )
+        return await self._suspend(run, state, reason)
 
     async def _rebuild_after_refuel(self, run: Run, state: LoopState) -> None:
         """Пересобрать контекст из task_state.md при resume после refuel (§6.10)."""
