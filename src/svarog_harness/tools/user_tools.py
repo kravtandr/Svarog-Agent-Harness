@@ -11,15 +11,39 @@ execute() в штатном потоке не вызывается — loop во
 (ответ или истечение) из _consume_question до исполнения tool.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 
 ASK_USER_TOOL_NAME = "ask_user"
 
+# Потолок вариантов ask_user в payload: UI-список из десятков пунктов нечитаем.
+QUESTION_OPTIONS_CAP = 8
+
+
+def question_options(arguments: dict[str, Any]) -> list[str]:
+    """Валидные варианты ответа ask_user: непустые строки, с потолком.
+
+    Используется обоими путями вопроса — нативным loop и MCP-мостом — чтобы
+    payload approval'а имел одинаковую форму для UI.
+    """
+    raw = arguments.get("options")
+    if not isinstance(raw, list):
+        return []
+    return [o.strip() for o in raw if isinstance(o, str) and o.strip()][:QUESTION_OPTIONS_CAP]
+
 
 class AskUserArgs(BaseModel):
     question: str = Field(description="Вопрос человеку — коротко и конкретно")
+    options: list[str] | None = Field(
+        default=None,
+        description=(
+            "2–5 коротких вариантов ответа, если выбор конечен: человек выберет "
+            "один из них стрелочками или ответит свободным текстом"
+        ),
+    )
     timeout_sec: int | None = Field(
         default=None,
         gt=0,
