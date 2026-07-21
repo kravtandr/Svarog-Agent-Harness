@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from pydantic import ValidationError
 
 from svarog_harness.cli.chat_display import MODE_CLOUD, MODE_LOCAL
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, deep_merge
@@ -76,9 +77,16 @@ def apply_executor_label(cfg: SvarogConfig, label: str) -> SvarogConfig:
                 "для external нужен executor.external в svarog.yaml (image и adapter)"
             )
         external = cfg.executor.external.model_copy(update={"adapter": detail})
-        return cfg.model_copy(
-            update={"executor": ExecutorConfig(type="external", external=external)}
-        )
+        try:
+            # Смена адаптера перевалидирует секцию (напр. wire=openai против
+            # anthropic base_url) — падение конвертируем в SettingsApplyError,
+            # чтобы chat-сессия пережила отклонённый выбор (S15c).
+            executor = ExecutorConfig(type="external", external=external)
+        except ValidationError as exc:
+            raise SettingsApplyError(
+                f"конфигурация external/{detail} невалидна: {exc.errors()[0]['msg']}"
+            ) from exc
+        return cfg.model_copy(update={"executor": executor})
     raise SettingsApplyError(f"неизвестный executor: {label}")
 
 

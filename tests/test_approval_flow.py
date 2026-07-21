@@ -338,3 +338,57 @@ async def test_denied_call_explains_boundary_to_model(db: AsyncSession, tmp_path
     assert call.error is not None
     assert "не сейчас" in call.error
     assert "повтор" not in call.error.lower()
+
+
+def test_cli_approvals_answer_records_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`svarog approvals answer` — headless-путь ответа на ask_user (§6.5)."""
+    import asyncio
+
+    from typer.testing import CliRunner
+
+    from svarog_harness.cli.main import app
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    init_db(db_path)
+    engine = create_engine(db_path)
+
+    async def seed() -> str:
+        async with create_session_factory(engine)() as db:
+            recorder = TraceRecorder(db)
+            run = await recorder.start_run(task="t", autonomy="yolo", model="m")
+            approval = await recorder.create_approval(
+                run, action_type="user.question", payload={"question": "какой цвет?"}
+            )
+            return approval.id
+
+    approval_id = asyncio.run(seed())
+
+    result = CliRunner().invoke(app, ["approvals", "answer", approval_id[:8], "жар-птица"])
+    assert result.exit_code == 0, result.output
+
+    async def fetch() -> Approval:
+        async with create_session_factory(engine)() as db:
+            return await TraceRecorder(db).find_approval_by_prefix(approval_id)
+
+    stored = asyncio.run(fetch())
+    assert stored.status is ApprovalStatus.APPROVED
+    assert stored.reason == "жар-птица"
+    assert stored.decided_by == "cli"

@@ -41,6 +41,17 @@ class SuspendSignal(Protocol):
     suspend_reason: str
 
 
+# Правила run'а в самой реплике задачи: конфиг-уровень (AGENTS.md/CLAUDE.md)
+# скилловые чеклисты агентов перебивают (кампания 21.07.2026, S11 — агент
+# завершал run анонсом/вопросом), prompt-уровень — нет. В trace пишется
+# ЧИСТАЯ реплика пользователя, преамбулу видит только агент.
+_RUN_RULES_PREAMBLE = (
+    "[Правила run'а Svarog] Заверши деливерабл в этом же запуске: ход без "
+    "вызова tools — это финальный ответ, продолжения не будет. Вопрос "
+    "человеку — только через MCP-tool ask_user (svarog_ask_user); текстом-"
+    "вопросом или анонсом будущей работы run не завершай.\n\n"
+)
+
 # Метки внешнего executor'а в Run.meta: по ним resume отличает внешний run
 # (фаза 3) и trace-viewer показывает исполнителя.
 EXECUTOR_META_KEY = "executor"
@@ -163,8 +174,11 @@ class ExternalAgentExecutor:
             for event in self._adapter.parse_event(line):
                 await self._handle_event(run, state, event)
 
+        # Преамбула только при наличии MCP-канала: без него упоминание
+        # ask_user было бы ложью (codex).
+        preamble = _RUN_RULES_PREAMBLE if self._adapter.capabilities().mcp else ""
         launch = AgentLaunch(
-            task=task,
+            task=preamble + task,
             session=agent_session,
             mcp_config=self._mcp_config,
             settings_file=self._settings_file,

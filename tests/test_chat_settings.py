@@ -66,7 +66,8 @@ def test_apply_executor_external_changes_adapter(
             "  type: external\n"
             "  external:\n"
             "    adapter: claude-code\n"
-            "    image: svarog/claude:test\n",
+            "    image: svarog/claude:test\n"
+            "    base_url: https://openrouter.ai/api\n",
         ),
     )
     updated = apply_executor_label(cfg, "external/codex")
@@ -128,3 +129,25 @@ def test_patch_project_config_merges_and_preserves(
     assert raw["executor"]["type"] == "native"
     assert raw["sandbox"]["type"] == "docker"
     assert raw["models"]["default"] == "local"
+
+
+def test_apply_executor_invalid_swap_raises_settings_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Свап адаптера на wire=openai при anthropic base_url — SettingsApplyError,
+    а не голый ValidationError: chat-сессия обязана пережить отказ (S15c)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = _cfg(
+        tmp_path,
+        _base(
+            tmp_path,
+            "sandbox:\n  type: docker\n"
+            "executor:\n"
+            "  type: external\n"
+            "  external:\n"
+            "    adapter: claude-code\n"
+            "    image: svarog/claude:test\n",
+        ),
+    )
+    with pytest.raises(SettingsApplyError, match="openai"):
+        apply_executor_label(cfg, "external/opencode")

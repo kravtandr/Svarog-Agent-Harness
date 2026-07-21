@@ -179,10 +179,32 @@ def doctor(
     json_output: Annotated[
         bool, typer.Option("--json", help="Машиночитаемый вывод (JSON-массив проверок)")
     ] = False,
+    clean_orphans: Annotated[
+        bool,
+        typer.Option(
+            "--clean-orphans",
+            help="Удалить осиротевшие docker-ресурсы svarog-agent (без живого owner-pid)",
+        ),
+    ] = False,
 ) -> None:
-    """Диагностика окружения: конфиг, БД, git, sandbox, ключи, ripgrep (read-only)."""
-    from svarog_harness.cli.doctor import collect_checks
+    """Диагностика окружения: конфиг, БД, git, sandbox, ключи, ripgrep (read-only).
 
+    Единственное исключение из read-only — явный --clean-orphans: чистка
+    docker-ресурсов svarog-agent без живого владельца (legacy до reaper'а).
+    """
+    from svarog_harness.cli.doctor import (
+        collect_checks,
+        find_agent_orphans,
+        remove_agent_orphans,
+    )
+
+    if clean_orphans:
+        containers, networks = find_agent_orphans()
+        if not containers and not networks:
+            console.print("осиротевших ресурсов svarog-agent нет")
+        else:
+            remove_agent_orphans(containers, networks)
+            console.print(f"удалено: {', '.join(containers + networks)}")
     checks = collect_checks(Path.cwd())
     if json_output:
         print(json.dumps([c.to_dict() for c in checks], ensure_ascii=False, indent=2))
