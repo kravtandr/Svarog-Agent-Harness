@@ -85,7 +85,7 @@ class ExternalAgentExecutor:
         on_text_delta: "Callable[[str], None] | None" = None,
         on_tool_call: "Callable[[str, dict[str, object]], None] | None" = None,
         on_run_started: "Callable[[Run], None] | None" = None,
-        on_progress: "Callable[[int, int, float, float], None] | None" = None,
+        on_progress: "Callable[[int, int, float, float, int], None] | None" = None,
         parent_run_id: str | None = None,
         bridge: RunBridge | None = None,
         tool_output_limit: int = 20_000,
@@ -324,8 +324,9 @@ class ExternalAgentExecutor:
                     cost_usd=state.cost_usd,
                 )
                 if self._on_progress is not None:
-                    # Доля контекста внешнего агента неизвестна — 0.0.
-                    self._on_progress(state.num_turns, state.tokens_used, state.cost_usd, 0.0)
+                    # Доля контекста внешнего агента неизвестна — 0.0; своего
+                    # учёта cached-токенов у внешнего агента нет — 0.
+                    self._on_progress(state.num_turns, state.tokens_used, state.cost_usd, 0.0, 0)
             case "opaque":
                 # Forward-compat (ADR-0016 §8): неизвестные события сохраняются
                 # raw — дрейф формата виден в trace, а не теряется молча.

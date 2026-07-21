@@ -120,7 +120,10 @@ async def test_completes_on_final_answer(db: AsyncSession, tmp_path: Path) -> No
     assert run.autonomy == "yolo"
     assert run.task == "скажи готово"
     assert run.finished_at is not None
-    assert run.meta == {"model": "test-model"}
+    # phases (блок A §5) пишутся вместе с update_progress — meta больше не
+    # ограничивается одним ключом model.
+    assert run.meta["model"] == "test-model"
+    assert run.meta["phases"]["llm_call"]["count"] == 1
 
 
 async def test_executes_tool_calls_and_feeds_results_back(db: AsyncSession, tmp_path: Path) -> None:
@@ -149,6 +152,28 @@ async def test_executes_tool_calls_and_feeds_results_back(db: AsyncSession, tmp_
     assert tool_call.arguments == {"path": "note.txt"}
     assert tool_call.result is not None
     assert "17" in tool_call.result["output"]
+
+
+async def test_phase_timings_land_in_run_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §5: тайминги фаз пишутся в Run.meta и переживают завершение run."""
+    (tmp_path / "a.txt").write_text("содержимое", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}')
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    phases = run.meta["phases"]
+    assert phases["llm_call"]["count"] == 2
+    assert phases["tool_exec"]["count"] >= 1
+    assert phases["last"]
 
 
 async def test_update_plan_is_saved_in_checkpoint(db: AsyncSession, tmp_path: Path) -> None:
@@ -238,6 +263,33 @@ async def test_invalid_arguments_json_reported_to_model(db: AsyncSession, tmp_pa
     tool_call = (await db.execute(select(ToolCall))).scalar_one()
     assert tool_call.status is ToolCallStatus.FAILED
     assert tool_call.arguments == {"_raw": "{broken"}
+
+
+async def test_repaired_call_records_original_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §4: ремонт формы аргументов виден в trace — и что прислала
+    модель, и что реально исполнилось."""
+    (tmp_path / "a.txt").write_text("содержимое", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1",
+                    name="read_file",
+                    arguments_json='{"arguments": {"path": "a.txt"}}',
+                )
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    calls = (await db.scalars(select(ToolCall).where(ToolCall.run_id == outcome.run_id))).all()
+    assert len(calls) == 1
+    assert calls[0].status is ToolCallStatus.SUCCEEDED
+    assert calls[0].arguments["path"] == "a.txt"
+    assert calls[0].arguments["_repairs"] == ["unwrapped"]
+    assert "arguments" in calls[0].arguments["_raw"]
 
 
 async def test_suspends_at_max_iterations(db: AsyncSession, tmp_path: Path) -> None:
@@ -663,6 +715,38 @@ async def test_microcompact_marker_references_spill_file(db: AsyncSession, tmp_p
     assert ".svarog/tool-results/" in cleared  # ссылка на полный вывод
 
 
+async def test_microcompact_marker_is_actionable(db: AsyncSession, tmp_path: Path) -> None:
+    """Без spill-файла маркер не предлагает повторить ТОТ ЖЕ вызов, а требует
+    сузить параметры (блок A §2): иначе модель зацикливается на повторе."""
+    big = "\n".join(f"строка {i}: " + "х" * 40 for i in range(20))  # > 500 символов
+    (tmp_path / "a.txt").write_text(big, encoding="utf-8")
+    (tmp_path / "b.txt").write_text(big, encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "a.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _tool_turn(
+                ToolCallRequest(id="c2", name="read_file", arguments_json='{"path": "b.txt"}'),
+                usage=Usage(600, 5),
+            ),
+            _final("готово"),
+        ]
+    )
+    cfg = RuntimeConfig(
+        max_context_tokens=1000,
+        microcompact_threshold_ratio=0.5,
+        microcompact_keep_recent=1,
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    cleared = next(m for m in provider.seen_messages[-1] if m.role == "tool")
+    assert "более узкими параметрами" in cleared.content
+    assert "повтори вызов при необходимости" not in cleared.content
+
+
 # --- ADR-0015 §1.6: детектор затухающей отдачи --------------------------------
 
 
@@ -783,7 +867,7 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
             _final("готово", usage=Usage(2000, 5)),
         ]
     )
-    progress: list[tuple[int, int, float, float]] = []
+    progress: list[tuple[int, int, float, float, int]] = []
     cfg = RuntimeConfig(max_context_tokens=10_000)
     registry = ToolRegistry()
     for tool in file_tools(tmp_path):
@@ -796,7 +880,9 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
         PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
         tmp_path,
         model_name="test-model",
-        on_progress=lambda i, tok, cost, ratio: progress.append((i, tok, cost, ratio)),
+        on_progress=lambda i, tok, cost, ratio, cached: progress.append(
+            (i, tok, cost, ratio, cached)
+        ),
     )
     outcome = await loop.run("задача", AutonomyMode.YOLO)
     assert outcome.state is RunState.COMPLETED
@@ -808,3 +894,49 @@ async def test_on_progress_reports_each_iteration(db: AsyncSession, tmp_path: Pa
     assert progress[1][3] == pytest.approx(0.2)
     # Токены накапливаются.
     assert progress[1][1] == outcome.tokens_used
+
+
+# --- Блок A §3: cached_tokens — учёт эффекта стабильного префикса схем -------
+
+
+async def test_cached_tokens_accumulate_in_run_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §3: cached-токены копятся в Run.meta и видны в trace."""
+    provider = ScriptedProvider(
+        [
+            _final("готово", usage=Usage(prompt_tokens=100, completion_tokens=5, cached_tokens=64)),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta["cached_tokens"] == 64
+
+
+async def test_cached_tokens_accumulate_across_iterations(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок A §3: cached-токены суммируются через несколько итераций."""
+    # Подготовка файла для инструмента.
+    (tmp_path / "note.txt").write_text("текст", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            # Первая итерация: вызов инструмента с кэшированными токенами.
+            _tool_turn(
+                ToolCallRequest(id="c1", name="read_file", arguments_json='{"path": "note.txt"}'),
+                usage=Usage(prompt_tokens=100, completion_tokens=0, cached_tokens=32),
+            ),
+            # Вторая итерация: финальный ответ тоже с кэшированными токенами.
+            _final(
+                "Содержимое файла: текст",
+                usage=Usage(prompt_tokens=50, completion_tokens=5, cached_tokens=16),
+            ),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("прочитай файл", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.iterations == 2
+
+    # cached_tokens должны быть суммой: 32 + 16 = 48.
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta["cached_tokens"] == 48

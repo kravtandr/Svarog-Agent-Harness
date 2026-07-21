@@ -66,6 +66,9 @@ class ChatMessage:
 class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Сколько prompt-токенов пришло из prefix cache провайдера. Без этого
+    # числа эффект от стабильного префикса схем (блок A §3) нечем измерить.
+    cached_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:

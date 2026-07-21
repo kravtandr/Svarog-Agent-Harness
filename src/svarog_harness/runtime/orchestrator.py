@@ -108,7 +108,7 @@ class RunHooks:
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
-    on_progress: Callable[[int, int, float, float], None] | None = None
+    on_progress: Callable[[int, int, float, float, int], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
     on_verify_failed: Callable[[int], None] | None = None
     on_commit: Callable[[str, str, bool], None] | None = None
@@ -593,7 +593,9 @@ class TaskRunner:
             # require_approval (action_type mcp.*), риск из конфига сервера.
             # При defer_schemas (ADR-0015 фаза 2) схема в промпт не грузится,
             # пока модель не вызовет load_tool.
-            registry.register(mcp_tool, deferred=defer_schemas)
+            # external: MCP-схемы дописываются после встроенных, чтобы смена
+            # discovery не сдвигала кэшируемый префикс промпта (блок A §3).
+            registry.register(mcp_tool, deferred=defer_schemas, external=True)
         if defer_schemas:
             registry.register(LoadToolTool(registry))
         if skills:

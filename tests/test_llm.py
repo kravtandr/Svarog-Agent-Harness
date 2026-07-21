@@ -67,6 +67,34 @@ def _provider(
     return OpenAICompatibleProvider(cfg, client=cast(AsyncOpenAI, client)), client
 
 
+def _to_namespace(value: Any) -> Any:
+    """Рекурсивно превратить dict в SimpleNamespace — для вложенных полей usage
+    вроде prompt_tokens_details (getattr должен работать, как на реальном SDK-объекте)."""
+    if isinstance(value, dict):
+        return SimpleNamespace(**{k: _to_namespace(v) for k, v in value.items()})
+    return value
+
+
+def _usage_with_extra(*, prompt_tokens: int, completion_tokens: int, extra: dict[str, Any]) -> Any:
+    """usage-объект с произвольными доп. полями — диалекты cached-токенов провайдеров."""
+    fields = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    fields.update({k: _to_namespace(v) for k, v in extra.items()})
+    return SimpleNamespace(**fields)
+
+
+def _provider_with_usage(
+    *, prompt_tokens: int, completion_tokens: int, extra: dict[str, Any]
+) -> OpenAICompatibleProvider:
+    """Провайдер, чей единственный ответ несёт usage с диалект-специфичными полями."""
+    usage = _usage_with_extra(
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, extra=extra
+    )
+    provider, _ = _provider(
+        [_chunk(content="ok", finish_reason="stop"), _chunk(usage=usage, choices=False)]
+    )
+    return provider
+
+
 async def test_streams_text_and_reports_usage() -> None:
     usage = SimpleNamespace(prompt_tokens=100, completion_tokens=20)
     provider, client = _provider(
@@ -246,3 +274,41 @@ async def test_generates_id_when_server_omits_it() -> None:
     )
     result = await provider.complete([ChatMessage(role="user", content="go")], [])
     assert result.tool_calls[0].id.startswith("call-")
+
+
+# --- Блок A §3: cached_tokens — три диалекта провайдеров ---------------------
+
+
+async def test_usage_reads_cached_tokens_from_prompt_tokens_details() -> None:
+    """OpenAI/Qwen/Mistral: usage.prompt_tokens_details.cached_tokens."""
+    provider = _provider_with_usage(
+        prompt_tokens=100,
+        completion_tokens=10,
+        extra={"prompt_tokens_details": {"cached_tokens": 64}},
+    )
+    result = await provider.complete([ChatMessage(role="user", content="привет")], [])
+    assert result.usage.cached_tokens == 64
+
+
+async def test_usage_reads_top_level_cached_tokens() -> None:
+    """StepFun/Moonshot: верхнеуровневый usage.cached_tokens."""
+    provider = _provider_with_usage(
+        prompt_tokens=100, completion_tokens=10, extra={"cached_tokens": 32}
+    )
+    result = await provider.complete([ChatMessage(role="user", content="привет")], [])
+    assert result.usage.cached_tokens == 32
+
+
+async def test_usage_reads_prompt_cache_hit_tokens() -> None:
+    """DeepSeek/SiliconFlow: usage.prompt_cache_hit_tokens."""
+    provider = _provider_with_usage(
+        prompt_tokens=100, completion_tokens=10, extra={"prompt_cache_hit_tokens": 16}
+    )
+    result = await provider.complete([ChatMessage(role="user", content="привет")], [])
+    assert result.usage.cached_tokens == 16
+
+
+async def test_usage_without_cache_fields_is_zero() -> None:
+    provider = _provider_with_usage(prompt_tokens=100, completion_tokens=10, extra={})
+    result = await provider.complete([ChatMessage(role="user", content="привет")], [])
+    assert result.usage.cached_tokens == 0

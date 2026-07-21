@@ -32,6 +32,8 @@ from svarog_harness.llm.provider import (
 from svarog_harness.policy.engine import PolicyAction, PolicyDecision, PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
+from svarog_harness.runtime.history_invariant import assert_history_valid
+from svarog_harness.runtime.phase_timer import PhaseTimer
 from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
@@ -131,6 +133,7 @@ class _PreparedCall:
 
     call: ToolCallRequest
     arguments: dict[str, Any]
+    repairs: list[str]
     tool: Tool[Any]
     decision: PolicyDecision
 
@@ -170,7 +173,7 @@ class AgentLoop:
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
-        on_progress: Callable[[int, int, float, float], None] | None = None,
+        on_progress: Callable[[int, int, float, float, int], None] | None = None,
         parent_run_id: str | None = None,
     ) -> None:
         self._provider = provider
@@ -204,6 +207,14 @@ class AgentLoop:
         self._on_run_started = on_run_started
         # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
         self._parent_run_id = parent_run_id
+        # Тайминги фаз хода (блок A §5): __init__ заводит пустой таймер на
+        # случай использования без resume(). run() всегда стартует свежий Run
+        # без phases (start_run) — там таймер переинициализируется, а не
+        # восстанавливается (restore() был бы no-op для нового run'а, но
+        # протёк бы накопленное прошлого run'а при переиспользовании
+        # экземпляра AgentLoop). resume() поверх этого восстанавливает
+        # накопленное из Run.meta["phases"] через restore() — там это осмысленно.
+        self._phases = PhaseTimer()
 
     async def run(
         self,
@@ -229,6 +240,9 @@ class AgentLoop:
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
+        # Свежий Run от start_run никогда не несёт phases — чистый таймер,
+        # а не restore() (см. комментарий в __init__).
+        self._phases = PhaseTimer()
         messages = build_initial_messages(
             task,
             self._workspace,
@@ -249,13 +263,23 @@ class AgentLoop:
         # Восстановить раскрытые deferred-схемы (ADR-0015 фаза 2): реестр
         # собран заново и без этого «забыл» бы загруженное моделью.
         self._registry.restore_loaded(state.loaded_tools)
+        # Без dict(...) обёртки — на не-словаре (строка/число из испорченного
+        # meta) PhaseTimer.restore делает ранний возврат вместо ValueError/
+        # TypeError, которые иначе улетели бы из resume() до try.
+        self._phases.restore((run.meta or {}).get("phases", {}))
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)
 
     async def _drive(self, run: Run, state: LoopState) -> RunOutcome:
         try:
             # Write-ahead: доисполнить вызовы, зафиксированные до остановки.
-            await self._execute_pending(run, state)
+            # tool_exec — та же фаза, что и в основном цикле: охват симметричен
+            # вложенным в неё memory_flush/checkpoint. Замер — только если
+            # действительно есть что исполнять: иначе счётчик фазы рос бы у
+            # run'а без единого write-ahead вызова, хотя события не было.
+            if state.pending_tool_calls:
+                with self._phases.measure("tool_exec"):
+                    await self._execute_pending(run, state)
             # Resume после refuel-приостановки: пересобрать контекст из
             # task_state.md, отбросив прежнюю историю (§6.10, ADR-0005).
             if state.refuel_pending:
@@ -274,18 +298,27 @@ class AgentLoop:
                 # Микрокомпакция (§1.4): дешёвый слой без LLM между «всё в
                 # контексте» и refuel. Цена — разовая инвалидация префиксного
                 # кэша провайдера; порог держит число срабатываний малым.
+                # Замер только когда компакция реально сработала — иначе
+                # счётчик фазы рос бы на каждой итерации вне зависимости от
+                # того, была ли компакция вообще.
                 if self._should_microcompact(state):
-                    self._microcompact(state)
+                    with self._phases.measure("microcompact"):
+                        self._microcompact(state)
                 stream_callback = None if self._saved_file_contents else self._on_text_delta
-                result = await self._provider.complete(
-                    state.messages,
-                    self._registry.definitions(),
-                    on_text_delta=stream_callback,
-                )
+                # Инвариант истории (блок A §1): нарушение — баг loop'а, а не
+                # дефект модели; падаем громко, историю не правим.
+                assert_history_valid(state.messages)
+                with self._phases.measure("llm_call"):
+                    result = await self._provider.complete(
+                        state.messages,
+                        self._registry.definitions(),
+                        on_text_delta=stream_callback,
+                    )
                 result_content = self._sanitize_model_content(result.content)
                 if stream_callback is None and self._on_text_delta is not None and result_content:
                     self._on_text_delta(result_content)
                 state.tokens_used += result.usage.total_tokens
+                state.cached_tokens += result.usage.cached_tokens
                 state.cost_usd += result.cost_usd
                 state.last_prompt_tokens = result.usage.prompt_tokens
                 await self._recorder.update_progress(
@@ -293,11 +326,19 @@ class AgentLoop:
                     iterations=state.iterations,
                     tokens_used=state.tokens_used,
                     cost_usd=state.cost_usd,
+                    cached_tokens=state.cached_tokens,
                 )
+                # Тайминги фаз (блок A §5) — вместе с прогрессом, тем же путём,
+                # что и остальные метрики run'а.
+                await self._recorder.merge_run_meta(run, {"phases": self._phases.as_meta()})
                 if self._on_progress is not None:
                     context_ratio = result.usage.prompt_tokens / self._cfg.max_context_tokens
                     self._on_progress(
-                        state.iterations, state.tokens_used, state.cost_usd, context_ratio
+                        state.iterations,
+                        state.tokens_used,
+                        state.cost_usd,
+                        context_ratio,
+                        state.cached_tokens,
                     )
                 state.messages.append(
                     ChatMessage(
@@ -348,7 +389,8 @@ class AgentLoop:
                 if budget_error is not None:
                     return await self._suspend(run, state, budget_error)
 
-                had_tool_success = await self._execute_pending(run, state)
+                with self._phases.measure("tool_exec"):
+                    had_tool_success = await self._execute_pending(run, state)
 
                 # Детектор затухающей отдачи (§1.6): suspended (решает человек),
                 # не failed. Счётчики сбрасываются при suspend — resume после
@@ -404,13 +446,18 @@ class AgentLoop:
             had_success = had_success or tool_result.ok
             self._note_tool_call_result(state, call, tool_result)
             await self._flush_skill_loads(run)
-            await self._flush_memory(run)
+            # Замер только когда есть заявки remember в очереди — иначе
+            # счётчик фазы рос бы даже при полном отсутствии сброса памяти.
+            if self._memory_sink:
+                with self._phases.measure("memory_flush"):
+                    await self._flush_memory(run)
             self._flush_plan_updates(state)
             rendered = self._render_tool_result(run, call, tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
             state.pending_tool_calls = state.pending_tool_calls[1:]
-            await self._save_checkpoint(run, state)
+            with self._phases.measure("checkpoint"):
+                await self._save_checkpoint(run, state)
         return had_success
 
     def _concurrency_safe_prefix(
@@ -427,8 +474,8 @@ class AgentLoop:
             if len(batch) >= self._cfg.max_tool_concurrency:
                 break
             try:
-                arguments = call.parse_arguments()
                 tool = self._registry.get(call.name)
+                arguments, repairs = self._registry.prepare_arguments(tool, call)
             except (ValueError, UnknownToolError):
                 break
             decision = self._policy.evaluate(tool, arguments)
@@ -440,7 +487,7 @@ class AgentLoop:
                 break
             if not tool.is_concurrency_safe(args):
                 break
-            batch.append(_PreparedCall(call, arguments, tool, decision))
+            batch.append(_PreparedCall(call, arguments, repairs, tool, decision))
         return batch
 
     async def _execute_batch(
@@ -460,7 +507,9 @@ class AgentLoop:
                 await self._recorder.start_tool_call(
                     run,
                     tool_name=prepared.call.name,
-                    arguments=self._redact_json(prepared.arguments),
+                    arguments=self._traced_arguments(
+                        prepared.call, prepared.arguments, prepared.repairs
+                    ),
                     risk_level=prepared.decision.risk_level.value,
                     policy_decision=prepared.decision.action.value,
                 )
@@ -590,6 +639,19 @@ class AgentLoop:
             return {str(key): self._redact_json(item) for key, item in value.items()}
         return value
 
+    def _traced_arguments(
+        self, call: ToolCallRequest, arguments: dict[str, Any], repairs: list[str]
+    ) -> dict[str, Any]:
+        """Аргументы для trace: при ремонте показываем и оригинал, и результат."""
+        traced: dict[str, Any] = self._redact_json(arguments)
+        if repairs:
+            traced = {
+                **traced,
+                "_repairs": repairs,
+                "_raw": self._redact_text(call.arguments_json),
+            }
+        return traced
+
     def _remember_saved_content(self, tool_name: str, arguments: dict[str, Any]) -> None:
         if tool_name != "write_file":
             return
@@ -613,6 +675,7 @@ class AgentLoop:
         call: ToolCallRequest,
         arguments: dict[str, Any],
         decision: PolicyDecision,
+        repairs: list[str],
     ) -> ToolResult | None:
         """Применить решение человека по approval для этого вызова.
 
@@ -630,7 +693,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -646,6 +709,7 @@ class AgentLoop:
         call: ToolCallRequest,
         arguments: dict[str, Any],
         decision: PolicyDecision,
+        repairs: list[str],
     ) -> ToolResult | None:
         """ask_user: вернуть ответ человека либо (по таймауту) продолжить (§6.5).
 
@@ -660,13 +724,15 @@ class AgentLoop:
         if approval.status is ApprovalStatus.APPROVED:
             answer = (approval.reason or "").strip()
             message = f"ответ пользователя: {answer}" if answer else _QUESTION_NO_ANSWER_MSG
-            return await self._record_question_result(run, call, arguments, decision, message)
+            return await self._record_question_result(
+                run, call, arguments, decision, message, repairs
+            )
         if approval.status is ApprovalStatus.PENDING:
             if not self._question_deadline_passed(approval):
                 raise _ApprovalRequiredError(call, arguments, decision)
             await self._recorder.expire_approval(approval)
             return await self._record_question_result(
-                run, call, arguments, decision, _QUESTION_TIMEOUT_MSG
+                run, call, arguments, decision, _QUESTION_TIMEOUT_MSG, repairs
             )
         # DENIED или EXPIRED — ответа нет, продолжаем по best-guess.
         message = (
@@ -674,7 +740,7 @@ class AgentLoop:
             if approval.status is ApprovalStatus.EXPIRED
             else _QUESTION_NO_ANSWER_MSG
         )
-        return await self._record_question_result(run, call, arguments, decision, message)
+        return await self._record_question_result(run, call, arguments, decision, message, repairs)
 
     async def _record_question_result(
         self,
@@ -683,12 +749,13 @@ class AgentLoop:
         arguments: dict[str, Any],
         decision: PolicyDecision,
         message: str,
+        repairs: list[str],
     ) -> ToolResult:
         """Записать исход ask_user в trace и вернуть его модели как результат."""
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
@@ -720,27 +787,28 @@ class AgentLoop:
         в payload добавляется дедлайн: по нему resume решает, ждать ли дальше
         или продолжать без ответа (§6.5).
         """
-        existing = await self._recorder.find_approval_for_call(run, approval.call.id)
-        if existing is None:
-            # Approval показывает фактические аргументы, не пересказ агента (§12).
-            payload: dict[str, Any] = {
-                "call_id": approval.call.id,
-                "tool": approval.call.name,
-                "arguments": self._redact_json(approval.arguments),
-                "reason": self._redact_text(approval.decision.reason),
-            }
-            if approval.call.name == ASK_USER_TOOL_NAME:
-                payload["question"] = approval.arguments.get("question", "")
-                payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
-            await self._recorder.create_approval(
-                run,
-                action_type=approval.decision.action_type,
-                payload=payload,
+        with self._phases.measure("approval_wait"):
+            existing = await self._recorder.find_approval_for_call(run, approval.call.id)
+            if existing is None:
+                # Approval показывает фактические аргументы, не пересказ агента (§12).
+                payload: dict[str, Any] = {
+                    "call_id": approval.call.id,
+                    "tool": approval.call.name,
+                    "arguments": self._redact_json(approval.arguments),
+                    "reason": self._redact_text(approval.decision.reason),
+                }
+                if approval.call.name == ASK_USER_TOOL_NAME:
+                    payload["question"] = approval.arguments.get("question", "")
+                    payload["deadline"] = self._question_deadline(approval.arguments).isoformat()
+                await self._recorder.create_approval(
+                    run,
+                    action_type=approval.decision.action_type,
+                    payload=payload,
+                )
+            await self._save_checkpoint(run, state)
+            await self._recorder.set_run_state(
+                run, RunState.WAITING_APPROVAL, error=approval.decision.reason
             )
-        await self._save_checkpoint(run, state)
-        await self._recorder.set_run_state(
-            run, RunState.WAITING_APPROVAL, error=approval.decision.reason
-        )
         return self._outcome(run, RunState.WAITING_APPROVAL, state, "", approval.decision.reason)
 
     def _note_tool_call_result(
@@ -810,7 +878,14 @@ class AgentLoop:
                 continue
             tool_name = self._tool_name_for(state.messages, index, message.tool_call_id)
             spill = _SPILL_PATH_RE.search(message.content)
-            tail = f"Полный вывод: {spill.group(1)}" if spill else "повтори вызов при необходимости"
+            # Компакция — обучающий сигнал, а не молчаливое усечение: маркер
+            # говорит, что делать дальше, иначе модель повторяет тот же вызов.
+            tail = (
+                f"полный вывод: {spill.group(1)} — читай read_file частями (offset/limit)"
+                if spill
+                else "при необходимости повтори вызов с более узкими параметрами "
+                "(путь, паттерн, лимит), а не тот же самый"
+            )
             state.messages[index] = replace(
                 message,
                 content=(
@@ -850,8 +925,8 @@ class AgentLoop:
 
     async def _execute_tool(self, run: Run, call: ToolCallRequest) -> ToolResult:
         try:
-            arguments = call.parse_arguments()
-        except ValueError as exc:
+            tool = self._registry.get(call.name)
+        except UnknownToolError as exc:
             record = await self._recorder.start_tool_call(
                 run,
                 tool_name=call.name,
@@ -863,10 +938,13 @@ class AgentLoop:
             return result
 
         try:
-            tool = self._registry.get(call.name)
-        except UnknownToolError as exc:
+            arguments, repairs = self._registry.prepare_arguments(tool, call)
+        except ValueError as exc:
             record = await self._recorder.start_tool_call(
-                run, tool_name=call.name, arguments=self._redact_json(arguments), risk_level=None
+                run,
+                tool_name=call.name,
+                arguments={"_raw": self._redact_text(call.arguments_json)},
+                risk_level=None,
             )
             result = ToolResult.failure(str(exc))
             await self._recorder.finish_tool_call(record, ok=False, output="", error=result.error)
@@ -877,7 +955,7 @@ class AgentLoop:
             record = await self._recorder.start_tool_call(
                 run,
                 tool_name=call.name,
-                arguments=self._redact_json(arguments),
+                arguments=self._traced_arguments(call, arguments, repairs),
                 risk_level=decision.risk_level.value,
                 policy_decision=decision.action.value,
             )
@@ -888,9 +966,9 @@ class AgentLoop:
             return result
         if decision.action is PolicyAction.REQUIRE_APPROVAL:
             if call.name == ASK_USER_TOOL_NAME:
-                verdict = await self._consume_question(run, call, arguments, decision)
+                verdict = await self._consume_question(run, call, arguments, decision, repairs)
             else:
-                verdict = await self._consume_approval(run, call, arguments, decision)
+                verdict = await self._consume_approval(run, call, arguments, decision, repairs)
             if verdict is not None:
                 return verdict
         if decision.action is PolicyAction.NOTIFY and self._on_notify is not None:
@@ -901,7 +979,7 @@ class AgentLoop:
         record = await self._recorder.start_tool_call(
             run,
             tool_name=call.name,
-            arguments=self._redact_json(arguments),
+            arguments=self._traced_arguments(call, arguments, repairs),
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
