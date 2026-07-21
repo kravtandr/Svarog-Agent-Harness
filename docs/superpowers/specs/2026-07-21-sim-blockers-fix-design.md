@@ -46,6 +46,15 @@ OpenCode не совместим с HTTP-bridge» в `opencode.py:41` счита
 спайк её подтверждает или опровергает. Если несовместимо (протокол/версия) —
 СТОП, возврат к пользователю с вариантом B (эвристика waiting_input).
 
+**Спайк 2026-07-21: GO.** Remote-MCP секция в managed `opencode.jsonc`
+(`type: remote`, relay-URL `…/svarog/mcp`, Bearer-заголовок) работает:
+OpenCode подключился к мосту, `⚡ bridge.mcp — remember: ok`, память
+закоммичена (`memory: append` + reindex), run a4c950c2. Имена tools глазами
+OpenCode — с префиксом `svarog_` (`svarog_remember`, `svarog_read_memory`,
+`svarog_ask_user`, `svarog_create_skill_proposal`, `svarog_request_approval`)
+— использовать их в текстах AGENTS.md (§1c/§4). Комментарий о
+несовместимости в `opencode.py` устарел — удалить в §1b.
+
 **1b. Провод MCP в адаптер opencode** (после зелёного спайка):
 
 * `OpencodeAdapter.capabilities()` → `mcp=True` (hooks остаётся False —
