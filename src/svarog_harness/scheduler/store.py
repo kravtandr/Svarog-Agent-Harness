@@ -6,8 +6,9 @@
 """
 
 from datetime import datetime
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.scheduler.schedule import next_run_after, parse_spec
@@ -89,10 +90,15 @@ class JobStore:
         for job in candidates:
             following = next_run_after(job.schedule_kind, job.schedule_spec, job.tz, now)
             # compare-and-set: захватывает тот, кто первым сдвинул next_run_at.
-            result = await self._db.execute(
-                update(CronJob)
-                .where(CronJob.id == job.id, CronJob.next_run_at == job.next_run_at)
-                .values(next_run_at=following)
+            # execute() типизирован как Result; rowcount есть только у CursorResult,
+            # который DML и возвращает — отсюда cast.
+            result = cast(
+                "CursorResult[Any]",
+                await self._db.execute(
+                    update(CronJob)
+                    .where(CronJob.id == job.id, CronJob.next_run_at == job.next_run_at)
+                    .values(next_run_at=following)
+                ),
             )
             if result.rowcount:
                 await self._db.refresh(job)
