@@ -101,6 +101,11 @@ class RuntimeConfig(StrictModel):
     # 1.6: детектор затухающей отдачи — подряд идентичных вызовов/итераций
     # без прогресса до ухода в suspended.
     stagnation_repeats: int = Field(default=3, gt=1)
+    # Блок B: сколько раз подряд run продолжает себя сам после сброса контекста
+    # в task_state.md. 0 — прежнее поведение (приостановка, продолжение только
+    # через `svarog resume`). Потолок — защита от бесконечного цикла; реальным
+    # регулятором длительности служат бюджеты токенов и стоимости.
+    max_refuel_rounds: int = Field(default=12, ge=0)
 
 
 class SandboxConfig(StrictModel):

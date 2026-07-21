@@ -748,6 +748,14 @@ class GatewayService:
         sup = self.cfg.supervisor
         if not sup.auto_resume_refuel:
             return []
+        if self.cfg.runtime.max_refuel_rounds:
+            # Блок B: механизм продолжения выбирается конфигом, а не сосуществует.
+            # При включённом автопродолжении run продолжает себя внутри цикла, а
+            # refuel-приостановка означает исчерпанный потолок — намеренную
+            # остановку, решение по которой принимает человек. Поднимать её
+            # супервизором значило бы отменять потолок: ручной resume выдаёт
+            # новый бюджет раундов, и получилась бы петля.
+            return []
 
         async def fetch(db: AsyncSession) -> list[Run]:
             return await TraceRecorder(db).find_refuel_suspended_runs()

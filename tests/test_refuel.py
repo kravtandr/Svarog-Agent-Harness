@@ -116,7 +116,9 @@ async def test_refuel_suspends_then_resume_rebuilds_context(
     db: AsyncSession, tmp_path: Path
 ) -> None:
     # refuel на 2-й итерации: run приостанавливается, resume пересобирает контекст.
-    cfg = RuntimeConfig(max_iterations=6, refuel_after_iterations=2)
+    # max_refuel_rounds=0 — это тест пути приостановки (блок B §1): с включённым
+    # автопродолжением run продолжил бы себя сам, и проверять было бы нечего.
+    cfg = RuntimeConfig(max_iterations=6, refuel_after_iterations=2, max_refuel_rounds=0)
     provider = ScriptedProvider(
         [
             _tool_turn(0),
@@ -151,9 +153,21 @@ async def test_refuel_suspends_then_resume_rebuilds_context(
     assert "task_state" in request_after_refuel[1].content.lower()
 
 
-async def test_max_iterations_still_caps_across_refuel(db: AsyncSession, tmp_path: Path) -> None:
-    # refuel каждые 2 итерации, но всего не больше 3 — max должен сработать после resume.
-    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=2)
+async def test_max_iterations_caps_segment_not_total(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок B §2: max_iterations ограничивает сегмент между refuel'ами.
+
+    Раньше этот счётчик был тотальным стоп-краном и срабатывал после resume;
+    теперь refuel обнуляет сегмент, и тотальное число итераций уходит за
+    max_iterations. Общие стоп-краны — потолок раундов и бюджеты.
+    stagnation_repeats поднят: провайдер повторяет один и тот же вызов, а
+    детектор затухающей отдачи здесь не предмет проверки.
+    """
+    cfg = RuntimeConfig(
+        max_iterations=3,
+        refuel_after_iterations=2,
+        max_refuel_rounds=0,
+        stagnation_repeats=10,
+    )
     provider = ScriptedProvider([_tool_turn(i) for i in range(10)])
     first = await _loop(provider, db, tmp_path, cfg).run("бесконечная", AutonomyMode.YOLO)
 
@@ -165,7 +179,38 @@ async def test_max_iterations_still_caps_across_refuel(db: AsyncSession, tmp_pat
     run, raw = await TraceRecorder(db).load_resumable(first.run_id)
     resumed = await _loop(provider, db, tmp_path, cfg).resume(run, LoopState.from_dict(raw))
 
-    # После resume max_iterations срабатывает на 3-й итерации (жёсткий стоп-кран).
+    # Сегмент после resume — снова свой: run доходит до следующего refuel,
+    # а тотальный счётчик перешагивает max_iterations.
     assert resumed.state is RunState.SUSPENDED
-    assert resumed.iterations == 3
-    assert "лимит итераций" in (resumed.error or "")
+    assert "refuel" in (resumed.error or "")
+    assert resumed.iterations == 4
+    assert resumed.iterations > cfg.max_iterations
+
+
+# --- Блок B §1/§4: потолок автопродолжений и счётчик раундов -----------------
+
+
+def test_loop_state_roundtrip_keeps_refuel_rounds(tmp_path: Path) -> None:
+    """Счётчик раундов переживает checkpoint: иначе падение процесса
+    обнуляло бы потолок само собой."""
+    state = LoopState(workspace=tmp_path, messages=[], task="t", refuel_rounds=3)
+    restored = LoopState.from_dict(state.to_dict())
+    assert restored.refuel_rounds == 3
+
+
+def test_loop_state_reads_old_checkpoint_without_refuel_rounds(tmp_path: Path) -> None:
+    """Checkpoint, записанный до блока B, читается со счётчиком 0."""
+    state = LoopState(workspace=tmp_path, messages=[], task="t")
+    raw = state.to_dict()
+    del raw["refuel_rounds"]
+    assert LoopState.from_dict(raw).refuel_rounds == 0
+
+
+def test_runtime_config_default_refuel_rounds() -> None:
+    """По умолчанию автопродолжение включено с потолком 12."""
+    assert RuntimeConfig().max_refuel_rounds == 12
+
+
+def test_runtime_config_allows_disabling_autocontinue() -> None:
+    """Ноль — прежнее поведение: приостановка на первом refuel."""
+    assert RuntimeConfig(max_refuel_rounds=0).max_refuel_rounds == 0
