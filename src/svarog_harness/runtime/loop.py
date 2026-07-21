@@ -391,6 +391,22 @@ class AgentLoop:
                         await self._record_message(run, "user", {"content": nudge})
                         await self._save_checkpoint(run, state)
                         continue
+                    if nudge is not None:
+                        # Nudge'и исчерпаны, а валидного финального ответа так и
+                        # нет. Считать это успехом — значит рапортовать
+                        # завершение недоделанной задачи: у моделей с отдельным
+                        # каналом рассуждений пустой ход выглядит как «ответ»,
+                        # хотя работа не сделана. Решает человек — как при
+                        # затухающей отдаче (§1.6).
+                        state.nudges = 0
+                        return await self._suspend(
+                            run,
+                            state,
+                            "модель не вернула валидный финальный ответ после "
+                            f"{_MAX_NUDGES} попыток (пустой ответ, обрезка или "
+                            "протёкший tool call); проверьте, доведена ли задача "
+                            "до конца, и выполните resume",
+                        )
                     await self._recorder.finish_run(run, RunState.COMPLETED)
                     return self._outcome(run, RunState.COMPLETED, state, result_content)
 
