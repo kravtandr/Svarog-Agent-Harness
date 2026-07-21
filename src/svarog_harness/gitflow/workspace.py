@@ -10,6 +10,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
+from svarog_harness.config.loader import PROJECT_CONFIG_NAME
 from svarog_harness.config.schema import GitConfig
 from svarog_harness.gitflow.commit_gate import commit_guarded, scan_ref
 from svarog_harness.gitflow.repo import GitError, GitRepo
@@ -93,6 +94,11 @@ class WorkspaceFlow:
         # Служебное дерево runtime (spill tool-результатов, ADR-0015 §1.2)
         # не попадает в коммиты Flow C.
         await self._repo.ensure_excluded(".svarog/")
+        # Project-конфиг (имена секретов!) не принадлежит диффу run'а: попав в
+        # task-ветку, он к тому же исчезает из рабочего дерева при checkout
+        # master (кампания 21.07.2026, S11 Watch(6)). info/exclude не трогает
+        # уже отслеживаемый конфиг, если пользователь коммитит его сам.
+        await self._repo.ensure_excluded(PROJECT_CONFIG_NAME)
         await self._repo.add_all()
         if not await self._repo.has_staged_changes():
             return None
