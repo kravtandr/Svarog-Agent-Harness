@@ -169,3 +169,32 @@ async def test_max_iterations_still_caps_across_refuel(db: AsyncSession, tmp_pat
     assert resumed.state is RunState.SUSPENDED
     assert resumed.iterations == 3
     assert "лимит итераций" in (resumed.error or "")
+
+
+# --- Блок B §1/§4: потолок автопродолжений и счётчик раундов -----------------
+
+
+def test_loop_state_roundtrip_keeps_refuel_rounds(tmp_path: Path) -> None:
+    """Счётчик раундов переживает checkpoint: иначе падение процесса
+    обнуляло бы потолок само собой."""
+    state = LoopState(workspace=tmp_path, messages=[], task="t", refuel_rounds=3)
+    restored = LoopState.from_dict(state.to_dict())
+    assert restored.refuel_rounds == 3
+
+
+def test_loop_state_reads_old_checkpoint_without_refuel_rounds(tmp_path: Path) -> None:
+    """Checkpoint, записанный до блока B, читается со счётчиком 0."""
+    state = LoopState(workspace=tmp_path, messages=[], task="t")
+    raw = state.to_dict()
+    del raw["refuel_rounds"]
+    assert LoopState.from_dict(raw).refuel_rounds == 0
+
+
+def test_runtime_config_default_refuel_rounds() -> None:
+    """По умолчанию автопродолжение включено с потолком 12."""
+    assert RuntimeConfig().max_refuel_rounds == 12
+
+
+def test_runtime_config_allows_disabling_autocontinue() -> None:
+    """Ноль — прежнее поведение: приостановка на первом refuel."""
+    assert RuntimeConfig(max_refuel_rounds=0).max_refuel_rounds == 0
