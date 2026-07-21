@@ -38,9 +38,10 @@ class OpencodeAdapter:
         return "openai"
 
     def capabilities(self) -> AdapterCapabilities:
-        # hooks/mcp: permission-хуков нет; MCP-конфиг OpenCode не совместим
-        # с HTTP-bridge Svarog — честно False (supervised → fail-closed).
-        return AdapterCapabilities(hooks=False, resume=True, mcp=False)
+        # hooks: permission-хуков нет — supervised остаётся fail-closed.
+        # mcp: мост Svarog подключается remote-секцией managed-конфига
+        # (спайк 2026-07-21, spec 2026-07-21-sim-blockers-fix §1a).
+        return AdapterCapabilities(hooks=False, resume=True, mcp=True)
 
     def command(self, launch: AgentLaunch) -> list[str]:
         argv = [self._binary, "run", launch.task, "--format", "json"]
@@ -100,6 +101,21 @@ class OpencodeAdapter:
         return {
             ".config/opencode/opencode.jsonc": json.dumps(config, ensure_ascii=False, indent=2)
             + "\n"
+        }
+
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        """Мост Svarog как remote-MCP в managed-конфиге OpenCode."""
+        return {
+            ".config/opencode/opencode.jsonc": {
+                "mcp": {
+                    "svarog": {
+                        "type": "remote",
+                        "url": url,
+                        "headers": {"Authorization": f"Bearer {token}"},
+                        "enabled": True,
+                    }
+                }
+            }
         }
 
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:

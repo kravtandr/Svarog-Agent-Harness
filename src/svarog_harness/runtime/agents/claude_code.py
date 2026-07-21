@@ -123,6 +123,10 @@ class ClaudeCodeAdapter:
         # Модель Claude Code выбирает подписка/ANTHROPIC_MODEL — конфиг не нужен.
         return {}
 
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        # Мост подключается launch-файлом --mcp-config, не state-конфигом.
+        return {}
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         settings: dict[str, Any] = {"permissions": {"defaultMode": "bypassPermissions"}}
         if hook_command is not None:

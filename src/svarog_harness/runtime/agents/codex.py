@@ -87,6 +87,10 @@ class CodexAdapter:
         # Провайдер/модель Codex задаются его собственным конфигом в state.
         return {}
 
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        # MCP не поддерживается (capabilities.mcp=False).
+        return {}
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         return None  # у Codex нет managed-настроек с высшим приоритетом
 

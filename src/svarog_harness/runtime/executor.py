@@ -159,6 +159,14 @@ class AgentAdapter(Protocol):
         (модель/endpoint заданы механизмом самого агента)."""
         ...
 
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        """JSON-патчи state-файлов для подключения MCP-клиента агента к мосту.
+
+        Ключ — относительный путь state-файла внутри state_dir, значение
+        deep-merge'ится в JSON этого файла. Пусто — адаптер берёт мост иначе
+        (claude-code: --mcp-config) или MCP не поддерживает."""
+        ...
+
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:
         """Содержимое managed-настроек агента (ADR-0016 §6) — read-only
         mount с высшим приоритетом; None — агент их не поддерживает."""
