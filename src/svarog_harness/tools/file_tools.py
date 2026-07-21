@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from svarog_harness.paths import PathTraversalError, safe_join
 from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult
+from svarog_harness.tools.guidance import BoundaryKind
 
 _MAX_OUTPUT_CHARS = 50_000
 _MAX_SEARCH_MATCHES = 200
@@ -35,13 +36,14 @@ def resolve_in_workspace(workspace: Path, raw: str, *, for_write: bool = False) 
     try:
         resolved = safe_join(workspace, raw)
     except PathTraversalError as exc:
-        raise ToolError(str(exc)) from None
+        raise ToolError(str(exc), kind=BoundaryKind.WORKSPACE_ESCAPE) from None
     if for_write:
         rel_parts = resolved.relative_to(workspace.resolve()).parts
         if rel_parts and rel_parts[0] in _WRITE_DENY_PREFIXES:
             raise ToolError(
                 f"запись в управляющий каталог запрещена: {raw} "
-                f"(префикс '{rel_parts[0]}' зарезервирован runtime)"
+                f"(префикс '{rel_parts[0]}' зарезервирован runtime)",
+                kind=BoundaryKind.CONTROL_DIR_WRITE,
             )
     return resolved
 
