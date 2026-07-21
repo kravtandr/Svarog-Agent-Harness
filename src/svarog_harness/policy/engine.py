@@ -36,6 +36,10 @@ CRITICAL_ACTIONS = frozenset(
         "git.force_push",
         "git.push_protected",
         "policy.weaken",
+        # Джоба переживает run и исполняется позже, с конфигом на момент
+        # срабатывания: без approval инъекция из файла получила бы способ
+        # закрепиться (ADR-0019, блок D §7).
+        "schedule.create",
     }
 )
 
