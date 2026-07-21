@@ -51,6 +51,21 @@ class ApprovalStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class ScheduleKind(StrEnum):
+    """Вид расписания (блок D §2). Полный cron-синтаксис вне объёма."""
+
+    EVERY = "every"  # интервал в секундах, schedule_spec — число
+    DAILY_AT = "daily_at"  # время суток, schedule_spec — "HH:MM"
+
+
+class JobOrigin(StrEnum):
+    """Кто завёл джобу: от этого зависит, можно ли её менять агенту."""
+
+    HUMAN = "human"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
 class MemoryChangeStatus(StrEnum):
     """Статус заявки в очереди single writer'а памяти (ADR-0004)."""
 
@@ -264,6 +279,37 @@ class SkillLoad(TimestampedBase):
     skill_version: Mapped[str | None] = mapped_column(String(64))
     # card — попал в контекст карточкой; full — загружен целиком через read_skill.
     source: Mapped[str] = mapped_column(String(32), default="full")
+
+
+class CronJob(TimestampedBase):
+    """Джоба планировщика: источник запуска run'ов, отличный от человека (ADR-0019).
+
+    Права (`autonomy`, `config_digest`) заморожены при создании или approval:
+    последующее ослабление конфига не повышает прав уже одобренной джобы, а
+    расхождение дайджеста при срабатывании отключает джобу (fail-closed).
+    """
+
+    __tablename__ = "cron_jobs"
+
+    name: Mapped[str] = mapped_column(String(128))
+    schedule_kind: Mapped[ScheduleKind] = mapped_column(_enum(ScheduleKind))
+    schedule_spec: Mapped[str] = mapped_column(String(64))
+    tz: Mapped[str] = mapped_column(String(64), default="UTC")
+    task: Mapped[str] = mapped_column(Text)
+    workspace: Mapped[str] = mapped_column(String(1024))
+    session_id: Mapped[str | None] = mapped_column(String(32))
+    # Замороженные права (§6): режим автономии и снимок security-конфига.
+    autonomy: Mapped[str] = mapped_column(String(32))
+    config_digest: Mapped[str] = mapped_column(String(64))
+    origin: Mapped[JobOrigin] = mapped_column(_enum(JobOrigin))
+    # Выключена по умолчанию: активацию делает явный шаг (approval или CLI).
+    enabled: Mapped[bool] = mapped_column(default=False, index=True)
+    # Системные джобы агентский инструмент не меняет и не удаляет.
+    protected: Mapped[bool] = mapped_column(default=False)
+    next_run_at: Mapped[datetime] = mapped_column(index=True)
+    last_run_at: Mapped[datetime | None]
+    last_status: Mapped[str | None] = mapped_column(String(255))
+    run_count: Mapped[int] = mapped_column(default=0)
 
 
 class CheckResult(TimestampedBase):
