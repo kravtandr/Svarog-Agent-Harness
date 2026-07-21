@@ -14,6 +14,7 @@ import shutil
 import uuid
 from pathlib import Path
 
+from svarog_harness.config.loader import deep_merge
 from svarog_harness.config.schema import ExternalExecutorConfig, RuntimeConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError
 from svarog_harness.runtime.agents import CLIENT_GATE_TIMEOUT_MARGIN_SEC
@@ -164,6 +165,16 @@ class ExternalAgentInfra:
         # Managed-конфиг провайдера (executor.external.model): перезаписывает
         # одноимённый файл в state — источник истины по модели у Svarog.
         state_files.update(self._adapter.provider_files(self._external_cfg.model))
+        if self._adapter.capabilities().mcp:
+            # Конфиг-based MCP-клиенты (opencode): патч мержится в JSON
+            # state-файла; claude-code берёт мост launch-файлом ниже.
+            mcp_url = f"{self.agent_base_url()}/svarog/mcp"
+            mcp_token = self.bridge.token if self.bridge is not None else ""
+            for rel, patch in self._adapter.mcp_client_config(mcp_url, mcp_token).items():
+                base = json.loads(state_files[rel]) if rel in state_files else {}
+                state_files[rel] = (
+                    json.dumps(deep_merge(base, patch), ensure_ascii=False, indent=2) + "\n"
+                )
         for rel, content in state_files.items():
             target = self._state_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
