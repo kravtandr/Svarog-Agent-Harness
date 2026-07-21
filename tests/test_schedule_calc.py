@@ -61,3 +61,21 @@ def test_unknown_timezone_is_rejected() -> None:
     now = datetime(2026, 7, 21, 1, 0, tzinfo=UTC)
     with pytest.raises(ScheduleSpecError):
         next_run_after(ScheduleKind.DAILY_AT, "03:00", "Нигде/Такого", now)
+
+
+def test_naive_now_is_treated_as_utc() -> None:
+    """В БД время наивно-UTC (storage.models.utcnow) — расчёт обязан это учитывать.
+
+    Регрессия: astimezone на наивном времени трактовал бы его как локальное
+    системное, и расписание уезжало бы на смещение хоста.
+    """
+    naive = datetime(2026, 7, 21, 22, 0)  # 22:00 UTC, без tzinfo
+    result = next_run_after(ScheduleKind.DAILY_AT, "03:00", "Europe/Moscow", naive)
+
+    assert result.tzinfo is None  # формат входа сохраняется
+    assert result == datetime(2026, 7, 22, 0, 0)  # 03:00 MSK = 00:00 UTC
+
+
+def test_naive_now_interval_stays_naive() -> None:
+    naive = datetime(2026, 7, 21, 22, 0)
+    assert next_run_after(ScheduleKind.EVERY, "3600", "UTC", naive) == datetime(2026, 7, 21, 23, 0)

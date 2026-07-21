@@ -8,7 +8,7 @@
 """
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from svarog_harness.storage.models import ScheduleKind
@@ -49,15 +49,24 @@ def next_run_after(kind: ScheduleKind, spec: str, tz: str, now: datetime) -> dat
     Строгое «после» важно на границе: при расчёте от момента самого
     срабатывания следующее должно уехать на сутки вперёд, иначе джоба
     зациклилась бы на одном и том же моменте.
+
+    Наивное `now` трактуется как UTC — это формат времени в БД проекта
+    (`storage.models.utcnow`), и результат возвращается в том же виде, в
+    каком пришёл вход. Без явной трактовки `astimezone` посчитал бы наивное
+    время локальным системным, и расписание уехало бы на смещение хоста.
     """
     parse_spec(kind, spec)
     zone = _zone(tz)
+    naive_input = now.tzinfo is None
+    aware = now.replace(tzinfo=UTC) if naive_input else now
+
     if kind is ScheduleKind.EVERY:
         return now + timedelta(seconds=int(spec))
 
     hour, minute = (int(part) for part in spec.split(":"))
-    local = now.astimezone(zone)
+    local = aware.astimezone(zone)
     candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if candidate <= local:
         candidate += timedelta(days=1)
-    return candidate.astimezone(now.tzinfo)
+    result = candidate.astimezone(aware.tzinfo)
+    return result.replace(tzinfo=None) if naive_input else result
