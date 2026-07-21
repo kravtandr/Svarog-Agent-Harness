@@ -199,6 +199,8 @@ class CuratorConfig(StrictModel):
     archive_after_days: int = Field(default=90, gt=0)
     # Слой 2 (LLM-консолидация) выключен по умолчанию — opt-in (ADR-0009).
     semantic: bool = False
+    # Блок D: как часто системная джоба планировщика гоняет слой 1 (ADR-0019).
+    prune_interval_sec: int = Field(default=86_400, gt=0)
 
     @model_validator(mode="after")
     def _check_thresholds(self) -> Self:

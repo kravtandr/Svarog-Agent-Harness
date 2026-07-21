@@ -16,12 +16,19 @@ scheduled-задач в текущем срезе нет — точка расш
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.schema import CuratorConfig
 from svarog_harness.skills.curator.state import CuratorStore
 from svarog_harness.skills.models import Skill
-from svarog_harness.storage.models import SkillLifecycleStatus, utcnow
+from svarog_harness.storage.models import (
+    CronJob,
+    Run,
+    SkillLifecycleStatus,
+    SkillLoad,
+    utcnow,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,7 @@ async def prune_layer1(
     """Применить обратимые lifecycle-переходы для agent-created скиллов."""
     now = now or utcnow()
     store = CuratorStore(db)
+    protected = await _skills_used_by_enabled_jobs(db)
     transitions: list[Transition] = []
     for skill in skills:
         if skill.metadata.provenance != "agent":
@@ -59,7 +67,10 @@ async def prune_layer1(
         state.last_used_at = last_used
         if state.pinned:
             continue  # pinned — вне авто-переходов
-        # scheduled-задачи защищали бы скилл от архивации (§18.1); их пока нет.
+        if skill.name in protected:
+            # Скилл используется автоматизацией (ADR-0019): редко срабатывающая
+            # джоба иначе потеряла бы свой скилл по сроку неактивности (§18.1).
+            continue
         anchor = last_used or state.created_at  # якорь new-skill: created_at
         age_days = (now - anchor).days
         target = _target_status(age_days, cfg)
@@ -80,3 +91,25 @@ async def prune_layer1(
             state.archived_at = now if target is SkillLifecycleStatus.ARCHIVED else None
     await db.commit()
     return transitions
+
+
+async def _skills_used_by_enabled_jobs(db: AsyncSession) -> set[str]:
+    """Скиллы, загружавшиеся в run'ах включённых джоб планировщика.
+
+    Связь определяется по телеметрии, а не по тексту задачи джобы: гадать,
+    какие скиллы понадобятся строке задания, было бы хрупко (ADR-0019 §8).
+    """
+    enabled = (await db.execute(select(CronJob.id).where(CronJob.enabled.is_(True)))).scalars()
+    job_ids = set(enabled)
+    if not job_ids:
+        return set()
+
+    runs = (await db.execute(select(Run.id, Run.meta))).all()
+    run_ids = {run_id for run_id, meta in runs if (meta or {}).get("cron_job_id") in job_ids}
+    if not run_ids:
+        return set()
+
+    names = (
+        await db.execute(select(SkillLoad.skill_name).where(SkillLoad.run_id.in_(run_ids)))
+    ).scalars()
+    return set(names)
