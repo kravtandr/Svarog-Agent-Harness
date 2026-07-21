@@ -30,6 +30,10 @@ class LoopState:
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
     # Итераций с последнего refuel; при пороге контекст сбрасывается (§6.10).
     iterations_since_refuel: int = 0
+    # Сколько автоматических продолжений после refuel уже израсходовано
+    # (блок B §4). Переживает checkpoint: иначе падение процесса обнуляло бы
+    # потолок. Ручной resume обнуляет счётчик — см. AgentLoop.resume.
+    refuel_rounds: int = 0
     # Сколько раз модели возвращали дефектный «финальный» ответ на повтор
     # (протёкший tool call, обрезка по токенам, пустой ответ).
     nudges: int = 0
@@ -60,6 +64,7 @@ class LoopState:
             "last_prompt_tokens": self.last_prompt_tokens,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
             "iterations_since_refuel": self.iterations_since_refuel,
+            "refuel_rounds": self.refuel_rounds,
             "nudges": self.nudges,
             "refuel_pending": self.refuel_pending,
             "plan": self.plan,
@@ -83,6 +88,7 @@ class LoopState:
             last_prompt_tokens=raw.get("last_prompt_tokens", 0),
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
+            refuel_rounds=raw.get("refuel_rounds", 0),
             nudges=raw.get("nudges", 0),
             refuel_pending=raw.get("refuel_pending", False),
             plan=[

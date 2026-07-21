@@ -256,26 +256,29 @@ Workspace на сервере берётся из двух источников 
 
 ### Запуск из любой папки (без `cd agent-home`)
 
-`svarog.yaml` грузится из `<workspace>/svarog.yaml` (workspace по умолчанию — `Path.cwd()`) и **user-level** `~/.svarog/svarog.yaml`, если он есть (§13, приоритет: user → project → env). Чтобы `svarog chat`/`run` работали как `claude` — из любого проекта, без `cd agent-home` и без `--workspace` — держите agent-home-конфиг в user-level файле с **абсолютными** путями к `memory`/`skills`/`storage.db_path` (относительные `./memory` резолвятся от cwd, а не от расположения файла):
-
-```yaml
-# ~/.svarog/svarog.yaml
-models: { … }               # как в agent-home/svarog.yaml
-memory:
-  path: /абсолютный/путь/agent-home/memory
-skills:
-  paths: [/абсолютный/путь/agent-home/skills]
-storage:
-  db_path: /абсолютный/путь/agent-home/.svarog/svarog.db
-```
-
-И alias в shell rc (`~/.bash_profile`/`~/.zshrc`):
+`svarog.yaml` грузится из `<workspace>/svarog.yaml` (workspace по умолчанию — `Path.cwd()`), **user-level** `~/.svarog/svarog.yaml` и переменных `SVAROG_*` (§13, приоритет: user → project → env). Чтобы `svarog chat`/`run` работали как `claude` — из любого проекта, без `cd agent-home` и без `--workspace` — добавьте в shell rc (`~/.bashrc`/`~/.zshrc`) универсальный блок: путь к agent-home задаётся **одной** переменной, всё остальное выводится из неё:
 
 ```bash
-alias svarog='uv --project /path/to/Svarog-Agent-Harness run svarog'
+# где лежит checkout Svarog и созданный `svarog init` agent-home — правится в одном месте
+export SVAROG_REPO="$HOME/proj/Svarog-Agent-Harness"
+export SVAROG_AGENT_HOME="$SVAROG_REPO/agent-home"
+# относительные ./memory, ./skills, ./.svarog в agent-home/svarog.yaml резолвятся
+# от cwd — env-переменные (приоритетнее yaml) прибивают их к agent-home:
+export SVAROG_MEMORY__PATH="$SVAROG_AGENT_HOME/memory"
+export SVAROG_SKILLS__PATHS="[\"$SVAROG_AGENT_HOME/skills\"]"
+export SVAROG_STORAGE__DB_PATH="$SVAROG_AGENT_HOME/.svarog/svarog.db"
+alias svarog='uv --project "$SVAROG_REPO" run svarog'
 ```
 
-После этого `cd` в любой проект и `svarog chat` — workspace = текущая папка, control-plane (память/скиллы/БД) фиксирован в agent-home, `assert_workspace_isolated` (ADR-0015 §0.3) не ругается. Нюанс: `policies/*.yaml` читается из `<workspace>/policies/`, а не из agent-home — кастомные project-level правила при запуске из папки без своего `policies/` не действуют; неотключаемый critical-набор и risk×autonomy (§3.6) от workspace не зависят и продолжают работать.
+И один раз подключите конфиг agent-home как user-level — symlink, копия с абсолютными путями не нужна:
+
+```bash
+mkdir -p ~/.svarog && ln -sf "$SVAROG_AGENT_HOME/svarog.yaml" ~/.svarog/svarog.yaml
+```
+
+(Если `~/.svarog/svarog.yaml` уже существует — например, после `svarog login` — не затирайте его symlink'ом: перенесите его содержимое в `agent-home/svarog.yaml` перед линковкой.)
+
+После этого `cd` в любой проект и `svarog chat` — workspace = текущая папка, control-plane (память/скиллы/БД/конфиг) фиксирован в agent-home «где создан», `assert_workspace_isolated` (ADR-0015 §0.3) не ругается. Секреты и история чата от cwd не зависят (`~/.svarog/secrets.json`, `~/.svarog/chat_history`). Нюанс: `policies/*.yaml` читается из `<workspace>/policies/`, а не из agent-home — кастомные project-level правила при запуске из папки без своего `policies/` не действуют; неотключаемый critical-набор и risk×autonomy (§3.6) от workspace не зависят и продолжают работать.
 
 ## Сравнение с Hermes и OpenClaw
 
