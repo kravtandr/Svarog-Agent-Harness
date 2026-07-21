@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -65,7 +66,18 @@ def _pid_alive(pid: str) -> bool:
     return True
 
 
-def find_agent_orphans(run=subprocess.run) -> tuple[list[str], list[str]]:
+def _orphan_names(out: str) -> list[str]:
+    names = []
+    for line in out.splitlines():
+        name, _, pid = line.partition("\t")
+        if name and not _pid_alive(pid):
+            names.append(name)
+    return names
+
+
+def find_agent_orphans(
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[list[str], list[str]]:
     """Ресурсы svarog-agent=1 без живого владельца (svarog-owner-pid).
 
     Ресурсы, созданные до появления reaper'а, метки owner не имеют и не
@@ -78,27 +90,21 @@ def find_agent_orphans(run=subprocess.run) -> tuple[list[str], list[str]]:
         capture_output=True,
         text=True,
     ).stdout
-    containers = [
-        name
-        for line in out.splitlines()
-        if (name := line.split("\t")[0]) and not _pid_alive(line.split("\t")[1] if "\t" in line else "")
-    ]
+    containers = _orphan_names(out)
     nfmt = '{{.Name}}\t{{index .Labels "svarog-owner-pid"}}'
     nout = run(
         ["docker", "network", "ls", "--filter", "label=svarog-agent=1", "--format", nfmt],
         capture_output=True,
         text=True,
     ).stdout
-    networks = [
-        name
-        for line in nout.splitlines()
-        if (name := line.split("\t")[0]) and not _pid_alive(line.split("\t")[1] if "\t" in line else "")
-    ]
+    networks = _orphan_names(nout)
     return containers, networks
 
 
 def remove_agent_orphans(
-    containers: list[str], networks: list[str], run=subprocess.run
+    containers: list[str],
+    networks: list[str],
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     """Удалить найденных сирот (вызывается ТОЛЬКО по явному --clean-orphans)."""
     if containers:

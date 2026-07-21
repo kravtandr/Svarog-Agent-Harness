@@ -35,7 +35,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
-from svarog_harness.tools.user_tools import question_options
 from svarog_harness.runtime.bridge import ControlHandler
 from svarog_harness.secrets.redaction import redact
 from svarog_harness.skills import Skill
@@ -44,6 +43,7 @@ from svarog_harness.storage.models import Approval, ApprovalStatus, Run, utcnow
 from svarog_harness.tools.base import RiskLevel, Tool
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
+from svarog_harness.tools.user_tools import question_options
 from svarog_harness.trace.recorder import TraceRecorder
 
 # Версия MCP-протокола, которую сервер подтверждает клиенту.
@@ -199,9 +199,7 @@ class BridgeControl:
         if name == "ask_user":
             payload: dict[str, Any] = {
                 "question": str(arguments.get("question", "")),
-                "deadline": (
-                    utcnow() + timedelta(seconds=self._ask_user_timeout_sec)
-                ).isoformat(),
+                "deadline": (utcnow() + timedelta(seconds=self._ask_user_timeout_sec)).isoformat(),
             }
             options = question_options(arguments)
             if options:
