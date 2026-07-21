@@ -74,6 +74,39 @@ def test_docker_run_args_without_skills(tmp_path: Path) -> None:
     assert not any(":/skills:ro" in a for a in args)
 
 
+def test_docker_run_args_never_mount_agent_home(tmp_path: Path) -> None:
+    """Блок E §4: agent-home не монтируется в sandbox ни при каком режиме.
+
+    Инвариант, из-за которого не понадобилась tmpfs-маскировка: контейнер
+    просто не видит каталог с конфигом, секретами и БД. Легально монтируются
+    только отдельные каталоги ВНУТРИ agent-home (skills, состояние внешнего
+    агента), но не он сам. Держим это тестом, а не соглашением.
+    """
+    agent_home = tmp_path / "agent-home"
+    agent_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = agent_home / "skills"
+    skills.mkdir()
+    state_dir = agent_home / ".svarog" / "agent-state" / "claude-code"
+    state_dir.mkdir(parents=True)
+
+    env = DockerEnvironment(
+        workspace,
+        SandboxConfig(),
+        skills_dir=skills,
+        extra_mounts=[(state_dir, "/home/agent/.claude", False)],
+    )
+    args = env.run_args()
+
+    hosts = [Path(args[i + 1].split(":", 1)[0]) for i, a in enumerate(args) if a == "-v"]
+    assert hosts, "ожидались bind-mount'ы"
+    assert agent_home not in hosts
+    for host in hosts:
+        if agent_home in host.parents:
+            assert host in (skills, state_dir), f"неожиданный mount из agent-home: {host}"
+
+
 async def test_docker_execute_before_start_raises(tmp_path: Path) -> None:
     env = DockerEnvironment(tmp_path, SandboxConfig())
     with pytest.raises(SandboxError, match="не запущен"):
