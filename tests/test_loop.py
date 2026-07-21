@@ -1029,3 +1029,97 @@ async def test_policy_deny_explains_boundary_to_model(db: AsyncSession, tmp_path
     assert tool_call.error is not None
     assert "инфраструктура" in tool_call.error
     assert "request_approval" not in tool_call.error
+
+
+# --- Блок B: автопродолжение после refuel ------------------------------------
+
+
+async def test_max_iterations_limits_segment_not_run(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок B §2: max_iterations ограничивает сегмент между refuel'ами.
+
+    Сегмент = 2 итерации, потолок раундов = 2, лимит сегмента = 3. Run
+    проходит 5 итераций — больше max_iterations — и завершается сам.
+    """
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(f"содержимое {name}", encoding="utf-8")
+    # Вызовы должны различаться: одинаковые подряд ловит детектор затухающей
+    # отдачи (ADR-0015 §1.6) и приостанавливает run раньше refuel.
+    calls = [
+        ToolCallRequest(id=f"c{i}", name="read_file", arguments_json=f'{{"path": "{n}.txt"}}')
+        for i, n in enumerate(("a", "b", "c", "d"))
+    ]
+    provider = ScriptedProvider([_tool_turn(c) for c in calls] + [_final("готово")])
+    cfg = RuntimeConfig(max_iterations=3, refuel_after_iterations=2, max_refuel_rounds=2)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("работай", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.iterations == 5
+
+
+async def test_autocontinue_finishes_task_without_manual_resume(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Блок B §3: run сам продолжает работу после сброса контекста."""
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(f"содержимое {name}", encoding="utf-8")
+    # Вызовы должны различаться: одинаковые подряд ловит детектор затухающей
+    # отдачи (ADR-0015 §1.6) и приостанавливает run раньше refuel.
+    calls = [
+        ToolCallRequest(id=f"c{i}", name="read_file", arguments_json=f'{{"path": "{n}.txt"}}')
+        for i, n in enumerate(("a", "b", "c", "d"))
+    ]
+    provider = ScriptedProvider([_tool_turn(c) for c in calls] + [_final("готово")])
+    cfg = RuntimeConfig(max_iterations=10, refuel_after_iterations=2, max_refuel_rounds=2)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("работай", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "готово"
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta["refuel_rounds"] == 2
+
+    # Контекст действительно пересобирался: после сброса первым идёт system,
+    # вторым — user с сохранённым состоянием задачи.
+    third_request = provider.seen_messages[2]
+    assert third_request[0].role == "system"
+    assert "Task state" in third_request[1].content
+
+
+async def test_autocontinue_stops_at_round_cap(db: AsyncSession, tmp_path: Path) -> None:
+    """Потолок раундов исчерпан — run приостанавливается с внятной причиной."""
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(f"содержимое {name}", encoding="utf-8")
+    # Вызовы должны различаться: одинаковые подряд ловит детектор затухающей
+    # отдачи (ADR-0015 §1.6) и приостанавливает run раньше refuel.
+    calls = [
+        ToolCallRequest(id=f"c{i}", name="read_file", arguments_json=f'{{"path": "{n}.txt"}}')
+        for i, n in enumerate(("a", "b", "c", "d"))
+    ]
+    provider = ScriptedProvider([_tool_turn(c) for c in calls] + [_final("готово")])
+    cfg = RuntimeConfig(max_iterations=10, refuel_after_iterations=2, max_refuel_rounds=1)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("работай", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "max_refuel_rounds" in outcome.error
+
+
+async def test_zero_round_cap_keeps_old_suspend_behaviour(db: AsyncSession, tmp_path: Path) -> None:
+    """max_refuel_rounds=0 — прежнее поведение: приостановка на первом refuel."""
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(f"содержимое {name}", encoding="utf-8")
+    # Вызовы должны различаться: одинаковые подряд ловит детектор затухающей
+    # отдачи (ADR-0015 §1.6) и приостанавливает run раньше refuel.
+    calls = [
+        ToolCallRequest(id=f"c{i}", name="read_file", arguments_json=f'{{"path": "{n}.txt"}}')
+        for i, n in enumerate(("a", "b", "c", "d"))
+    ]
+    provider = ScriptedProvider([_tool_turn(calls[0]), _tool_turn(calls[1]), _final("готово")])
+    cfg = RuntimeConfig(max_iterations=10, refuel_after_iterations=2, max_refuel_rounds=0)
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("работай", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "task_state.md" in outcome.error
+    assert (tmp_path / "task_state.md").exists()

@@ -323,6 +323,7 @@ def _write_refuel_config(ws: Path, tmp_path: Path) -> None:
         "      model: fake-model\n"
         "sandbox:\n  type: local-trusted\n"
         "runtime:\n  max_iterations: 5\n  refuel_after_iterations: 1\n"
+        "  max_refuel_rounds: 0\n"
         f"storage:\n  db_path: {db_path}\n",
         encoding="utf-8",
     )
@@ -367,3 +368,42 @@ async def test_supervisor_ignores_budget_suspend(
     assert "лимит итераций" in (events[-1].get("error") or "")
 
     assert await service2.supervise_once() == []  # не подхвачен
+
+
+async def test_supervisor_skips_refuel_when_autocontinue_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Блок B: механизм продолжения выбирается конфигом, а не сосуществует.
+
+    При max_refuel_rounds > 0 run продолжает себя внутри цикла, поэтому
+    refuel-приостановка означает исчерпанный потолок — намеренную остановку.
+    Супервизор её не отменяет: иначе ручной resume, обнуляющий счётчик, дал бы
+    петлю, ограниченную только max_auto_resumes.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        "runtime:\n  max_iterations: 2\n  refuel_after_iterations: 1\n"
+        "  max_refuel_rounds: 1\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = GatewayService(load_config(project_dir=ws), ws)
+    _patch_provider(monkeypatch, [_tool_turn(), _tool_turn(), _tool_turn()])
+
+    run_id = await service.create_run("длинная задача", None)
+    events = await _drain(service, run_id)
+    assert events[-1]["state"] == "suspended"
+    assert "max_refuel_rounds" in (events[-1].get("error") or "")
+
+    assert await service.supervise_once() == []
+    await service.wait_for_background()
