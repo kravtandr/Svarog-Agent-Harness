@@ -397,3 +397,36 @@ async def test_history_invariant_holds_on_resume_after_approval(
     outcome = await loop.resume(run, LoopState.from_dict(raw_state))
     assert outcome.state is RunState.COMPLETED
     assert outcome.error is None
+
+
+async def test_manual_resume_resets_refuel_round_cap(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок B §4: ручной resume выдаёт новый бюджет автопродолжений.
+
+    Без обнуления resume после исчерпания потолка немедленно упирался бы
+    в него снова и был бы бесполезен.
+    """
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / f"{name}.txt").write_text(f"содержимое {name}", encoding="utf-8")
+    calls = [
+        ToolCallRequest(id=f"c{i}", name="read_file", arguments_json=f'{{"path": "{n}.txt"}}')
+        for i, n in enumerate(("a", "b", "c", "d"))
+    ]
+    cfg = RuntimeConfig(max_iterations=10, refuel_after_iterations=2, max_refuel_rounds=1)
+
+    # Первый прогон: раунд 1 израсходован, на втором refuel потолок исчерпан.
+    provider = ScriptedProvider([_tool_turn(c) for c in calls])
+    outcome = await _loop(provider, db, tmp_path, cfg=cfg).run("работай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.SUSPENDED
+    assert "max_refuel_rounds" in (outcome.error or "")
+
+    # Ручной resume выдаёт новый бюджет: ещё один раунд и завершение.
+    resumed_provider = ScriptedProvider(
+        [_tool_turn(calls[0]), _tool_turn(calls[1]), _final("готово")]
+    )
+    loaded_run, raw_state = await TraceRecorder(db).load_resumable(outcome.run_id)
+    resumed = await _loop(resumed_provider, db, tmp_path, cfg=cfg).resume(
+        loaded_run, LoopState.from_dict(raw_state)
+    )
+
+    assert resumed.state is RunState.COMPLETED
+    assert resumed.final_answer == "готово"
