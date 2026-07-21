@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from svarog_harness.tools.base import ToolError
 from svarog_harness.tools.file_tools import (
     EditFileTool,
     ListDirTool,
@@ -13,7 +14,9 @@ from svarog_harness.tools.file_tools import (
     SearchFilesTool,
     WriteFileTool,
     file_tools,
+    resolve_in_workspace,
 )
+from svarog_harness.tools.guidance import BoundaryKind
 
 
 @pytest.fixture
@@ -280,3 +283,41 @@ async def test_search_rust_incompatible_regex_falls_back(tmp_path: Path) -> None
     result = await SearchFilesTool(ws).call({"pattern": r"(a)\1"})
     assert result.ok
     assert "x.txt:1:" in result.output
+
+
+# --- Блок E §2: классификация жёстких границ --------------------------------
+
+
+def test_workspace_escape_carries_boundary_kind(workspace: Path) -> None:
+    """Выход за workspace классифицируется как жёсткая граница."""
+    with pytest.raises(ToolError) as excinfo:
+        resolve_in_workspace(workspace, "../снаружи.txt")
+
+    assert excinfo.value.kind is BoundaryKind.WORKSPACE_ESCAPE
+
+
+def test_control_dir_write_carries_boundary_kind(workspace: Path) -> None:
+    """Запись в управляющий каталог классифицируется отдельным видом."""
+    with pytest.raises(ToolError) as excinfo:
+        resolve_in_workspace(workspace, ".git/config", for_write=True)
+
+    assert excinfo.value.kind is BoundaryKind.CONTROL_DIR_WRITE
+
+
+def test_ordinary_tool_error_has_no_boundary_kind() -> None:
+    """Обычная ошибка tool не классифицируется как жёсткая граница."""
+    assert ToolError("что-то пошло не так").kind is None
+
+
+async def test_tool_call_propagates_boundary_kind(workspace: Path) -> None:
+    """Класс границы доезжает из исключения в результат tool'а."""
+    result = await ReadFileTool(workspace).call({"path": "../снаружи.txt"})
+    assert not result.ok
+    assert result.boundary is BoundaryKind.WORKSPACE_ESCAPE
+
+
+async def test_tool_call_without_boundary_leaves_field_empty(workspace: Path) -> None:
+    """Отсутствие файла — обычная ошибка: класса границы нет."""
+    result = await ReadFileTool(workspace).call({"path": "нет-такого.txt"})
+    assert not result.ok
+    assert result.boundary is None

@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from svarog_harness.llm.provider import ToolDefinition
+from svarog_harness.tools.guidance import BoundaryKind
 
 
 class RiskLevel(StrEnum):
@@ -39,7 +40,15 @@ class SandboxRequirement(StrEnum):
 
 
 class ToolError(Exception):
-    """Ожидаемая ошибка исполнения tool — превращается в error-результат для модели."""
+    """Ожидаемая ошибка исполнения tool — превращается в error-результат для модели.
+
+    `kind` заполняется, когда отказ упирается в жёсткую границу и повтор
+    заведомо бесполезен: по нему рендер подставит подсказку модели (блок E).
+    """
+
+    def __init__(self, message: str, *, kind: BoundaryKind | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def truncate_text(text: str, limit: int) -> str:
@@ -54,14 +63,17 @@ class ToolResult(BaseModel):
     # Текст для модели: содержимое файла, stdout, сообщение об успехе.
     output: str = ""
     error: str | None = None
+    # Класс жёсткой границы, если отказ упёрся в неё (блок E). В trace не
+    # попадает — используется только при рендере результата для модели.
+    boundary: BoundaryKind | None = None
 
     @classmethod
     def success(cls, output: str) -> "ToolResult":
         return cls(ok=True, output=output)
 
     @classmethod
-    def failure(cls, error: str) -> "ToolResult":
-        return cls(ok=False, error=error)
+    def failure(cls, error: str, *, boundary: BoundaryKind | None = None) -> "ToolResult":
+        return cls(ok=False, error=error, boundary=boundary)
 
 
 class Tool[ArgsT: BaseModel](ABC):
@@ -120,4 +132,4 @@ class Tool[ArgsT: BaseModel](ABC):
         except TimeoutError:
             return ToolResult.failure(f"{self.name} превысил timeout {self.timeout_sec}s")
         except ToolError as exc:
-            return ToolResult.failure(str(exc))
+            return ToolResult.failure(str(exc), boundary=exc.kind)
