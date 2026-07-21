@@ -34,6 +34,11 @@ class LoopState:
     # (блок B §4). Переживает checkpoint: иначе падение процесса обнуляло бы
     # потолок. Ручной resume обнуляет счётчик — см. AgentLoop.resume.
     refuel_rounds: int = 0
+    # Накопленный прогресс для task_state.md (§20): переживает сброс контекста,
+    # иначе каждый следующий раунд refuel стирал бы сделанное до него.
+    tool_usage: dict[str, int] = field(default_factory=dict)
+    findings: list[str] = field(default_factory=list)
+    touched_files: list[str] = field(default_factory=list)
     # Сколько раз модели возвращали дефектный «финальный» ответ на повтор
     # (протёкший tool call, обрезка по токенам, пустой ответ).
     nudges: int = 0
@@ -65,6 +70,9 @@ class LoopState:
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
             "iterations_since_refuel": self.iterations_since_refuel,
             "refuel_rounds": self.refuel_rounds,
+            "tool_usage": self.tool_usage,
+            "findings": self.findings,
+            "touched_files": self.touched_files,
             "nudges": self.nudges,
             "refuel_pending": self.refuel_pending,
             "plan": self.plan,
@@ -89,6 +97,9 @@ class LoopState:
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
             refuel_rounds=raw.get("refuel_rounds", 0),
+            tool_usage={str(k): int(v) for k, v in raw.get("tool_usage", {}).items()},
+            findings=[str(f) for f in raw.get("findings", [])],
+            touched_files=[str(f) for f in raw.get("touched_files", [])],
             nudges=raw.get("nudges", 0),
             refuel_pending=raw.get("refuel_pending", False),
             plan=[

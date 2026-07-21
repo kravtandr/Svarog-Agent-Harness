@@ -171,6 +171,7 @@ class OpenAICompatibleProvider(ModelProvider):
         stream = await self._client.chat.completions.create(**kwargs)
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         calls: dict[int, _ToolCallAccumulator] = {}
         usage: Usage | None = None
         finish_reason: str | None = None
@@ -190,6 +191,13 @@ class OpenAICompatibleProvider(ModelProvider):
             delta = choice.delta
             if delta is None:
                 continue
+            # Диалекты канала рассуждений: OpenRouter/gpt-oss — `reasoning`,
+            # DeepSeek — `reasoning_content`. Без их чтения ход из одних
+            # рассуждений неотличим от пустого ответа.
+            for attr in ("reasoning", "reasoning_content"):
+                piece = getattr(delta, attr, None)
+                if isinstance(piece, str) and piece:
+                    reasoning_parts.append(piece)
             if delta.content:
                 content_parts.append(delta.content)
                 if on_text_delta is not None:
@@ -215,9 +223,16 @@ class OpenAICompatibleProvider(ModelProvider):
                     acc.arguments += legacy.arguments
 
         content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
         tool_calls = tuple(calls[i].to_request() for i in sorted(calls))
         suspected = False
-        if not tool_calls and content and leak_suspected(content):
+        if not tool_calls and not content and leak_suspected(reasoning):
+            # Вызов выронен в канал рассуждений (S19). Извлекать и ИСПОЛНЯТЬ
+            # его нельзя: рассуждения — приватный черновик, модель могла вызов
+            # лишь обдумывать. Только сигнал циклу — пусть попросит повторить
+            # вызов штатным механизмом.
+            suspected = True
+        elif not tool_calls and content and leak_suspected(content):
             # Сервер не распарсил Harmony-вызов и отдал его текстом — извлекаем
             # сами; content при успехе отбрасываем (это внутренние каналы модели,
             # а не ответ пользователю). Текст уже ушёл в on_text_delta — терпимо.
@@ -246,5 +261,6 @@ class OpenAICompatibleProvider(ModelProvider):
             usage=usage,
             cost_usd=cost_usd,
             finish_reason=finish_reason,
+            reasoning=reasoning,
             leak_suspected=suspected,
         )

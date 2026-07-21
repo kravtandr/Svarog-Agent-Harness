@@ -84,6 +84,10 @@ class CompletionResult:
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
     finish_reason: str | None = None
+    # Отдельный канал рассуждений reasoning-моделей. Не ответ пользователю и
+    # не часть истории: нужен, чтобы отличить «модель молчала» от «модель
+    # думала, но ничего не выдала», и для диагностики по trace.
+    reasoning: str = ""
     # Провайдер заподозрил в content невыполненный tool call (протёкший
     # текстом), который не удалось извлечь fallback'ом — loop не должен
     # принимать такой ответ за финальный.
