@@ -257,10 +257,23 @@ def render_run(
     header.add_row("задача", run.task)
     header.add_row("автономия", run.autonomy)
     header.add_row("модель", str((run.meta or {}).get("model", "?")))
+    cached = int((run.meta or {}).get("cached_tokens", 0))
+    cached_suffix = f", из них {cached} из кэша" if cached else ""
     header.add_row(
         "итог",
-        f"{run.iterations} итераций, {run.tokens_used} токенов, ${run.cost_usd:.4f}",
+        f"{run.iterations} итераций, {run.tokens_used} токенов{cached_suffix}, ${run.cost_usd:.4f}",
     )
+    phases = (run.meta or {}).get("phases")
+    # Испорченный meta (не словарь целиком, либо словарь без ожидаемых ключей
+    # в записи фазы) не должен ронять traces show — .get(..., 0) и явная
+    # проверка типа phases вместо голого доступа к ключам.
+    if isinstance(phases, dict) and phases:
+        parts = [
+            f"{name} {entry.get('ms', 0)}мс×{entry.get('count', 0)}"
+            for name, entry in sorted(phases.items())
+            if isinstance(entry, dict)
+        ]
+        header.add_row("фазы", ", ".join(parts) + f" | последняя: {phases.get('last', '?')}")
     if run.error:
         header.add_row("ошибка", Text(run.error, style="red"))
 

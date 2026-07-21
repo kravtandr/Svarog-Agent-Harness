@@ -55,6 +55,28 @@ class DeployTool(Tool[_NoArgs]):
         return ToolResult.success("задеплоено")
 
 
+class _TargetArgs(BaseModel):
+    target: str
+
+
+class DeployTargetTool(Tool[_TargetArgs]):
+    """High-risk tool с параметром — на нём проверяется ремонт формы вызова
+    (двойная сериализация/обёртка `{"arguments": {...}}`) на approval-пути."""
+
+    name = "deploy_target"
+    action_type = "deploy.target"
+    description = "тестовый high-risk tool с параметром target"
+    risk_level = RiskLevel.HIGH
+    args_model = _TargetArgs
+
+    def __init__(self) -> None:
+        self.executions = 0
+
+    async def execute(self, args: _TargetArgs) -> ToolResult:
+        self.executions += 1
+        return ToolResult.success(f"задеплоено в {args.target}")
+
+
 class ScriptedProvider(ModelProvider):
     def __init__(self, turns: list[CompletionResult]) -> None:
         self.turns = list(turns)
@@ -170,6 +192,46 @@ async def test_denied_call_reports_reason_to_model(db: AsyncSession, tmp_path: P
     assert "не сейчас" in last_request[-1].content
     call = (await db.execute(select(ToolCall))).scalar_one()
     assert call.status is ToolCallStatus.DENIED
+
+
+async def test_denied_call_with_repaired_arguments_shows_repair_in_trace(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Блок A §4 + §1 (approval): ремонт формы вызова должен остаться видимым
+    в trace, даже когда вызов уходит в approval и получает отказ — иначе при
+    связке «ремонт + отказ approval» trace не показывает, что прислала модель."""
+    deploy = DeployTargetTool()
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1",
+                    name="deploy_target",
+                    arguments_json='{"arguments": {"target": "prod"}}',
+                )
+            ),
+            _final("понял, не деплою"),
+        ]
+    )
+    loop = _loop(provider, db, tmp_path, [deploy])
+    outcome = await loop.run("задеплой в prod", AutonomyMode.SUPERVISED)
+    assert outcome.state is RunState.WAITING_APPROVAL
+
+    recorder = TraceRecorder(db)
+    approval = (await db.execute(select(Approval))).scalar_one()
+    await recorder.decide_approval(approval, approved=False, decided_by="test", reason="не сейчас")
+
+    resumed = await _resume(loop, db, outcome.run_id)
+    assert resumed.state is RunState.COMPLETED  # type: ignore[attr-defined]
+    assert deploy.executions == 0
+
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.status is ToolCallStatus.DENIED
+    # Починенная форма исполнена бы с target=prod — это видно в trace...
+    assert call.arguments["target"] == "prod"
+    # ...вместе со сведениями о самом ремонте и исходной строкой аргументов.
+    assert call.arguments["_repairs"] == ["unwrapped"]
+    assert "arguments" in call.arguments["_raw"]
 
 
 async def test_pending_approval_keeps_waiting_without_duplicates(

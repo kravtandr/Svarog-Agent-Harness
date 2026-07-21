@@ -167,10 +167,14 @@ class InlineChat:
             if self._live is not None:
                 self._live.update(self._render_live())
 
-    def _on_progress(self, iterations: int, tokens: int, cost: float, ratio: float) -> None:
+    def _on_progress(
+        self, iterations: int, tokens: int, cost: float, ratio: float, cached: int
+    ) -> None:
         with self._live_lock:
+            cached_suffix = f", кэш {cached}" if cached > 0 else ""
             self._progress = (
-                f"итерация {iterations} | {tokens} ток. | ${cost:.4f} | контекст {ratio:.0%}"
+                f"итерация {iterations} | {tokens} ток.{cached_suffix} | "
+                f"${cost:.4f} | контекст {ratio:.0%}"
             )
             if self._live is not None:
                 self._live.update(self._render_live())
