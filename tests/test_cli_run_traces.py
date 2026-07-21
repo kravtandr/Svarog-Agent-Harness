@@ -208,6 +208,7 @@ def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.Mon
     # Низкий порог refuel → run приостанавливается (refuel-suspend, ADR-0005);
     # resume поднимает задачу и доводит до конца.
     monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_REFUEL_ROUNDS", "0")
     monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
     result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])
     assert result.exit_code == 3, result.output
@@ -215,6 +216,7 @@ def test_resume_continues_suspended_run(workspace: Path, monkeypatch: pytest.Mon
     run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
     monkeypatch.delenv("SVAROG_RUNTIME__MAX_ITERATIONS")
     monkeypatch.delenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS")
+    monkeypatch.delenv("SVAROG_RUNTIME__MAX_REFUEL_ROUNDS")
     resumed = runner.invoke(cli_main.app, ["resume", run_id])
     assert resumed.exit_code == 0, resumed.output
     assert "закончил после resume" in resumed.output
@@ -239,12 +241,14 @@ def test_resume_rejects_changed_security_config(
         + [CompletionResult(content="не должно дойти", usage=Usage(10, 5))],
     )
     monkeypatch.setenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS", "1")
+    monkeypatch.setenv("SVAROG_RUNTIME__MAX_REFUEL_ROUNDS", "0")
     monkeypatch.setenv("SVAROG_RUNTIME__MAX_ITERATIONS", "2")
     result = runner.invoke(cli_main.app, ["run", "длинная", "--workspace", str(workspace)])
     assert result.exit_code == 3, result.output
     run_id = result.output.rsplit("svarog resume ", 1)[1].split()[0]
     monkeypatch.delenv("SVAROG_RUNTIME__MAX_ITERATIONS")
     monkeypatch.delenv("SVAROG_RUNTIME__REFUEL_AFTER_ITERATIONS")
+    monkeypatch.delenv("SVAROG_RUNTIME__MAX_REFUEL_ROUNDS")
 
     # Подменяем endpoint провайдера в конфиге workspace'а после старта run.
     cfg_path = workspace / "svarog.yaml"
