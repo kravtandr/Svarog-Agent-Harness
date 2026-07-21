@@ -302,3 +302,21 @@ def test_claude_and_codex_mcp_client_config_empty() -> None:
     # claude-code получает мост через --mcp-config, codex MCP не поддерживает.
     assert ClaudeCodeAdapter().mcp_client_config("http://x", "t") == {}
     assert CodexAdapter().mcp_client_config("http://x", "t") == {}
+
+
+def test_opencode_context_steers_memory_and_questions_to_mcp() -> None:
+    # С MCP-мостом у opencode есть write-канал памяти и ask_user (спайк
+    # 2026-07-21): контекст обязан направлять туда, а не в файлы workspace.
+    files = OpencodeAdapter().context_files("факт: кофе", "")
+    text = files[".config/opencode/AGENTS.md"]
+    assert "svarog_remember" in text
+    assert "svarog_ask_user" in text
+    assert "не завершай" in text.lower()
+    assert "факт: кофе" in text
+
+
+def test_claude_context_steers_questions_to_ask_user() -> None:
+    files = ClaudeCodeAdapter().context_files("факт", "")
+    text = files["CLAUDE.md"]
+    assert "ask_user" in text
+    assert "не завершай" in text.lower()

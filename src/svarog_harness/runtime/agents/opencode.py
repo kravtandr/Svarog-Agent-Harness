@@ -17,6 +17,7 @@ from svarog_harness.runtime.executor import (
     AgentAuth,
     AgentEvent,
     AgentLaunch,
+    ask_user_guide,
 )
 
 # Домашний каталог контейнера (docker.py: HOME=/tmp/home): OpenCode держит
@@ -64,12 +65,18 @@ class OpencodeAdapter:
     def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
         """Глобальные правила OpenCode: ~/.config/opencode/AGENTS.md."""
         sections: list[str] = []
-        if memory:
-            sections.append(f"# Память Svarog\n\n{memory}")
+        # Имена tools глазами OpenCode — с префиксом svarog_ (спайк 2026-07-21).
+        sections.append(
+            "# Память\n\n"
+            "Единственный источник истины по памяти — Svarog. Чтобы что-то "
+            "запомнить между запусками, вызывай MCP-tool `svarog_remember` "
+            "(прочитать — `svarog_read_memory`); НЕ пиши факты в файлы "
+            "workspace и НЕ веди свою локальную память в ~/.local/share/opencode."
+            + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
+        )
+        sections.append(ask_user_guide("svarog_ask_user"))
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
-        if not sections:
-            return {}
         return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
