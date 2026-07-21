@@ -76,6 +76,7 @@ from svarog_harness.scaffold import (
 )
 from svarog_harness.scheduler.schedule import ScheduleSpecError, next_run_after, parse_spec
 from svarog_harness.scheduler.store import JobNotFoundError, JobStore, ProtectedJobError
+from svarog_harness.scheduler.system_jobs import ensure_system_jobs
 from svarog_harness.scheduler.ticker import JobRunRequest, tick
 from svarog_harness.secrets import (
     FileSecretStore,
@@ -1864,6 +1865,20 @@ async def _scheduler_loop(cfg: SvarogConfig, workspace: Path) -> None:
     """
     digest = config_digest(cfg, workspace)
     lock = default_lock_backend(cfg.storage.db_path)
+
+    async def register_system(db: AsyncSession) -> None:
+        created = await ensure_system_jobs(
+            JobStore(db),
+            workspace=str(workspace),
+            autonomy=cfg.runtime.autonomy.value,
+            config_digest=digest,
+            now=utcnow(),
+            prune_interval_sec=cfg.curator.prune_interval_sec,
+        )
+        for job_id in created:
+            console.print(f"[dim]заведена системная джоба {job_id[:8]}[/dim]")
+
+    await _with_db(cfg, register_system)
 
     async def run_job(request: JobRunRequest) -> str:
         runner = TaskRunner(cfg, Path(request.workspace))

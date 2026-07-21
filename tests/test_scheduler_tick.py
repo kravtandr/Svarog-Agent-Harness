@@ -130,3 +130,37 @@ async def test_tick_records_failure_without_disabling(db: AsyncSession, tmp_path
     assert job.enabled is True
     assert job.last_status is not None
     assert "ошибка" in job.last_status
+
+
+# --- Блок D §8: системные джобы ---------------------------------------------
+
+
+async def test_ensure_system_jobs_is_idempotent(db: AsyncSession, tmp_path: Path) -> None:
+    """Повторный старт демона не плодит дубликатов системных джоб."""
+    from svarog_harness.scheduler.system_jobs import ensure_system_jobs
+
+    store = JobStore(db)
+    first = await ensure_system_jobs(
+        store,
+        workspace=str(tmp_path),
+        autonomy="supervised",
+        config_digest="d",
+        now=_NOW,
+        prune_interval_sec=86_400,
+    )
+    second = await ensure_system_jobs(
+        store,
+        workspace=str(tmp_path),
+        autonomy="supervised",
+        config_digest="d",
+        now=_NOW,
+        prune_interval_sec=86_400,
+    )
+
+    assert len(first) == 1
+    assert second == []
+    jobs = await store.list_jobs()
+    assert len(jobs) == 1
+    assert jobs[0].origin is JobOrigin.SYSTEM
+    assert jobs[0].protected is True
+    assert jobs[0].enabled is True
