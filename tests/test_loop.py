@@ -19,6 +19,7 @@ from svarog_harness.llm.provider import (
     Usage,
 )
 from svarog_harness.policy.engine import PolicyEngine
+from svarog_harness.policy.rules import PolicyRule
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import (
@@ -88,6 +89,7 @@ def _loop(
     cfg: RuntimeConfig | None = None,
     registry: ToolRegistry | None = None,
     plan_update_sink: list[dict[str, object]] | None = None,
+    rules: list[PolicyRule] | None = None,
 ) -> AgentLoop:
     if registry is None:
         registry = ToolRegistry()
@@ -98,7 +100,12 @@ def _loop(
         registry,
         TraceRecorder(db),
         cfg or RuntimeConfig(),
-        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=workspace),
+        PolicyEngine(
+            autonomy=AutonomyMode.YOLO,
+            policies=PoliciesConfig(),
+            workspace=workspace,
+            rules=rules or [],
+        ),
         workspace,
         model_name="test-model",
         plan_update_sink=plan_update_sink,
@@ -940,3 +947,85 @@ async def test_cached_tokens_accumulate_across_iterations(db: AsyncSession, tmp_
     run = await db.get(Run, outcome.run_id)
     assert run is not None
     assert run.meta["cached_tokens"] == 48
+
+
+# --- Блок E §3: подсказка при отказе на жёсткой границе ----------------------
+
+
+async def test_boundary_note_reaches_model_but_not_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Подсказка уходит модели, в trace остаётся чистая причина."""
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1", name="read_file", arguments_json='{"path": "../снаружи.txt"}'
+                )
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    # Модель видит причину и подсказку.
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert tool_messages
+    assert "выходит за пределы" in tool_messages[0].content
+    assert "ask_user" in tool_messages[0].content
+
+    # В trace — только причина, без текста-инструкции.
+    tool_call = (await db.execute(select(ToolCall))).scalar_one()
+    assert tool_call.error is not None
+    assert "выходит за пределы" in tool_call.error
+    assert "ask_user" not in tool_call.error
+
+
+async def test_ordinary_failure_gets_no_note(db: AsyncSession, tmp_path: Path) -> None:
+    """Обычная ошибка tool не получает подсказки: там повтор осмыслен."""
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1", name="read_file", arguments_json='{"path": "нет-такого.txt"}'
+                )
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("читай", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    tool_messages = [m for m in provider.seen_messages[-1] if m.role == "tool"]
+    assert tool_messages
+    assert "ask_user" not in tool_messages[0].content
+    assert "жёсткая граница" not in tool_messages[0].content
+
+
+async def test_policy_deny_explains_boundary_to_model(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок E §3: запрет политикой объясняет, что повтор даст тот же отказ."""
+    rules = [
+        PolicyRule(match="file.*", decision="deny", reason="инфраструктура", paths=["infra/*"])
+    ]
+    provider = ScriptedProvider(
+        [
+            _tool_turn(
+                ToolCallRequest(
+                    id="c1",
+                    name="write_file",
+                    arguments_json='{"path": "infra/main.tf", "content": "x"}',
+                )
+            ),
+            _final("понял, не трогаю"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path, rules=rules).run("правь infra", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+
+    model_text = next(m for m in provider.seen_messages[-1] if m.role == "tool").content
+    assert "инфраструктура" in model_text
+    assert "request_approval" in model_text
+
+    tool_call = (await db.execute(select(ToolCall))).scalar_one()
+    assert tool_call.error is not None
+    assert "инфраструктура" in tool_call.error
+    assert "request_approval" not in tool_call.error

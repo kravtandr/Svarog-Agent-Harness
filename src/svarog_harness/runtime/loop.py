@@ -38,7 +38,7 @@ from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
-from svarog_harness.tools.guidance import BoundaryKind
+from svarog_harness.tools.guidance import BoundaryKind, note_for
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME
 from svarog_harness.trace.recorder import TraceRecorder
@@ -1011,6 +1011,12 @@ class AgentLoop:
             text = f"ошибка: {result.error}\n{result.output}"
         else:
             text = f"ошибка: {result.error}"
+        if result.boundary is not None:
+            # Подсказка — надстройка над enforcement (ADR-0002): объясняет уже
+            # принятое решение, ничего не разрешая. Повторяется на каждом
+            # отказе — она нужна ровно в момент, когда модель собирается
+            # повторить бесполезное действие.
+            text = f"{text}\n{note_for(result.boundary)}"
         text = redact(text, self._secret_values)
 
         limit = self._cfg.tool_output_context_chars
