@@ -34,7 +34,12 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
 from svarog_harness.runtime.history_invariant import assert_history_valid
 from svarog_harness.runtime.phase_timer import PhaseTimer
-from svarog_harness.runtime.refuel import build_task_state, task_state_path
+from svarog_harness.runtime.refuel import (
+    build_task_state,
+    merge_progress,
+    segment_progress,
+    task_state_path,
+)
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
@@ -596,7 +601,22 @@ class AgentLoop:
         сброса истории, поэтому падение процесса между записью и продолжением
         не теряет прогресс — resume поднимет run с уже готовым файлом.
         """
-        task_state = build_task_state(state.task, state.messages, state.iterations, plan=state.plan)
+        # Прогресс накапливается: history сегмента при сбросе обнуляется, и
+        # пересчёт «с нуля» стирал бы всё сделанное до предыдущего раунда.
+        state.tool_usage, state.findings, state.touched_files = merge_progress(
+            tool_usage=state.tool_usage,
+            findings=state.findings,
+            touched_files=state.touched_files,
+            segment=segment_progress(state.messages),
+        )
+        task_state = build_task_state(
+            state.task,
+            iterations=state.iterations,
+            tool_usage=state.tool_usage,
+            findings=state.findings,
+            touched_files=state.touched_files,
+            plan=state.plan,
+        )
         (state.workspace / task_state_path()).write_text(task_state, encoding="utf-8")
         if self._workspace_flow is not None:
             # Коммит task_state.md — лучший-эффорт (не git-репозиторий, секрет-скан…).

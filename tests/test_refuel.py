@@ -18,7 +18,7 @@ from svarog_harness.llm.provider import (
 from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
-from svarog_harness.runtime.refuel import build_task_state
+from svarog_harness.runtime.refuel import build_task_state, segment_progress
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import RunState
 from svarog_harness.tools.file_tools import file_tools
@@ -35,7 +35,14 @@ def test_build_task_state_has_sections() -> None:
             tool_calls=(ToolCallRequest(id="c1", name="list_dir", arguments_json="{}"),),
         ),
     ]
-    text = build_task_state("почини баг", messages, iterations=5)
+    usage, findings, files = segment_progress(messages)
+    text = build_task_state(
+        "почини баг",
+        iterations=5,
+        tool_usage=usage,
+        findings=findings,
+        touched_files=files,
+    )
     assert "# Task state" in text
     assert "почини баг" in text
     assert "list_dir" in text
@@ -47,8 +54,10 @@ def test_build_task_state_has_sections() -> None:
 def test_build_task_state_includes_plan() -> None:
     text = build_task_state(
         "почини баг",
-        [],
         iterations=2,
+        tool_usage={},
+        findings=[],
+        touched_files=[],
         plan=[
             {"id": "inspect", "text": "изучить код", "status": "completed"},
             {"id": "fix", "text": "исправить баг", "status": "in_progress"},
@@ -214,3 +223,84 @@ def test_runtime_config_default_refuel_rounds() -> None:
 def test_runtime_config_allows_disabling_autocontinue() -> None:
     """Ноль — прежнее поведение: приостановка на первом refuel."""
     assert RuntimeConfig(max_refuel_rounds=0).max_refuel_rounds == 0
+
+
+# --- Накопление прогресса между раундами refuel (регрессия S19) --------------
+
+
+def test_task_state_accumulates_across_rounds() -> None:
+    """Прогресс прошлых сегментов не теряется при повторном сбросе контекста.
+
+    Регрессия: task_state.md собирался из state.messages, которые refuel
+    обнуляет, поэтому на втором раунде агент видел «сделано ничего» и
+    завершал незаконченную задачу.
+    """
+    usage = {"write_file": 2, "list_dir": 1}
+    text = build_task_state(
+        "задача",
+        iterations=6,
+        tool_usage=usage,
+        findings=["создан intro", "создан install"],
+        touched_files=["docs/intro.md", "docs/install.md"],
+    )
+    assert "write_file: 2" in text
+    assert "docs/intro.md" in text
+    assert "docs/install.md" in text
+    assert "создан install" in text
+
+
+def test_task_state_reports_emptiness_honestly() -> None:
+    text = build_task_state("задача", iterations=1, tool_usage={}, findings=[], touched_files=[])
+    assert "(нет вызовов)" in text
+    assert "(файлы не менялись)" in text
+
+
+def test_segment_progress_extracts_calls_and_files() -> None:
+    """Из сегмента истории вынимаются счётчики, выводы и затронутые файлы."""
+    messages = [
+        ChatMessage(role="system", content="s"),
+        ChatMessage(
+            role="assistant",
+            content="пишу вступление",
+            tool_calls=(
+                ToolCallRequest(
+                    id="c1", name="write_file", arguments_json='{"path": "docs/intro.md"}'
+                ),
+            ),
+        ),
+        ChatMessage(role="tool", content="ok", tool_call_id="c1"),
+    ]
+    usage, findings, files = segment_progress(messages)
+    assert usage == {"write_file": 1}
+    assert findings == ["пишу вступление"]
+    assert files == ["docs/intro.md"]
+
+
+def test_segment_progress_survives_broken_arguments() -> None:
+    """Кривые аргументы не должны ронять сборку состояния."""
+    messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCallRequest(id="c1", name="write_file", arguments_json="{не json"),),
+        )
+    ]
+    usage, _findings, files = segment_progress(messages)
+    assert usage == {"write_file": 1}
+    assert files == []
+
+
+def test_loop_state_roundtrip_keeps_progress(tmp_path: Path) -> None:
+    """Накопленный прогресс переживает checkpoint — иначе падение его теряет."""
+    state = LoopState(
+        workspace=tmp_path,
+        messages=[],
+        task="t",
+        tool_usage={"write_file": 3},
+        findings=["вывод"],
+        touched_files=["a.md"],
+    )
+    restored = LoopState.from_dict(state.to_dict())
+    assert restored.tool_usage == {"write_file": 3}
+    assert restored.findings == ["вывод"]
+    assert restored.touched_files == ["a.md"]
