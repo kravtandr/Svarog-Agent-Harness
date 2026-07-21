@@ -268,6 +268,9 @@ class AgentLoop:
         # meta) PhaseTimer.restore делает ранний возврат вместо ValueError/
         # TypeError, которые иначе улетели бы из resume() до try.
         self._phases.restore((run.meta or {}).get("phases", {}))
+        # Блок B §4: ручное продолжение выдаёт новый бюджет автопродолжений.
+        # Иначе resume после исчерпания потолка упёрся бы в него немедленно.
+        state.refuel_rounds = 0
         await self._recorder.set_run_state(run, RunState.RUNNING, error=None)
         return await self._drive(run, state)
 
