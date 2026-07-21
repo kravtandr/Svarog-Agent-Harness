@@ -81,7 +81,21 @@ _EMPTY_NUDGE = (
     "продолжи работу через tools."
 )
 
+# Reasoning-модели отдают мысли отдельным каналом: ход, состоящий из одних
+# рассуждений, приходит с пустым content и без вызовов. Обобщённое «ты вернул
+# пустой ответ» такой модели неадресно — она думала, а не молчала.
+_REASONING_ONLY_NUDGE = (
+    "Ты вернул только рассуждения — без текста ответа и без вызова tools, "
+    "поэтому ход не принят. Рассуждения пользователю не видны и в историю не "
+    "попадают. Выбери одно: либо вызови нужный tool, либо напиши финальный "
+    "ответ обычным текстом."
+)
+
 _SAVED_CONTENT_MARKER = "[содержимое сохранено в файле]"
+
+# Потолок рассуждений в trace: полный chain-of-thought бывает в разы длиннее
+# ответа, а для диагностики хватает начала.
+_REASONING_TRACE_CHARS = 2_000
 
 # Микрокомпакция (ADR-0015 §1.4): маркер очищенного tool-результата и порог,
 # ниже которого сообщение не трогается (мелочь чистить бессмысленно).
@@ -114,7 +128,9 @@ def _rejection_nudge(result: CompletionResult) -> str | None:
     if result.finish_reason == "length":
         return _TRUNCATION_NUDGE
     if not result.content.strip():
-        return _EMPTY_NUDGE
+        # Пустой content при непустых рассуждениях — не молчание модели, а
+        # ход, который целиком ушёл в канал размышлений (регрессия S19).
+        return _REASONING_ONLY_NUDGE if result.reasoning.strip() else _EMPTY_NUDGE
     return None
 
 
@@ -363,6 +379,9 @@ class AgentLoop:
                     "assistant",
                     {
                         "content": result_content,
+                        # Рассуждения — не часть истории для модели, но без них
+                        # «пустой ход» неотличим от молчания при разборе trace.
+                        "reasoning": truncate_text(result.reasoning, _REASONING_TRACE_CHARS),
                         "tool_calls": [
                             {
                                 "id": c.id,

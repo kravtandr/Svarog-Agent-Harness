@@ -1158,3 +1158,49 @@ async def test_valid_final_answer_still_completes(db: AsyncSession, tmp_path: Pa
 
     assert outcome.state is RunState.COMPLETED
     assert outcome.final_answer == "готово"
+
+
+async def test_reasoning_only_turn_gets_specific_nudge(db: AsyncSession, tmp_path: Path) -> None:
+    """Ход из одних рассуждений получает адресный nudge, а не «пустой ответ».
+
+    Регрессия S19: reasoning-модель после сброса контекста уходит в мысли и
+    не выдаёт ни текста, ни вызова; обобщённая формулировка ей не помогала.
+    """
+    provider = ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                usage=Usage(10, 5),
+                finish_reason="stop",
+                reasoning="долго размышляю о структуре документации",
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    nudge = provider.seen_messages[1][-1]
+    assert nudge.role == "user"
+    assert "рассужден" in nudge.content
+    assert "пустой ответ" not in nudge.content
+
+
+async def test_reasoning_is_recorded_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Рассуждения попадают в trace — иначе такой отказ не диагностируется."""
+    provider = ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                usage=Usage(10, 5),
+                finish_reason="stop",
+                reasoning="я думаю про файлы",
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    messages = (await db.scalars(select(Message).where(Message.run_id == outcome.run_id))).all()
+    reasoning_notes = [m.content.get("reasoning") for m in messages if m.role == "assistant"]
+    assert any(note and "думаю про файлы" in note for note in reasoning_notes)
