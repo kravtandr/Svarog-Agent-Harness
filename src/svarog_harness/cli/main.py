@@ -1074,7 +1074,7 @@ def _pick_option_sync(
 
     try:
         return asyncio.run(pick_option(title, values, default=default))
-    except Exception:  # noqa: BLE001 — нет tty/термкапс: фолбэк на текст
+    except Exception:
         return None
 
 

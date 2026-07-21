@@ -116,7 +116,9 @@ async def test_criterion_refuel_long_task(tmp_path: Path) -> None:
             call("list_dir", "{}", call_id="c1"),
             final("Готово."),
         ],
-        runtime=RuntimeConfig(max_iterations=6, refuel_after_iterations=1),
+        # max_refuel_rounds=0: критерий проверяет ручной путь suspend → resume;
+        # с автопродолжением (блок B) run завершился бы сам без `svarog resume`.
+        runtime=RuntimeConfig(max_iterations=6, refuel_after_iterations=1, max_refuel_rounds=0),
     )
     outcome = await harness.run("длинная задача")
     assert outcome.state is RunState.SUSPENDED
@@ -143,7 +145,7 @@ async def test_criterion_resume_after_crash(tmp_path: Path) -> None:
         provider=ScriptedProvider(
             [call("list_dir", "{}", call_id="a0"), call("list_dir", "{}", call_id="a1")]
         ),
-        runtime=RuntimeConfig(max_iterations=2, refuel_after_iterations=1),
+        runtime=RuntimeConfig(max_iterations=2, refuel_after_iterations=1, max_refuel_rounds=0),
     )
     first.workspace.mkdir(parents=True, exist_ok=True)
     suspended = await first.run("работа на два процесса")

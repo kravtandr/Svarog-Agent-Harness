@@ -709,5 +709,5 @@ async def test_ask_user_options_land_in_bridge_payload(db: AsyncSession, tmp_pat
         }
     )
     await answer_task
-    approval = list((await db.execute(select(Approval))).scalars())[0]
+    approval = next(iter((await db.execute(select(Approval))).scalars()))
     assert approval.payload["options"] == ["красный", "синий"]

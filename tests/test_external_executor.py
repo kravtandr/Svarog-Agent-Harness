@@ -581,8 +581,7 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
         .read_text(encoding="utf-8")
         .replace(
             "    image: img:1\n",
-            "    image: img:1\n    adapter: codex\n"
-            "    base_url: https://openrouter.ai/api\n",
+            "    image: img:1\n    adapter: codex\n    base_url: https://openrouter.ai/api\n",
         ),
         encoding="utf-8",
     )

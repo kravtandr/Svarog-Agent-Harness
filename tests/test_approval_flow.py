@@ -452,17 +452,13 @@ def _fetch_approval(db_path: Path, approval_id: str) -> Approval:
     return asyncio.run(fetch())
 
 
-def test_question_with_options_uses_picker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_question_with_options_uses_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """options в payload → ответ выбирается radiolist'ом, текстовый промпт
     не открывается."""
-    from pathlib import Path as _P
-
     from svarog_harness.cli import main as cli_main
     from svarog_harness.config.loader import load_config
 
-    ws, db_path = _cli_workspace(tmp_path, monkeypatch)
+    _, db_path = _cli_workspace(tmp_path, monkeypatch)
     approval_id = _seed_question(
         db_path, {"question": "какой цвет?", "options": ["красный", "синий"]}
     )
@@ -478,7 +474,7 @@ def test_question_with_options_uses_picker(
         "prompt",
         lambda *a, **kw: pytest.fail("текстовый промпт не должен открываться"),
     )
-    cfg = load_config(project_dir=_P("."))
+    cfg = load_config(project_dir=Path())
     approval = _fetch_approval(db_path, approval_id)
     cli_main._answer_question_interactive(cfg, approval)
 
@@ -493,18 +489,16 @@ def test_question_with_options_uses_picker(
 def test_question_picker_custom_falls_back_to_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pathlib import Path as _P
-
     from svarog_harness.cli import main as cli_main
     from svarog_harness.config.loader import load_config
 
-    ws, db_path = _cli_workspace(tmp_path, monkeypatch)
+    _, db_path = _cli_workspace(tmp_path, monkeypatch)
     approval_id = _seed_question(
         db_path, {"question": "какой цвет?", "options": ["красный", "синий"]}
     )
     monkeypatch.setattr(cli_main, "_pick_option_sync", lambda *a, **kw: cli_main._CUSTOM_ANSWER)
     monkeypatch.setattr(cli_main.typer, "prompt", lambda *a, **kw: "фиолетовый в крапинку")
-    cfg = load_config(project_dir=_P("."))
+    cfg = load_config(project_dir=Path())
     cli_main._answer_question_interactive(cfg, _fetch_approval(db_path, approval_id))
     assert _fetch_approval(db_path, approval_id).reason == "фиолетовый в крапинку"
 
@@ -512,12 +506,10 @@ def test_question_picker_custom_falls_back_to_prompt(
 def test_confirm_approval_via_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Вердикт approval выбирается стрелочками: approve пишет APPROVED без
     текстовых промптов."""
-    from pathlib import Path as _P
-
     from svarog_harness.cli import main as cli_main
     from svarog_harness.config.loader import load_config
 
-    ws, db_path = _cli_workspace(tmp_path, monkeypatch)
+    _, db_path = _cli_workspace(tmp_path, monkeypatch)
     approval_id = _seed_question(db_path, {"tool": "bash", "reason": "рискованно"})
     monkeypatch.setattr(cli_main, "_pick_option_sync", lambda *a, **kw: "approve")
     monkeypatch.setattr(
@@ -525,7 +517,7 @@ def test_confirm_approval_via_picker(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "confirm",
         lambda *a, **kw: pytest.fail("y/n промпт не должен открываться"),
     )
-    cfg = load_config(project_dir=_P("."))
+    cfg = load_config(project_dir=Path())
     cli_main._confirm_approval(cfg, _fetch_approval(db_path, approval_id), decided_by="test")
     stored = _fetch_approval(db_path, approval_id)
     assert stored.status is ApprovalStatus.APPROVED
