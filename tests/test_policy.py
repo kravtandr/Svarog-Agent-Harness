@@ -18,7 +18,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.policy.engine import PolicyAction, PolicyEngine
+from svarog_harness.policy.engine import CRITICAL_ACTIONS, PolicyAction, PolicyEngine
 from svarog_harness.policy.heuristics import detect_dangerous_command
 from svarog_harness.policy.rules import PolicyRule, PolicyRulesError, load_policy_rules
 from svarog_harness.runtime.loop import AgentLoop
@@ -401,3 +401,12 @@ async def test_require_approval_moves_run_to_waiting(db: AsyncSession, tmp_path:
     # Approval показывает фактический вызов (§12).
     assert approval.payload["tool"] == "deploy_preview"
     assert approval.payload["call_id"] == "c1"
+
+
+def test_schedule_create_is_in_critical_set() -> None:
+    """Блок D §7: джоба переживает run, поэтому её создание — critical-набор.
+
+    Без этого гейта инъекция из файла получила бы способ закрепиться:
+    запланировать работу, которая исполнится позже и с новым конфигом.
+    """
+    assert "schedule.create" in CRITICAL_ACTIONS
