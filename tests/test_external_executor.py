@@ -647,3 +647,22 @@ def test_external_base_url_rejects_v1_suffix() -> None:
 
 def test_claude_code_default_base_url_still_valid() -> None:
     ExternalExecutorConfig(adapter="claude-code", image="img", api_key_ref="K")
+
+
+async def test_run_rules_preamble_in_launch_not_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Правила run'а инжектируются в task агента (скилловые чеклисты перебивают
+    конфиг-уровень — кампания 21.07.2026, S11), но trace хранит ЧИСТУЮ реплику."""
+    executor = _executor(db, tmp_path, [_INIT, _ASSISTANT, _TOOL_RESULT, _RESULT])
+    adapter = executor._adapter
+    await executor.run("сделай hello.py", AutonomyMode.YOLO)
+
+    launch = adapter.launches[0]
+    assert launch.task.startswith("[Правила run'а Svarog]")
+    assert "ask_user" in launch.task
+    assert launch.task.endswith("сделай hello.py")
+
+    run = (await db.execute(select(Run))).scalars().one()
+    assert run.task == "сделай hello.py"  # без преамбулы
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    user_msgs = [m for m in messages if m.role == "user"]
+    assert all("[Правила run'а Svarog]" not in str(m.content) for m in user_msgs)
