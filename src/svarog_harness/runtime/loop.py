@@ -34,7 +34,12 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.context_builder import build_initial_messages, build_refuel_messages
 from svarog_harness.runtime.history_invariant import assert_history_valid
 from svarog_harness.runtime.phase_timer import PhaseTimer
-from svarog_harness.runtime.refuel import build_task_state, task_state_path
+from svarog_harness.runtime.refuel import (
+    build_task_state,
+    merge_progress,
+    segment_progress,
+    task_state_path,
+)
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
@@ -76,7 +81,21 @@ _EMPTY_NUDGE = (
     "продолжи работу через tools."
 )
 
+# Reasoning-модели отдают мысли отдельным каналом: ход, состоящий из одних
+# рассуждений, приходит с пустым content и без вызовов. Обобщённое «ты вернул
+# пустой ответ» такой модели неадресно — она думала, а не молчала.
+_REASONING_ONLY_NUDGE = (
+    "Ты вернул только рассуждения — без текста ответа и без вызова tools, "
+    "поэтому ход не принят. Рассуждения пользователю не видны и в историю не "
+    "попадают. Выбери одно: либо вызови нужный tool, либо напиши финальный "
+    "ответ обычным текстом."
+)
+
 _SAVED_CONTENT_MARKER = "[содержимое сохранено в файле]"
+
+# Потолок рассуждений в trace: полный chain-of-thought бывает в разы длиннее
+# ответа, а для диагностики хватает начала.
+_REASONING_TRACE_CHARS = 2_000
 
 # Микрокомпакция (ADR-0015 §1.4): маркер очищенного tool-результата и порог,
 # ниже которого сообщение не трогается (мелочь чистить бессмысленно).
@@ -109,7 +128,9 @@ def _rejection_nudge(result: CompletionResult) -> str | None:
     if result.finish_reason == "length":
         return _TRUNCATION_NUDGE
     if not result.content.strip():
-        return _EMPTY_NUDGE
+        # Пустой content при непустых рассуждениях — не молчание модели, а
+        # ход, который целиком ушёл в канал размышлений (регрессия S19).
+        return _REASONING_ONLY_NUDGE if result.reasoning.strip() else _EMPTY_NUDGE
     return None
 
 
@@ -358,6 +379,9 @@ class AgentLoop:
                     "assistant",
                     {
                         "content": result_content,
+                        # Рассуждения — не часть истории для модели, но без них
+                        # «пустой ход» неотличим от молчания при разборе trace.
+                        "reasoning": truncate_text(result.reasoning, _REASONING_TRACE_CHARS),
                         "tool_calls": [
                             {
                                 "id": c.id,
@@ -386,6 +410,22 @@ class AgentLoop:
                         await self._record_message(run, "user", {"content": nudge})
                         await self._save_checkpoint(run, state)
                         continue
+                    if nudge is not None:
+                        # Nudge'и исчерпаны, а валидного финального ответа так и
+                        # нет. Считать это успехом — значит рапортовать
+                        # завершение недоделанной задачи: у моделей с отдельным
+                        # каналом рассуждений пустой ход выглядит как «ответ»,
+                        # хотя работа не сделана. Решает человек — как при
+                        # затухающей отдаче (§1.6).
+                        state.nudges = 0
+                        return await self._suspend(
+                            run,
+                            state,
+                            "модель не вернула валидный финальный ответ после "
+                            f"{_MAX_NUDGES} попыток (пустой ответ, обрезка или "
+                            "протёкший tool call); проверьте, доведена ли задача "
+                            "до конца, и выполните resume",
+                        )
                     await self._recorder.finish_run(run, RunState.COMPLETED)
                     return self._outcome(run, RunState.COMPLETED, state, result_content)
 
@@ -596,7 +636,22 @@ class AgentLoop:
         сброса истории, поэтому падение процесса между записью и продолжением
         не теряет прогресс — resume поднимет run с уже готовым файлом.
         """
-        task_state = build_task_state(state.task, state.messages, state.iterations, plan=state.plan)
+        # Прогресс накапливается: history сегмента при сбросе обнуляется, и
+        # пересчёт «с нуля» стирал бы всё сделанное до предыдущего раунда.
+        state.tool_usage, state.findings, state.touched_files = merge_progress(
+            tool_usage=state.tool_usage,
+            findings=state.findings,
+            touched_files=state.touched_files,
+            segment=segment_progress(state.messages),
+        )
+        task_state = build_task_state(
+            state.task,
+            iterations=state.iterations,
+            tool_usage=state.tool_usage,
+            findings=state.findings,
+            touched_files=state.touched_files,
+            plan=state.plan,
+        )
         (state.workspace / task_state_path()).write_text(task_state, encoding="utf-8")
         if self._workspace_flow is not None:
             # Коммит task_state.md — лучший-эффорт (не git-репозиторий, секрет-скан…).

@@ -403,9 +403,12 @@ async def test_leak_nudges_are_capped(db: AsyncSession, tmp_path: Path) -> None:
     provider = ScriptedProvider([_leaked_final(leaked)] * 3)
     outcome = await _loop(provider, db, tmp_path).run("запомни факт", AutonomyMode.YOLO)
 
-    # После двух повторов loop сдаётся и принимает ответ как финальный.
-    assert outcome.state is RunState.COMPLETED
-    assert outcome.final_answer == leaked
+    # После двух повторов loop сдаётся — но НЕ принимает дефектный ответ за
+    # финальный: протёкший вызов не исполнялся, значит задача не доведена.
+    # Решение принимает человек (регрессия S19).
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "валидный финальный ответ" in outcome.error
     assert outcome.iterations == 3
 
 
@@ -1123,3 +1126,81 @@ async def test_zero_round_cap_keeps_old_suspend_behaviour(db: AsyncSession, tmp_
     assert outcome.error is not None
     assert "task_state.md" in outcome.error
     assert (tmp_path / "task_state.md").exists()
+
+
+async def test_exhausted_nudges_suspend_instead_of_completing(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Модель молчит — run НЕ считается успешным (регрессия S19).
+
+    Исчерпание nudge'ей означает, что валидного финального ответа так и не
+    получено. Помечать это `completed` — значит рапортовать успех о
+    недоделанной задаче; решение принимает человек, как при стагнации.
+    """
+    provider = ScriptedProvider(
+        [
+            CompletionResult(content="", usage=Usage(10, 5), finish_reason="stop"),
+            CompletionResult(content="", usage=Usage(10, 5), finish_reason="stop"),
+            CompletionResult(content="", usage=Usage(10, 5), finish_reason="stop"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("сделай что-нибудь", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.SUSPENDED
+    assert outcome.error is not None
+    assert "пуст" in outcome.error.lower() or "финальн" in outcome.error.lower()
+
+
+async def test_valid_final_answer_still_completes(db: AsyncSession, tmp_path: Path) -> None:
+    """Страховка: обычное завершение с содержательным ответом не сломано."""
+    provider = ScriptedProvider([_final("готово")])
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "готово"
+
+
+async def test_reasoning_only_turn_gets_specific_nudge(db: AsyncSession, tmp_path: Path) -> None:
+    """Ход из одних рассуждений получает адресный nudge, а не «пустой ответ».
+
+    Регрессия S19: reasoning-модель после сброса контекста уходит в мысли и
+    не выдаёт ни текста, ни вызова; обобщённая формулировка ей не помогала.
+    """
+    provider = ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                usage=Usage(10, 5),
+                finish_reason="stop",
+                reasoning="долго размышляю о структуре документации",
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    nudge = provider.seen_messages[1][-1]
+    assert nudge.role == "user"
+    assert "рассужден" in nudge.content
+    assert "пустой ответ" not in nudge.content
+
+
+async def test_reasoning_is_recorded_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Рассуждения попадают в trace — иначе такой отказ не диагностируется."""
+    provider = ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                usage=Usage(10, 5),
+                finish_reason="stop",
+                reasoning="я думаю про файлы",
+            ),
+            _final("готово"),
+        ]
+    )
+    outcome = await _loop(provider, db, tmp_path).run("задача", AutonomyMode.YOLO)
+
+    messages = (await db.scalars(select(Message).where(Message.run_id == outcome.run_id))).all()
+    reasoning_notes = [m.content.get("reasoning") for m in messages if m.role == "assistant"]
+    assert any(note and "думаю про файлы" in note for note in reasoning_notes)
