@@ -38,6 +38,7 @@ from svarog_harness.runtime.refuel import build_task_state, task_state_path
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
+from svarog_harness.tools.guidance import BoundaryKind
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME
 from svarog_harness.trace.recorder import TraceRecorder
@@ -697,7 +698,9 @@ class AgentLoop:
             risk_level=decision.risk_level.value,
             policy_decision=decision.action.value,
         )
-        result = ToolResult.failure(f"approval {verb}: {reason}")
+        result = ToolResult.failure(
+            f"approval {verb}: {reason}", boundary=BoundaryKind.APPROVAL_DENIED
+        )
         await self._recorder.finish_tool_call(
             record, ok=False, output="", error=result.error, denied=True
         )
@@ -959,7 +962,10 @@ class AgentLoop:
                 risk_level=decision.risk_level.value,
                 policy_decision=decision.action.value,
             )
-            result = ToolResult.failure(f"запрещено политикой: {decision.reason}")
+            result = ToolResult.failure(
+                f"запрещено политикой: {decision.reason}",
+                boundary=BoundaryKind.POLICY_DENY,
+            )
             await self._recorder.finish_tool_call(
                 record, ok=False, output="", error=result.error, denied=True
             )
