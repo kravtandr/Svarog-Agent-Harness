@@ -303,3 +303,38 @@ async def test_recorder_approval_helpers(db: AsyncSession) -> None:
 
     with pytest.raises(ApprovalNotFoundError):
         await recorder.find_approval_by_prefix("нет-такого")
+
+
+async def test_denied_call_explains_boundary_to_model(db: AsyncSession, tmp_path: Path) -> None:
+    """Блок E §3: отказ в approval объясняет, что повторять запрос не нужно.
+
+    В trace остаётся чистая причина отказа — текст-инструкция туда не уходит.
+    """
+    deploy = DeployTool()
+    provider = ScriptedProvider(
+        [
+            _tool_turn(ToolCallRequest(id="c1", name="deploy_preview", arguments_json="{}")),
+            _final("понял, не деплою"),
+        ]
+    )
+    loop = _loop(provider, db, tmp_path, [deploy])
+    outcome = await loop.run("задеплой", AutonomyMode.SUPERVISED)
+    assert outcome.state is RunState.WAITING_APPROVAL
+
+    recorder = TraceRecorder(db)
+    approval = (await db.execute(select(Approval))).scalar_one()
+    await recorder.decide_approval(approval, approved=False, decided_by="test", reason="не сейчас")
+
+    resumed = await _resume(loop, db, outcome.run_id)
+    assert resumed.state is RunState.COMPLETED  # type: ignore[attr-defined]
+
+    # Модель получила и причину, и подсказку.
+    model_text = provider.seen_messages[-1][-1].content
+    assert "не сейчас" in model_text
+    assert "повтор" in model_text.lower()
+
+    # В trace — только причина.
+    call = (await db.execute(select(ToolCall))).scalar_one()
+    assert call.error is not None
+    assert "не сейчас" in call.error
+    assert "повтор" not in call.error.lower()
