@@ -22,8 +22,9 @@ def _chunk(
     finish_reason: str | None = None,
     usage: Any | None = None,
     choices: bool = True,
+    reasoning: str | None = None,
 ) -> Any:
-    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls, reasoning=reasoning)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice] if choices else [], usage=usage)
 
@@ -312,3 +313,68 @@ async def test_usage_without_cache_fields_is_zero() -> None:
     provider = _provider_with_usage(prompt_tokens=100, completion_tokens=10, extra={})
     result = await provider.complete([ChatMessage(role="user", content="привет")], [])
     assert result.usage.cached_tokens == 0
+
+
+# --- Канал рассуждений (регрессия S19) --------------------------------------
+
+
+async def test_reasoning_deltas_are_captured() -> None:
+    """Reasoning-модели шлют мысли отдельным каналом; без его чтения ход из
+    одних рассуждений выглядит как пустой ответ (регрессия S19)."""
+    provider, _client = _provider(
+        [
+            _chunk(reasoning="думаю "),
+            _chunk(reasoning="дальше"),
+            _chunk(content="ответ", finish_reason="stop"),
+        ]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="?")], [])
+
+    assert result.content == "ответ"
+    assert result.reasoning == "думаю дальше"
+
+
+async def test_reasoning_only_turn_has_empty_content() -> None:
+    """Ход без content, но с рассуждениями — именно тот случай, который цикл
+    обязан отличать от настоящей пустоты."""
+    provider, _client = _provider([_chunk(reasoning="долго думаю"), _chunk(finish_reason="stop")])
+    result = await provider.complete([ChatMessage(role="user", content="?")], [])
+
+    assert result.content == ""
+    assert result.reasoning == "долго думаю"
+
+
+async def test_reasoning_absent_stays_empty() -> None:
+    provider, _client = _provider([_chunk(content="ответ", finish_reason="stop")])
+    result = await provider.complete([ChatMessage(role="user", content="?")], [])
+
+    assert result.reasoning == ""
+
+
+async def test_leak_in_reasoning_is_flagged_but_not_executed() -> None:
+    """Вызов, выроненный в канал рассуждений, помечается — но НЕ исполняется.
+
+    Рассуждения — приватный черновик модели: она могла вызов только обдумывать.
+    Исполнить его означало бы сделать то, чего модель не просила. Поэтому
+    только сигнал циклу, чтобы тот попросил повторить вызов штатно (S19).
+    """
+    provider, _client = _provider(
+        [
+            _chunk(reasoning='нужно посмотреть <tool_call>{"name": "list_dir", '),
+            _chunk(reasoning='"arguments": {"path": "docs"}}</tool_call>'),
+            _chunk(finish_reason="stop"),
+        ]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="?")], [])
+
+    assert result.tool_calls == ()  # ничего не исполняем
+    assert result.leak_suspected is True  # но цикл узнает, что ход дефектный
+
+
+async def test_clean_reasoning_is_not_flagged() -> None:
+    provider, _client = _provider(
+        [_chunk(reasoning="просто думаю вслух"), _chunk(finish_reason="stop")]
+    )
+    result = await provider.complete([ChatMessage(role="user", content="?")], [])
+
+    assert result.leak_suspected is False
