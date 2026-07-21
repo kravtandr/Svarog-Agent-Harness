@@ -25,6 +25,7 @@ svarog/
       chat_prompt.py        # prompt_toolkit: меню `/` и `@` при наборе
       chat_commands.py      # реестр слэш-команд чата и парсинг
       policies.py           # интерактивная настройка policy-профилей в svarog.yaml
+      install.py            # svarog install: env + alias в shell rc, symlink на ~/.svarog/svarog.yaml
 
     config/                 # svarog.yaml → pydantic-settings
       schema.py

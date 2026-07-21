@@ -15,7 +15,126 @@
 
 > **Pre-alpha** Работает end-to-end; весь набор unit-тестов и eval-сценарии критериев готовности MVP гоняются в CI; 17 ADR фиксируют архитектурные решения с трейд-оффами. Self-hosted на любом OpenAI-совместимом endpoint — из инфраструктуры только Git + SQLite, без внешних сервисов. Публичного контракта API пока нет — детали могут меняться.
 
-## Чем Svarog отличается
+## Quick Start
+
+### 1. Клонировать и поставить зависимости
+
+```bash
+git clone git@github.com:kravtandr/Svarog-Agent-Harness.git
+cd Svarog-Agent-Harness
+uv sync
+```
+
+Требования: Python 3.12+ (uv поставит сам), [uv](https://docs.astral.sh/uv/).
+
+### 2. Создать agent-home (интерактив)
+
+```bash
+uv run svarog init                # спросит путь, модель, base_url и API-ключ
+```
+
+`init` спрашивает каталог agent-home (по умолчанию `./agent-home` внутри проекта), имя модели, `base_url` endpoint и API-ключ; создаёт skills, memory (Flow A), policies, `.gitignore` для секретов; если agent-home лежит внутри проекта — добавляет его в `.gitignore` проекта. Введённый ключ **не** записывается в `svarog.yaml` — он сохраняется в SecretStore, а в конфиг попадает только имя (`api_key_ref`). Для локальных серверов (vLLM, llama.cpp) ключ не нужен — оставьте пустым. Runtime-состояние (traces, SQLite) живёт в `./.svarog/` внутри agent-home и в Git не попадает.
+
+Без интерактива всё задаётся флагами:
+
+```bash
+uv run svarog init ./agent-home --no-input \
+  --model qwen3-coder --base-url http://localhost:8000/v1 --api-key sk-…
+```
+
+Чтобы сразу настроить Claude Code или OpenCode как исполнителя
+(`executor.external`, ADR-0016) — независимо друг от друга, credentials
+можно не вводить и добавить позже:
+
+```bash
+uv run svarog init ./agent-home --no-input \
+  --executor claude-code --claude-auth subscription   # OAuth-токен потом: svarog secrets set CLAUDE_CODE_OAUTH_TOKEN
+
+uv run svarog init ./agent-home --no-input \
+  --executor opencode --opencode-same-as-native        # те же креды, что и у models.local
+```
+
+Вместо `init` можно создать `svarog.yaml` вручную (полная схема — §13 [TASK.md](TASK.md)):
+
+```yaml
+models:
+  default: local-qwen
+  providers:
+    local-qwen:
+      type: openai-compatible
+      base_url: http://localhost:8000/v1   # vLLM, llama.cpp, LiteLLM, OpenRouter…
+      model: qwen3-coder
+      # api_key_ref: PROVIDER_API_KEY      # имя env-переменной с ключом, если нужен
+```
+
+### 3. Подключить `svarog` из любой папки одной командой
+
+`svarog.yaml` создаётся **внутри** agent-home, а `svarog` ищёт его в текущей директории. Чтобы `svarog chat`/`run` работали как `claude` — из любого проекта, без `cd agent-home` — выполните `install`: она пропишет в shell rc переменные окружения + алиас и подключит конфиг agent-home как user-level (symlink на `~/.svarog/svarog.yaml`):
+
+```bash
+uv run svarog install
+```
+
+Команда идемпотентна — повторный вызов обновляет блок (маркеры `# >>> svarog >>>` … `# <<< svarog <<<`), так что её можно запускать после смены путей. Флаги для нестандартных случаев: `--shell zsh` (по умолчанию auto по `$SHELL`), `--repo PATH` (если checkout Svarog не над agent-home), `--no-symlink`, `--force`. Если `~/.svarog/svarog.yaml` уже существует как файл (например, после `svarog login`) — symlink пропускается с предупреждением; перенесите его содержимое в `agent-home/svarog.yaml` и удалите, либо `--no-symlink`.
+
+Относительные `./memory`, `./skills`, `./.svarog` в `agent-home/svarog.yaml` резолвятся от cwd; env-переменные (приоритетнее yaml) прибивают их к agent-home. После `exec bash` (или нового терминала) `cd` в любой проект и `svarog chat` — workspace = текущая папка, control-plane (память/скиллы/БД/конфиг) фиксирован в agent-home «где создан», `assert_workspace_isolated` (ADR-0015 §0.3) не ругается. Секреты и история чата от cwd не зависят (`~/.svarog/secrets.json`, `~/.svarog/chat_history`). Нюанс: `policies/*.yaml` читается из `<workspace>/policies/`, а не из agent-home — кастомные project-level правила при запуске из папки без своего `policies/` не действуют; неотключаемый critical-набор и risk×autonomy (§3.6) от workspace не зависят и продолжают работать.
+
+### 4. Первый запуск
+
+```bash
+svarog run "создай hello.py, который печатает время"   # выполнить задачу
+svarog chat                                            # интерактивная сессия
+```
+
+### Подробнее про API-ключ
+
+Ключ модели **никогда не хранится в `svarog.yaml`** (схема провайдера строгая — `extra="forbid"`, поля под значение ключа нет). В конфиге указывается лишь имя секрета через `api_key_ref`, значение резолвится на execution-слое через SecretStore (ADR-0006). `init` уже спросил ключ и сохранил его в SecretStore — этого достаточно для старта; для локальных серверов (vLLM, llama.cpp) ключ не нужен.
+
+Задать или переопределить значение можно одним из двух способов (первым срабатывает файл, затем env):
+
+```bash
+# 1) файл секретов (FileSecretStore, ~/.svarog/secrets.json, права 0600)
+svarog secrets set PROVIDER_API_KEY      # спросит значение, не покажет в истории
+svarog secrets list                      # только имена, без значений
+
+# 2) переменная окружения (EnvSecretStore) — имя должно совпадать с api_key_ref
+export PROVIDER_API_KEY="sk-…"
+```
+
+> `.env` **не подхватывается автоматически** (нет `load_dotenv`) — подгрузите вручную: `set -a; source .env; set +a`. Файлы `.env`, `*.key`, `.svarog/secrets*` уже в `.gitignore` (denylist ADR-0006) и отвергаются git-flow до коммита. Если `api_key_ref` задан, а секрет не найден, run падает с `ApiKeyError` и подсказкой.
+
+## Команды
+
+```bash
+svarog run "создай hello.py, который печатает время" # выполнить задачу
+svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
+                                                      # inline (ADR-0018): welcome + / и @ меню при наборе,
+                                                      # tool-карточки, markdown в scrollback; Ctrl+C — прервать;
+                                                      # --plain — построчный REPL; запуск из любой папки:
+                                                      # пересечение с control-plane требует подтверждения
+svarog traces list                                   # последние runs
+svarog traces show <run-id>                          # полный trace run'а
+svarog resume <run-id>                               # продолжить приостановленный run
+svarog approvals list                                # ожидающие подтверждения и вопросы
+svarog approvals approve <id>                        # или deny <id> --reason "…"
+svarog approvals answer <id> "текст"                 # ответить на вопрос ask_user (§6.5)
+svarog skills list                                   # доступные скиллы и карточки
+svarog skills proposals list                         # skill proposals на review (Flow B)
+svarog skills proposals approve <id>                 # влить proposal (или reject <id>)
+svarog skills curate [--semantic]                    # Curator: lifecycle (+ LLM-консолидация)
+svarog skills pin <name>                             # закрепить скилл (вне авто-переходов)
+svarog memory show                                   # память, как она попадёт в контекст
+svarog push <branch>                                 # push task-ветки (Flow C, с policy)
+svarog serve                                         # REST/WebSocket gateway (extra `server`, §10.4)
+svarog telegram                                      # Telegram-бот (§10.2)
+svarog mcp list                                      # инструменты MCP-серверов (extra `mcp`, §9)
+svarog tenant create alice --role standard           # завести тенанта: свой agent-home + bearer-токен
+svarog tenant list                                   # тенанты; token [--rotate] / add-principal — доступ
+svarog login <url>                                   # подключиться к удалённому серверу (ADR-0017)
+svarog remote run "…" --workspace ws                 # run на сервере — см. «Cloud-режим»
+```
+
+## Ключевые особенности
 
 Большинство agent-платформ — либо конструкторы графов и воркфлоу, либо облачные ассистенты с непрозрачной памятью и полным доступом к системе. Svarog — loop-агент (`observe → reason → select skill/tool → act → verify`, как Hermes и OpenClaw, а не граф вроде LangGraph/n8n), но с жёстким backbone:
 
@@ -47,122 +166,12 @@
 
 Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0017](docs/adr/) (hardening рантайма — 0015, внешний агент как data-plane — 0016, cloud-режим — 0017).
 
-## Установка (для разработки)
-
-```bash
-git clone git@github.com:kravtandr/Svarog-Agent-Harness.git
-cd Svarog-Agent-Harness
-uv sync
-uv run svarog version
-```
-
-Требования: Python 3.12+ (uv поставит сам), [uv](https://docs.astral.sh/uv/).
-
 ## Режимы работы
 
 Svarog работает в двух режимах, на одном и том же core (§10):
 
-* **Локальный CLI** (готово) — `svarog` запускается прямо на вашей машине, как `claude`/`codex`: вы вызываете его из терминала, он исполняет run в своём sandbox и завершается. Один agent-home (память/скиллы/БД) может обслуживать запуски из любой рабочей папки — см. «Запуск из любой папки».
+* **Локальный CLI** (готово) — `svarog` запускается прямо на вашей машине, как `claude`/`codex`: вы вызываете его из терминала, он исполняет run в своём sandbox и завершается. Один agent-home (память/скиллы/БД) может обслуживать запуски из любой рабочей папки — см. «Чтобы `svarog` работал из любой папки» в Quick Start.
 * **Cloud-агент** (ADR-0017, фазы 1–2 реализованы) — постоянно работающий инстанс `svarog serve` на сервере: клиенты подключаются через `svarog login` / `svarog remote …`, run'ы исполняются на сервере в серверных workspaces, результаты забираются как diff, push или архив — см. «Cloud-режим». Остались admin-plane (управление тенантами по HTTP) и деплой-упаковка — см. «Дорожная карта».
-
-## Быстрый старт
-
-Разверните agent-home одной командой:
-
-```bash
-uv run svarog init                # интерактивно: путь, модель, base_url, ключ
-```
-
-`init` без флагов спрашивает каталог agent-home (по умолчанию `./agent-home` внутри проекта), имя модели, `base_url` endpoint и API-ключ; без интерактива всё задаётся флагами:
-
-```bash
-uv run svarog init ./agent-home --no-input \
-  --model qwen3-coder --base-url http://localhost:8000/v1 --api-key sk-…
-```
-
-`init` создаёт skills, memory (Flow A), policies, `.gitignore` для секретов; если agent-home лежит внутри проекта — добавляет его в `.gitignore` проекта. Введённый ключ **не** записывается в `svarog.yaml` — он сохраняется в SecretStore, а в конфиг попадает только имя (`api_key_ref`). Runtime-состояние (traces, SQLite) живёт в `./.svarog/` внутри agent-home и в Git не попадает.
-
-Чтобы сразу настроить Claude Code или OpenCode как исполнителя
-(`executor.external`, ADR-0016) — независимо друг от друга, credentials
-можно не вводить и добавить позже:
-
-```bash
-uv run svarog init ./agent-home --no-input \
-  --executor claude-code --claude-auth subscription   # OAuth-токен потом: svarog secrets set CLAUDE_CODE_OAUTH_TOKEN
-
-uv run svarog init ./agent-home --no-input \
-  --executor opencode --opencode-same-as-native        # те же креды, что и у models.local
-```
-
-Конфиг (`svarog.yaml`) создаётся **внутри** agent-home, а `svarog` ищет его в текущей директории — поэтому после `init` перейдите в agent-home:
-
-```bash
-cd agent-home           # svarog.yaml лежит здесь
-uv run svarog chat      # чат запускается из каталога с конфигом
-```
-
-`uv run` найдёт `pyproject.toml` в родительском каталоге, так что `--project` не нужен, пока `agent-home` внутри checkout'а Svarog; иначе — `uv --project /path/to/Svarog-Agent-Harness run svarog chat --workspace /path/to/agent-home`.
-
-Вместо `init` можно создать `svarog.yaml` вручную (полная схема — §13 [TASK.md](TASK.md)):
-
-```yaml
-models:
-  default: local-qwen
-  providers:
-    local-qwen:
-      type: openai-compatible
-      base_url: http://localhost:8000/v1   # vLLM, llama.cpp, LiteLLM, OpenRouter…
-      model: qwen3-coder
-      # api_key_ref: PROVIDER_API_KEY      # имя env-переменной с ключом, если нужен
-```
-
-### Настройка API-ключа
-
-Ключ модели **никогда не хранится в `svarog.yaml`** (схема провайдера строгая — `extra="forbid"`, поля под значение ключа нет). В конфиге указывается лишь имя секрета через `api_key_ref`, значение резолвится на execution-слое через SecretStore (ADR-0006). Для локальных серверов (vLLM, llama.cpp) ключ не нужен — оставьте `api_key_ref` закомментированным.
-
-Значение задаётся одним из двух способов (первым срабатывает файл, затем env):
-
-```bash
-# 1) файл секретов (FileSecretStore, ~/.svarog/secrets.json, права 0600)
-uv run svarog secrets set PROVIDER_API_KEY      # спросит значение, не покажет в истории
-uv run svarog secrets list                      # только имена, без значений
-
-# 2) переменная окружения (EnvSecretStore) — имя должно совпадать с api_key_ref
-export PROVIDER_API_KEY="sk-…"
-```
-
-> `.env` **не подхватывается автоматически** (нет `load_dotenv`) — подгрузите вручную: `set -a; source .env; set +a`. Файлы `.env`, `*.key`, `.svarog/secrets*` уже в `.gitignore` (denylist ADR-0006) и отвергаются git-flow до коммита. Если `api_key_ref` задан, а секрет не найден, run падает с `ApiKeyError` и подсказкой.
-
-### Основные команды
-
-```bash
-uv run svarog run "создай hello.py, который печатает время" # выполнить задачу
-uv run svarog chat                                          # интерактивная сессия (диалог из нескольких runs)
-                                                            # inline (ADR-0018): welcome + / и @ меню при наборе,
-                                                            # tool-карточки, markdown в scrollback; Ctrl+C — прервать;
-                                                            # --plain — построчный REPL; запуск из любой папки:
-                                                            # пересечение с control-plane требует подтверждения
-uv run svarog traces list                                   # последние runs
-uv run svarog traces show <run-id>                          # полный trace run'а
-uv run svarog resume <run-id>                               # продолжить приостановленный run
-uv run svarog approvals list                                # ожидающие подтверждения и вопросы
-uv run svarog approvals approve <id>                        # или deny <id> --reason "…"
-uv run svarog approvals answer <id> "текст"                 # ответить на вопрос ask_user (§6.5)
-uv run svarog skills list                                   # доступные скиллы и карточки
-uv run svarog skills proposals list                         # skill proposals на review (Flow B)
-uv run svarog skills proposals approve <id>                 # влить proposal (или reject <id>)
-uv run svarog skills curate [--semantic]                    # Curator: lifecycle (+ LLM-консолидация)
-uv run svarog skills pin <name>                             # закрепить скилл (вне авто-переходов)
-uv run svarog memory show                                   # память, как она попадёт в контекст
-uv run svarog push <branch>                                 # push task-ветки (Flow C, с policy)
-uv run svarog serve                                         # REST/WebSocket gateway (extra `server`, §10.4)
-uv run svarog telegram                                      # Telegram-бот (§10.2)
-uv run svarog mcp list                                      # инструменты MCP-серверов (extra `mcp`, §9)
-uv run svarog tenant create alice --role standard           # завести тенанта: свой agent-home + bearer-токен
-uv run svarog tenant list                                   # тенанты; token [--rotate] / add-principal — доступ
-uv run svarog login <url>                                   # подключиться к удалённому серверу (ADR-0017)
-uv run svarog remote run "…" --workspace ws                 # run на сервере — см. «Cloud-режим»
-```
 
 ## Использование
 
@@ -240,45 +249,19 @@ executor:
 Cloud-режим — это deployment-профиль `svarog serve`, а не отдельная подсистема: тот же gateway и мультиарендность, дополненные серверными workspaces и thin CLI. Сценарий — self-hosted сервер команды: админ провижнит тенантов (`svarog tenant …`), пользователи подключаются удалённо и не исполняют локально **ничего**:
 
 ```bash
-uv run svarog login https://svarog.team.example   # сохранит URL в ~/.svarog/svarog.yaml, токен — в SecretStore
-uv run svarog remote whoami                        # тенант, роль, активные runs, usage
-uv run svarog remote run "почини CI" --repo git@github.com:team/app.git --ref main
-uv run svarog remote run "собери отчёт" -w reports # run в постоянном named workspace
-uv run svarog remote chat -w reports               # сессия чата в том же workspace
-uv run svarog remote runs / show / resume / cancel <id>
-uv run svarog remote approvals / approve / deny <id>
-uv run svarog remote workspace create|list|rm|pull # lifecycle named workspaces
+svarog login https://svarog.team.example   # сохранит URL в ~/.svarog/svarog.yaml, токен — в SecretStore
+svarog remote whoami                        # тенант, роль, активные runs, usage
+svarog remote run "почини CI" --repo git@github.com:team/app.git --ref main
+svarog remote run "собери отчёт" -w reports # run в постоянном named workspace
+svarog remote chat -w reports               # сессия чата в том же workspace
+svarog remote runs / show / resume / cancel <id>
+svarog remote approvals / approve / deny <id>
+svarog remote workspace create|list|rm|pull # lifecycle named workspaces
 ```
 
 Workspace на сервере берётся из двух источников (ADR-0017 §1). **Git-клон** (`--repo`): сервер клонирует репозиторий host-side hardened-флагами в одноразовый task-workspace, дальше штатный Flow C — task-ветка, guarded commit, push по policy; git-credentials — per-tenant секрет (`git.credentials`), резолвится только на хосте и никогда не попадает в sandbox или trace. **Named workspace** (`--workspace <name>`): постоянный каталог тенанта, живущий между runs и сессиями — агент накапливает в нём результаты; параллельный run в занятом workspace получает 409, retention-GC его не трогает. Результаты забираются push'ем task-ветки, диффом (`GET /runs/{id}/diff`) или `svarog remote workspace pull <name> [path]` (файл или tar.gz-архив).
 
 `remote chat` создаёт сессию (сообщение = run, workspace общий на сессию) и решает approvals прямо из чата. Сессии держат **тёплый sandbox**: env, инфраструктура (bridge/сеть/relay) и MCP-бэкенды живут между сообщениями (idle-GC по `cloud.warm_session_ttl_sec`, по умолчанию 900 с) — без старта контейнера на каждое сообщение. Всё это работает и с внешними executor'ами (ADR-0016 × ADR-0017). Admin-plane (`/admin/*` — управление тенантами без shell-доступа) и деплой-упаковка — фаза 3, см. «Дорожная карта».
-
-### Запуск из любой папки (без `cd agent-home`)
-
-`svarog.yaml` грузится из `<workspace>/svarog.yaml` (workspace по умолчанию — `Path.cwd()`), **user-level** `~/.svarog/svarog.yaml` и переменных `SVAROG_*` (§13, приоритет: user → project → env). Чтобы `svarog chat`/`run` работали как `claude` — из любого проекта, без `cd agent-home` и без `--workspace` — добавьте в shell rc (`~/.bashrc`/`~/.zshrc`) универсальный блок: путь к agent-home задаётся **одной** переменной, всё остальное выводится из неё:
-
-```bash
-# где лежит checkout Svarog и созданный `svarog init` agent-home — правится в одном месте
-export SVAROG_REPO="$HOME/proj/Svarog-Agent-Harness"
-export SVAROG_AGENT_HOME="$SVAROG_REPO/agent-home"
-# относительные ./memory, ./skills, ./.svarog в agent-home/svarog.yaml резолвятся
-# от cwd — env-переменные (приоритетнее yaml) прибивают их к agent-home:
-export SVAROG_MEMORY__PATH="$SVAROG_AGENT_HOME/memory"
-export SVAROG_SKILLS__PATHS="[\"$SVAROG_AGENT_HOME/skills\"]"
-export SVAROG_STORAGE__DB_PATH="$SVAROG_AGENT_HOME/.svarog/svarog.db"
-alias svarog='uv --project "$SVAROG_REPO" run svarog'
-```
-
-И один раз подключите конфиг agent-home как user-level — symlink, копия с абсолютными путями не нужна:
-
-```bash
-mkdir -p ~/.svarog && ln -sf "$SVAROG_AGENT_HOME/svarog.yaml" ~/.svarog/svarog.yaml
-```
-
-(Если `~/.svarog/svarog.yaml` уже существует — например, после `svarog login` — не затирайте его symlink'ом: перенесите его содержимое в `agent-home/svarog.yaml` перед линковкой.)
-
-После этого `cd` в любой проект и `svarog chat` — workspace = текущая папка, control-plane (память/скиллы/БД/конфиг) фиксирован в agent-home «где создан», `assert_workspace_isolated` (ADR-0015 §0.3) не ругается. Секреты и история чата от cwd не зависят (`~/.svarog/secrets.json`, `~/.svarog/chat_history`). Нюанс: `policies/*.yaml` читается из `<workspace>/policies/`, а не из agent-home — кастомные project-level правила при запуске из папки без своего `policies/` не действуют; неотключаемый critical-набор и risk×autonomy (§3.6) от workspace не зависят и продолжают работать.
 
 ## Сравнение с Hermes и OpenClaw
 

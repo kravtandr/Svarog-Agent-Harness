@@ -1,6 +1,6 @@
 """Точка входа CLI `svarog` (§10.1).
 
-Доступные команды: init, run, resume, chat, push, rewind, doctor, version;
+Доступные команды: init, install, run, resume, chat, push, rewind, doctor, version;
 traces list/show, sessions list/rename, approvals list/approve/deny,
 skills list/check, memory show/flush, secrets list/set.
 """
@@ -19,6 +19,7 @@ from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
+from svarog_harness.cli import install as install_module
 from svarog_harness.cli import remote as remote_module
 from svarog_harness.cli.chat_display import format_tool_call
 from svarog_harness.cli.chat_engine import (
@@ -152,6 +153,8 @@ app.add_typer(policies_app, name="policies")
 # Thin CLI cloud-режима (ADR-0017 §3): svarog remote … / svarog login.
 app.add_typer(remote_module.remote_app, name="remote")
 app.command("login")(remote_module.login)
+# svarog install: env + alias в shell rc и symlink на ~/.svarog/svarog.yaml.
+app.command("install")(install_module.install)
 console = Console()
 
 
