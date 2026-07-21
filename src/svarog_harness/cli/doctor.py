@@ -5,6 +5,7 @@
 можно, но с деградацией (Python-fallback поиска, отложенные миграции).
 """
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -48,7 +49,80 @@ def collect_checks(workspace: Path) -> list[DoctorCheck]:
         checks.append(_check_model(cfg))
         checks.append(_check_memory(cfg))
     checks.append(_check_ripgrep())
+    checks.append(_check_agent_orphans())
     return checks
+
+
+def _pid_alive(pid: str) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError, PermissionError):
+        # PermissionError: чужой живой процесс — но owner-pid svarog всегда
+        # процесс этого же пользователя, значит это не наш владелец.
+        return False
+    return True
+
+
+def find_agent_orphans(run=subprocess.run) -> tuple[list[str], list[str]]:
+    """Ресурсы svarog-agent=1 без живого владельца (svarog-owner-pid).
+
+    Ресурсы, созданные до появления reaper'а, метки owner не имеют и не
+    подметаются никогда (кампания 21.07.2026: 4 legacy-сироты роняли
+    test_external_docker) — их находит этот шаг.
+    """
+    fmt = '{{.Names}}\t{{.Label "svarog-owner-pid"}}'
+    out = run(
+        ["docker", "ps", "-a", "--filter", "label=svarog-agent=1", "--format", fmt],
+        capture_output=True,
+        text=True,
+    ).stdout
+    containers = [
+        name
+        for line in out.splitlines()
+        if (name := line.split("\t")[0]) and not _pid_alive(line.split("\t")[1] if "\t" in line else "")
+    ]
+    nfmt = '{{.Name}}\t{{index .Labels "svarog-owner-pid"}}'
+    nout = run(
+        ["docker", "network", "ls", "--filter", "label=svarog-agent=1", "--format", nfmt],
+        capture_output=True,
+        text=True,
+    ).stdout
+    networks = [
+        name
+        for line in nout.splitlines()
+        if (name := line.split("\t")[0]) and not _pid_alive(line.split("\t")[1] if "\t" in line else "")
+    ]
+    return containers, networks
+
+
+def remove_agent_orphans(
+    containers: list[str], networks: list[str], run=subprocess.run
+) -> None:
+    """Удалить найденных сирот (вызывается ТОЛЬКО по явному --clean-orphans)."""
+    if containers:
+        run(["docker", "rm", "-f", *containers], capture_output=True, text=True)
+    if networks:
+        run(["docker", "network", "rm", *networks], capture_output=True, text=True)
+
+
+def _check_agent_orphans() -> DoctorCheck:
+    if shutil.which("docker") is None:
+        return DoctorCheck("agent-orphans", "ok", "docker отсутствует — проверка не нужна")
+    try:
+        containers, networks = find_agent_orphans()
+    except OSError as exc:
+        return DoctorCheck("agent-orphans", "warn", f"docker недоступен: {exc}")
+    if not containers and not networks:
+        return DoctorCheck("agent-orphans", "ok", "осиротевших ресурсов агентов нет")
+    listing = ", ".join(containers + networks)
+    return DoctorCheck(
+        "agent-orphans",
+        "warn",
+        f"осиротевшие ресурсы svarog-agent: {listing}",
+        hint="удалить: svarog doctor --clean-orphans",
+    )
 
 
 def _check_config(workspace: Path, checks: list[DoctorCheck]) -> SvarogConfig | None:

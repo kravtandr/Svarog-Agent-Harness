@@ -17,6 +17,7 @@ from svarog_harness.runtime.executor import (
     AgentAuth,
     AgentEvent,
     AgentLaunch,
+    ask_user_guide,
 )
 
 # Домашний каталог контейнера (docker.py: HOME=/tmp/home): OpenCode держит
@@ -38,9 +39,10 @@ class OpencodeAdapter:
         return "openai"
 
     def capabilities(self) -> AdapterCapabilities:
-        # hooks/mcp: permission-хуков нет; MCP-конфиг OpenCode не совместим
-        # с HTTP-bridge Svarog — честно False (supervised → fail-closed).
-        return AdapterCapabilities(hooks=False, resume=True, mcp=False)
+        # hooks: permission-хуков нет — supervised остаётся fail-closed.
+        # mcp: мост Svarog подключается remote-секцией managed-конфига
+        # (спайк 2026-07-21, spec 2026-07-21-sim-blockers-fix §1a).
+        return AdapterCapabilities(hooks=False, resume=True, mcp=True)
 
     def command(self, launch: AgentLaunch) -> list[str]:
         argv = [self._binary, "run", launch.task, "--format", "json"]
@@ -63,12 +65,26 @@ class OpencodeAdapter:
     def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
         """Глобальные правила OpenCode: ~/.config/opencode/AGENTS.md."""
         sections: list[str] = []
-        if memory:
-            sections.append(f"# Память Svarog\n\n{memory}")
+        # Имена tools глазами OpenCode — с префиксом svarog_ (спайк 2026-07-21).
+        sections.append(
+            "# Память\n\n"
+            "Единственный источник истины по памяти — Svarog. Чтобы что-то "
+            "запомнить между запусками, вызывай MCP-tool `svarog_remember` "
+            "(прочитать — `svarog_read_memory`); НЕ пиши факты в файлы "
+            "workspace и НЕ веди свою локальную память в ~/.local/share/opencode."
+            + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
+        )
+        sections.append(ask_user_guide("svarog_ask_user"))
+        # Наблюдение 21.07.2026 (S13): модель дописывала файл через write с
+        # одним лишь новым фрагментом — write перезаписывает файл целиком.
+        sections.append(
+            "# Работа с файлами\n\n"
+            "`write` перезаписывает файл ЦЕЛИКОМ. Чтобы дописать или изменить "
+            "существующий файл, используй `edit`; если всё же пишешь через "
+            "`write` — передавай ПОЛНОЕ итоговое содержимое файла."
+        )
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
-        if not sections:
-            return {}
         return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
@@ -100,6 +116,21 @@ class OpencodeAdapter:
         return {
             ".config/opencode/opencode.jsonc": json.dumps(config, ensure_ascii=False, indent=2)
             + "\n"
+        }
+
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        """Мост Svarog как remote-MCP в managed-конфиге OpenCode."""
+        return {
+            ".config/opencode/opencode.jsonc": {
+                "mcp": {
+                    "svarog": {
+                        "type": "remote",
+                        "url": url,
+                        "headers": {"Authorization": f"Bearer {token}"},
+                        "enabled": True,
+                    }
+                }
+            }
         }
 
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:

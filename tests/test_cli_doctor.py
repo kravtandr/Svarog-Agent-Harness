@@ -123,3 +123,42 @@ def test_doctor_is_read_only(workspace: Path, tmp_path: Path) -> None:
     result = runner.invoke(cli_main.app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert not (tmp_path / "state" / "svarog.db").exists()
+
+
+def test_find_agent_orphans_filters_dead_and_unlabeled() -> None:
+    """Сироты = svarog-agent=1 без živого svarog-owner-pid (legacy-ресурсы до
+    reaper'а не подметаются никогда — кампания 21.07.2026)."""
+    import os
+    import subprocess
+
+    from svarog_harness.cli.doctor import find_agent_orphans
+
+    outputs = {
+        "ps": "svarog-old\t\nsvarog-dead\t99999999\nsvarog-mine\t" + str(os.getpid()) + "\n",
+        "network": "svarog-net-old\t\n",
+    }
+
+    def fake_run(argv, **kwargs):
+        key = "network" if "network" in argv else "ps"
+        return subprocess.CompletedProcess(argv, 0, stdout=outputs[key], stderr="")
+
+    containers, networks = find_agent_orphans(run=fake_run)
+    assert containers == ["svarog-old", "svarog-dead"]  # без метки и мёртвый pid
+    assert "svarog-mine" not in containers  # живой владелец — не сирота
+    assert networks == ["svarog-net-old"]
+
+
+def test_remove_agent_orphans_invokes_docker_rm() -> None:
+    from svarog_harness.cli.doctor import remove_agent_orphans
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    remove_agent_orphans(["c1", "c2"], ["n1"], run=fake_run)
+    assert ["docker", "rm", "-f", "c1", "c2"] in calls
+    assert ["docker", "network", "rm", "n1"] in calls

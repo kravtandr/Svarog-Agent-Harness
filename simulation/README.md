@@ -79,7 +79,7 @@ models:
     local:
       type: openai-compatible
       base_url: https://openrouter.ai/api/v1
-      model: openai/gpt-oss-120b
+      model: deepseek/deepseek-chat
       api_key_ref: PROVIDER_API_KEY
 runtime:
   autonomy: yolo

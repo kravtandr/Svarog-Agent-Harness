@@ -24,6 +24,7 @@ from svarog_harness.runtime.executor import (
     AgentAuth,
     AgentEvent,
     AgentLaunch,
+    ask_user_guide,
 )
 
 # HOME в sandbox-контейнере задан явно (docker.py: -e HOME=/tmp/home).
@@ -110,6 +111,7 @@ class ClaudeCodeAdapter:
             "НЕ пиши факты в файлы через Write и НЕ веди свой ~/.claude/…/memory."
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
+        sections.append(ask_user_guide("mcp__svarog__ask_user"))
         if skill_cards:
             sections.append(
                 "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
@@ -121,6 +123,10 @@ class ClaudeCodeAdapter:
 
     def provider_files(self, model: str | None) -> dict[str, str]:
         # Модель Claude Code выбирает подписка/ANTHROPIC_MODEL — конфиг не нужен.
+        return {}
+
+    def mcp_client_config(self, url: str, token: str) -> dict[str, dict[str, Any]]:
+        # Мост подключается launch-файлом --mcp-config, не state-конфигом.
         return {}
 
     def managed_policy(self, mcp_config: str | None, hook_command: str | None) -> str | None:

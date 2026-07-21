@@ -861,6 +861,10 @@ class TaskRunner:
             self._cfg, self._workspace, allow_overlap=self._allow_layout_overlap
         )  # раскладка (ADR-0015 §0.3)
         self._warn_layout_tradeoff(hooks)
+        # Fail-closed гейты внешнего агента — ДО Flow C: отказ конфигурации не
+        # должен оставлять мусорную task-ветку (S15a, кампания 21.07.2026).
+        if self._cfg.executor.type == "external":
+            self.assert_external_autonomy_supported(autonomy)
         flow = WorkspaceFlow(GitRepo(self._workspace), self._cfg.git)
         prep = await flow.start(task)
         if hooks.on_workspace_prep is not None:

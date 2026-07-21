@@ -6,6 +6,7 @@ import json
 from svarog_harness.config.schema import ExternalExecutorConfig
 from svarog_harness.runtime.agents import (
     CLIENT_GATE_TIMEOUT_MARGIN_SEC,
+    ClaudeCodeAdapter,
     CodexAdapter,
     OpencodeAdapter,
     adapter_for,
@@ -238,12 +239,18 @@ def test_claude_context_steers_memory_to_mcp() -> None:
 
 def test_capability_matrix() -> None:
     claude = adapter_for(ExternalExecutorConfig(image="i", adapter="claude-code"))
-    codex = adapter_for(ExternalExecutorConfig(image="i", adapter="codex"))
-    opencode = adapter_for(ExternalExecutorConfig(image="i", adapter="opencode"))
+    codex = adapter_for(
+        ExternalExecutorConfig(image="i", adapter="codex", base_url="https://openrouter.ai/api")
+    )
+    opencode = adapter_for(
+        ExternalExecutorConfig(image="i", adapter="opencode", base_url="https://openrouter.ai/api")
+    )
     # Полный tier 2 — только у claude-code; supervised с другими — fail-closed.
     assert claude.capabilities().hooks and claude.capabilities().mcp
     assert not codex.capabilities().hooks and not codex.capabilities().mcp
-    assert not opencode.capabilities().hooks and not opencode.capabilities().mcp
+    # opencode: MCP через remote-секцию managed-конфига (спайк 2026-07-21),
+    # hooks нет — supervised остаётся fail-closed.
+    assert not opencode.capabilities().hooks and opencode.capabilities().mcp
     assert all(a.capabilities().resume for a in (claude, codex, opencode))
     assert claude.wire_format == "anthropic"
     assert codex.wire_format == "openai" and opencode.wire_format == "openai"
@@ -281,3 +288,39 @@ def test_opencode_provider_files_enable_superpowers_without_model() -> None:
     config = json.loads(files[".config/opencode/opencode.jsonc"])
     assert config["plugin"] == ["/opt/superpowers/node_modules/superpowers"]
     assert "provider" not in config and "model" not in config
+
+
+def test_opencode_mcp_client_config_remote_section() -> None:
+    # Спайк 2026-07-21: мост Svarog подключается к OpenCode remote-MCP секцией
+    # managed-конфига (streamable HTTP + Bearer).
+    adapter = OpencodeAdapter()
+    patches = adapter.mcp_client_config("http://bridge:8080/svarog/mcp", "tok-1")
+    section = patches[".config/opencode/opencode.jsonc"]["mcp"]["svarog"]
+    assert section["type"] == "remote"
+    assert section["url"] == "http://bridge:8080/svarog/mcp"
+    assert section["headers"]["Authorization"] == "Bearer tok-1"
+    assert section["enabled"] is True
+
+
+def test_claude_and_codex_mcp_client_config_empty() -> None:
+    # claude-code получает мост через --mcp-config, codex MCP не поддерживает.
+    assert ClaudeCodeAdapter().mcp_client_config("http://x", "t") == {}
+    assert CodexAdapter().mcp_client_config("http://x", "t") == {}
+
+
+def test_opencode_context_steers_memory_and_questions_to_mcp() -> None:
+    # С MCP-мостом у opencode есть write-канал памяти и ask_user (спайк
+    # 2026-07-21): контекст обязан направлять туда, а не в файлы workspace.
+    files = OpencodeAdapter().context_files("факт: кофе", "")
+    text = files[".config/opencode/AGENTS.md"]
+    assert "svarog_remember" in text
+    assert "svarog_ask_user" in text
+    assert "не завершай" in text.lower()
+    assert "факт: кофе" in text
+
+
+def test_claude_context_steers_questions_to_ask_user() -> None:
+    files = ClaudeCodeAdapter().context_files("факт", "")
+    text = files["CLAUDE.md"]
+    assert "ask_user" in text
+    assert "не завершай" in text.lower()

@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -155,7 +156,11 @@ def test_subscription_requires_oauth_ref() -> None:
 def test_subscription_only_claude_code() -> None:
     with pytest.raises(ValidationError, match="claude-code"):
         ExternalExecutorConfig(
-            image="img:1", adapter="codex", auth="subscription", oauth_token_ref="TOK"
+            image="img:1",
+            adapter="codex",
+            base_url="https://openrouter.ai/api",
+            auth="subscription",
+            oauth_token_ref="TOK",
         )
 
 
@@ -574,7 +579,11 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
     (ws3 / "svarog.yaml").write_text(
         (ws2 / "svarog.yaml")
         .read_text(encoding="utf-8")
-        .replace("    image: img:1\n", "    image: img:1\n    adapter: codex\n"),
+        .replace(
+            "    image: img:1\n",
+            "    image: img:1\n    adapter: codex\n"
+            "    base_url: https://openrouter.ai/api\n",
+        ),
         encoding="utf-8",
     )
     runner3 = TaskRunner(
@@ -582,3 +591,78 @@ async def test_supervised_requires_cooperative_tier(tmp_path: Path) -> None:
     )
     with pytest.raises(SandboxError, match="hook"):
         runner3.assert_external_autonomy_supported(AutonomyMode.SUPERVISED)
+
+
+async def test_autonomy_gate_fires_before_task_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ гейта автономии не должен оставлять мусорную task-ветку (S15a,
+    кампания 21.07.2026: workspace оставался на svarog/*, а checkout master
+    терял svarog.yaml)."""
+    ws = _make_workspace(
+        tmp_path,
+        extra_yaml=(
+            "executor:\n  type: external\n  external:\n    image: img:1\n"
+            "    adapter: opencode\n"
+            "    base_url: https://openrouter.ai/api\n"
+            f"skills:\n  paths: ['{tmp_path / 'skills'}']\n"
+        ),
+    )
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.name=T", "-c", "user.email=t@localhost", "commit", "-qm", "init"],
+    ):
+        subprocess.run(argv, cwd=ws, check=True)
+
+    runner = TaskRunner(load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml"), ws)
+    # Сужаем тест до порядка гейтов: sandbox-проверка не должна требовать docker.
+    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
+    with pytest.raises(SandboxError, match="cooperative"):
+        await runner.run_once("задача", AutonomyMode.SUPERVISED, hooks=RunHooks())
+    branches = subprocess.run(
+        ["git", "branch", "--list", "svarog/*"], cwd=ws, capture_output=True, text=True
+    ).stdout.strip()
+    assert branches == ""
+
+
+def test_openai_wire_adapter_rejects_default_anthropic_base_url() -> None:
+    """wire=openai с anthropic-дефолтом — гарантированный рантайм-отказ
+    («Invalid Anthropic API Key», кампания 21.07.2026) — ловим на конфиге."""
+    with pytest.raises(ValidationError, match="base_url"):
+        ExternalExecutorConfig(adapter="opencode", image="img", api_key_ref="K")
+
+
+def test_external_base_url_rejects_v1_suffix() -> None:
+    """Адаптер добавляет /v1 сам: суффикс в конфиге даёт …/v1/v1 → 404."""
+    with pytest.raises(ValidationError, match="/v1"):
+        ExternalExecutorConfig(
+            adapter="opencode",
+            image="img",
+            api_key_ref="K",
+            base_url="https://openrouter.ai/api/v1",
+            model="m",
+        )
+
+
+def test_claude_code_default_base_url_still_valid() -> None:
+    ExternalExecutorConfig(adapter="claude-code", image="img", api_key_ref="K")
+
+
+async def test_run_rules_preamble_in_launch_not_in_trace(db: AsyncSession, tmp_path: Path) -> None:
+    """Правила run'а инжектируются в task агента (скилловые чеклисты перебивают
+    конфиг-уровень — кампания 21.07.2026, S11), но trace хранит ЧИСТУЮ реплику."""
+    executor = _executor(db, tmp_path, [_INIT, _ASSISTANT, _TOOL_RESULT, _RESULT])
+    adapter = executor._adapter
+    await executor.run("сделай hello.py", AutonomyMode.YOLO)
+
+    launch = adapter.launches[0]
+    assert launch.task.startswith("[Правила run'а Svarog]")
+    assert "ask_user" in launch.task
+    assert launch.task.endswith("сделай hello.py")
+
+    run = (await db.execute(select(Run))).scalars().one()
+    assert run.task == "сделай hello.py"  # без преамбулы
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    user_msgs = [m for m in messages if m.role == "user"]
+    assert all("[Правила run'а Svarog]" not in str(m.content) for m in user_msgs)
