@@ -14,6 +14,7 @@ from svarog_harness.cli.chat_settings import (
 )
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
 
 
 def _cfg(tmp_path: Path, body: str) -> SvarogConfig:
@@ -75,6 +76,32 @@ def test_apply_executor_external_changes_adapter(
     assert updated.executor.external is not None
     assert updated.executor.external.adapter == "codex"
     assert updated.executor.external.image == "svarog/claude:test"
+
+
+def test_apply_executor_switches_default_image_with_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Дефолтный образ должен переключаться вместе с adapter — иначе в sandbox
+    остаётся образ прежнего агента и запуск падает `command not found`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = _cfg(
+        tmp_path,
+        _base(
+            tmp_path,
+            "sandbox:\n  type: docker\n"
+            "executor:\n"
+            "  type: external\n"
+            "  external:\n"
+            "    adapter: opencode\n"
+            f"    image: {DEFAULT_OPENCODE_IMAGE}\n"
+            "    base_url: https://openrouter.ai/api\n"
+            "    model: fake-model\n",
+        ),
+    )
+    updated = apply_executor_label(cfg, "external/claude-code")
+    assert updated.executor.external is not None
+    assert updated.executor.external.adapter == "claude-code"
+    assert updated.executor.external.image == DEFAULT_CLAUDE_IMAGE
 
 
 def test_apply_mode_local_and_cloud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

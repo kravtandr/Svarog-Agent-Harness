@@ -15,6 +15,16 @@ from svarog_harness.config.schema import (
     ExecutorConfig,
     SvarogConfig,
 )
+from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
+
+# Дефолтные образы per-adapter (те же, что `svarog init` пишет в свежий
+# svarog.yaml). Если текущий image — один из этих дефолтов, свап adapter'а
+# должен подтянуть за собой и его: иначе в sandbox остаётся CLI прежнего
+# агента и запуск падает `command not found` (нет образа под codex — не трогаем).
+_DEFAULT_EXTERNAL_IMAGES: dict[str, str] = {
+    "claude-code": DEFAULT_CLAUDE_IMAGE,
+    "opencode": DEFAULT_OPENCODE_IMAGE,
+}
 
 
 class SettingsApplyError(ValueError):
@@ -76,7 +86,12 @@ def apply_executor_label(cfg: SvarogConfig, label: str) -> SvarogConfig:
             raise SettingsApplyError(
                 "для external нужен executor.external в svarog.yaml (image и adapter)"
             )
-        external = cfg.executor.external.model_copy(update={"adapter": detail})
+        update: dict[str, Any] = {"adapter": detail}
+        if cfg.executor.external.image in _DEFAULT_EXTERNAL_IMAGES.values():
+            new_default = _DEFAULT_EXTERNAL_IMAGES.get(detail)
+            if new_default is not None:
+                update["image"] = new_default
+        external = cfg.executor.external.model_copy(update=update)
         try:
             # Смена адаптера перевалидирует секцию (напр. wire=openai против
             # anthropic base_url) — падение конвертируем в SettingsApplyError,
