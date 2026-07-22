@@ -40,13 +40,16 @@ def render_rc_block(repo: Path, agent_home: Path) -> str:
     repo_posix = repo.as_posix()
     home_posix = agent_home.as_posix()
     # SKILLS__PATHS — JSON-список (Pydantic BaseSettings парсит через env_nested_delimiter).
+    # Значение оборачиваем в одинарные кавычки: JSON внутри уже содержит двойные
+    # кавычки, и если снаружи тоже поставить двойные, bash съест их как границы
+    # своих же quote-пар и до pydantic дойдёт `[path]` без кавычек — невалидный JSON.
     skills_value = f'["{skills}"]'
     lines = [
         _BLOCK_BEGIN,
         f'export SVAROG_REPO="{repo_posix}"',
         f'export SVAROG_AGENT_HOME="{home_posix}"',
         f'export SVAROG_MEMORY__PATH="{memory}"',
-        f'export SVAROG_SKILLS__PATHS="{skills_value}"',
+        f"export SVAROG_SKILLS__PATHS='{skills_value}'",
         f'export SVAROG_STORAGE__DB_PATH="{db}"',
         "alias svarog='uv --project \"$SVAROG_REPO\" run svarog'",
         _BLOCK_END,
