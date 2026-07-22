@@ -25,7 +25,9 @@ def test_render_rc_block_contains_all_exports_and_alias(tmp_path: Path) -> None:
     assert f'export SVAROG_AGENT_HOME="{home.as_posix()}"' in block
     assert f'export SVAROG_MEMORY__PATH="{home.as_posix()}/memory"' in block
     assert f'export SVAROG_STORAGE__DB_PATH="{home.as_posix()}/.svarog/svarog.db"' in block
-    assert f'export SVAROG_SKILLS__PATHS="["{home.as_posix()}/skills"]"' in block
+    # одинарные кавычки снаружи — иначе bash съедает "[" и "]" как границы своих
+    # quote-пар, и до pydantic доходит `[path]` без кавычек (невалидный JSON).
+    assert f"export SVAROG_SKILLS__PATHS='[\"{home.as_posix()}/skills\"]'" in block
     # alias ссылается на $SVAROG_REPO (раскрывается shell'ом, не на момент install).
     assert "alias svarog='uv --project \"$SVAROG_REPO\" run svarog'" in block
 
