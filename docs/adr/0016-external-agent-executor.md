@@ -17,7 +17,7 @@
 | Фаза 2 — MCP-сервер + контекст (§4) | ✅ Сделано (HTTP-MCP на bridge: remember/read_memory/read_skill/create_skill_proposal/ask_user/request_approval; CLAUDE.md/AGENTS.md в state volume) — транспорт HTTP-bridge вместо unix-socket: bind-mount сокетов не работает на Docker Desktop |
 | Фаза 3 — cooperative tier (§6/§7) | ✅ Сделано (managed-settings ro-mount, PreToolUse → общий policy-конвейер, decision cache по отпечатку, grace → suspend → waiting_approval, resume с prompt-решением, chat поверх agent-сессий, supervised-гейт) |
 | Фаза 3.5 — субагентная делегация (`spawn_child_run` → external) | ✅ Сделано (с полной инфрой bridge у ребёнка) |
-| Фаза 4 — адаптеры codex/opencode | ✅ Сделано (golden-JSONL тесты; матрица capabilities: hooks+mcp — только claude-code, поэтому supervised и память/скиллы с codex/opencode fail-closed недоступны) |
+| Фаза 4 — адаптеры codex/opencode | ✅ Сделано (golden-JSONL тесты; матрица capabilities: hooks — только claude-code, поэтому supervised с codex/opencode fail-closed недоступен; mcp — у claude-code и opencode (спайк 21.07.2026), у codex нет, поэтому память/скиллы/self-docs недоступны только ему) |
 | §3 — subscription-режим прокси (OAuth-токен подписки) | ✅ Сделано (`auth: subscription` + `oauth_token_ref` от `claude setup-token`; прокси pass-through с метерингом/бюджетом; только claude-code) |
 
 **Не покрыто (следующие итерации):** refuel-supervisor для внешних runs в
