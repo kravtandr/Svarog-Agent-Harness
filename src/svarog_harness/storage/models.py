@@ -90,6 +90,25 @@ class SkillProposalStatus(StrEnum):
     FAILED = "failed"  # не удалось создать (валидация/secret scan/не git-репо)
 
 
+class MemoryProposalStatus(StrEnum):
+    """Статус memory proposal (блок C, ADR-0020).
+
+    Отличается от SkillProposalStatus по существу: у скиллов одобрение — merge
+    ветки, у памяти — постановка заявок в очередь единственного писателя.
+    """
+
+    PENDING = "pending"  # ждёт решения человека
+    APPLIED = "applied"  # заявки поставлены в очередь writer'а
+    REJECTED = "rejected"  # отклонён, память не тронута
+    FAILED = "failed"  # не прошёл валидацию
+
+
+class MemoryProposalOrigin(StrEnum):
+    """Кто предложил правку. В первом срезе на ревью уходит только Dream."""
+
+    DREAM = "dream"
+
+
 class SkillLifecycleStatus(StrEnum):
     """Lifecycle-статус скилла, которым управляет Curator слой 1 (§18.1, ADR-0009).
 
@@ -347,6 +366,41 @@ class SkillProposal(TimestampedBase):
     note: Mapped[str | None] = mapped_column(Text)
     # Результаты валидации SKILL.md (список сообщений) — сырьё для review.
     checks: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    decided_at: Mapped[datetime | None]
+    decided_by: Mapped[str | None] = mapped_column(String(128))
+    reason: Mapped[str | None] = mapped_column(Text)
+
+
+class MemoryProposal(TimestampedBase):
+    """Отложенная пачка заявок в память, ждущая решения человека (ADR-0020).
+
+    В отличие от skill proposal, содержимое не материализуется в git-ветке:
+    ветвление в memory-репозитории столкнулось бы с writer'ом, который
+    непрерывно коммитит в текущую ветку (ADR-0004). Заявки лежат здесь, и
+    одобрение перекладывает их в штатную очередь `memory_queue`.
+    """
+
+    __tablename__ = "memory_proposals"
+
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(255))
+    rationale: Mapped[str] = mapped_column(Text)
+    # Список MemoryChangeRequest.to_dict() — один связный замысел.
+    changes: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    status: Mapped[MemoryProposalStatus] = mapped_column(
+        _enum(MemoryProposalStatus), default=MemoryProposalStatus.PENDING, index=True
+    )
+    origin: Mapped[MemoryProposalOrigin] = mapped_column(
+        _enum(MemoryProposalOrigin), default=MemoryProposalOrigin.DREAM, index=True
+    )
+    # HEAD памяти на момент предложения: расхождение с текущим — сигнал, что
+    # состояние ушло вперёд и предпросмотр надо смотреть внимательнее.
+    memory_head: Mapped[str | None] = mapped_column(String(64))
+    checks: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    # id строк memory_queue, порождённых одобрением — след для аудита.
+    applied_change_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     decided_at: Mapped[datetime | None]
     decided_by: Mapped[str | None] = mapped_column(String(128))
     reason: Mapped[str | None] = mapped_column(Text)
