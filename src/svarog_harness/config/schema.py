@@ -270,6 +270,23 @@ class SchedulerConfig(StrictModel):
     interval_sec: int = Field(default=30, gt=0)
 
 
+class DreamConfig(StrictModel):
+    """Dream — семантический слой памяти (блок C, ADR-0020).
+
+    Выключен по умолчанию: механизм опинионейтед и тратит токены, поэтому
+    opt-in — как слой 2 skill-curator'а (ADR-0009). Конфиг служит гейтом при
+    заводке системной джобы; после заводки джоба управляется через
+    `svarog cron enable|disable`, и конфиг её больше не переключает.
+    """
+
+    enabled: bool = False
+    interval_sec: int = Field(default=86_400, gt=0)
+    # Потолок непросмотренных предложений: без него ежедневная джоба при
+    # неактивном человеке копит мусор без границы и платно.
+    max_pending: int = Field(default=20, gt=0)
+    max_iterations: int = Field(default=20, gt=0)
+
+
 class SupervisorConfig(StrictModel):
     """Авто-поднятие refuel-suspended runs в долгоживущих процессах (§6.10).
 
@@ -462,6 +479,7 @@ class SvarogConfig(BaseSettings):
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    dream: DreamConfig = Field(default_factory=DreamConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
