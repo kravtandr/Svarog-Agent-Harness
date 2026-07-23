@@ -14,13 +14,15 @@ from typing import Annotated
 
 import typer
 from prompt_toolkit.shortcuts import prompt as prompt_toolkit
-from rich.console import Console
 from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
 from svarog_harness.cli import install as install_module
 from svarog_harness.cli import remote as remote_module
+from svarog_harness.cli._shared import console
+from svarog_harness.cli._shared import load_config_or_exit as _load_config_or_exit
+from svarog_harness.cli._shared import resolve_autonomy as _resolve_autonomy
 from svarog_harness.cli.chat_display import format_tool_call
 from svarog_harness.cli.chat_engine import (
     ChatEngine,
@@ -167,7 +169,6 @@ app.add_typer(remote_module.remote_app, name="remote")
 app.command("login")(remote_module.login)
 # svarog install: env + alias в shell rc и symlink на ~/.svarog/svarog.yaml.
 app.command("install")(install_module.install)
-console = Console()
 
 
 @app.callback()
@@ -612,29 +613,6 @@ def init(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
         f"[dim]модель {model} @ {base_url}{executor_note}; {next_step}[/dim]"
     )
-
-
-def _load_config_or_exit(project_dir: Path | None = None) -> SvarogConfig:
-    try:
-        return load_config(project_dir=project_dir)
-    except ConfigError as exc:
-        console.print(f"[red]ошибка конфигурации:[/red] {exc}")
-        raise typer.Exit(code=1) from None
-
-
-def _resolve_autonomy(
-    cfg: SvarogConfig, *, yolo: bool, auto: bool, supervised: bool
-) -> AutonomyMode:
-    flags = {
-        AutonomyMode.YOLO: yolo,
-        AutonomyMode.AUTO: auto,
-        AutonomyMode.SUPERVISED: supervised,
-    }
-    chosen = [mode for mode, enabled in flags.items() if enabled]
-    if len(chosen) > 1:
-        console.print("[red]флаги --yolo/--auto/--supervised взаимоисключающие[/red]")
-        raise typer.Exit(code=1)
-    return chosen[0] if chosen else cfg.runtime.autonomy
 
 
 def _known_secret_values(cfg: SvarogConfig, store: SecretStore) -> frozenset[str]:
