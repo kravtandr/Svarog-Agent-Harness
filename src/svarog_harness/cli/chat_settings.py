@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import ValidationError
 
 from svarog_harness.cli.chat_display import MODE_CLOUD, MODE_LOCAL
+from svarog_harness.common.project_config import (
+    ProjectConfigError,
+    read_project_config,
+    write_yaml,
+)
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, deep_merge
 from svarog_harness.config.schema import (
     AutonomyMode,
@@ -31,35 +35,15 @@ class SettingsApplyError(ValueError):
     """Нельзя применить выбор (нет секции external, неизвестный label и т.п.)."""
 
 
-def _read_project_config(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise SettingsApplyError(f"невалидный YAML в {path}: {exc}") from exc
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise SettingsApplyError(f"{path}: верхний уровень должен быть mapping")
-    return data
-
-
-def _write_yaml(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
-    temporary.replace(path)
-
-
 def patch_project_config(workspace: Path, patch: dict[str, Any]) -> Path:
     """Deep-merge patch в project ``svarog.yaml`` и атомарно сохранить."""
     path = workspace / PROJECT_CONFIG_NAME
-    raw = _read_project_config(path)
+    try:
+        raw = read_project_config(path)
+    except ProjectConfigError as exc:
+        raise SettingsApplyError(str(exc)) from exc
     merged = deep_merge(raw, patch)
-    _write_yaml(path, merged)
+    write_yaml(path, merged)
     return path
 
 
