@@ -47,6 +47,8 @@ svarog/
     runtime/                # ядро (§6.2)
       loop.py               # agent loop: state machine, итерации, _execute_tool через Policy Engine
       orchestrator.py       # TaskRunner: один прогон задачи под RunHooks (cli/gateway/telegram)
+      run_assembly.py       # RunAssembly: сборка окружения/executor/реестра tools/моста +
+                            # контракт наблюдения (RunHooks, RunProfile; orchestrator реэкспортирует)
       checkpoint.py         # LoopState: сериализация/восстановление (ADR-0005)
       context_builder.py    # слои контекста, budget (§6.3)
       refuel.py             # task_state.md, пересборка контекста (§6.10)
