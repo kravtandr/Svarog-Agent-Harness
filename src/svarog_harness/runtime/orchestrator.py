@@ -12,6 +12,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +31,12 @@ from svarog_harness.gitflow import GitRepo, SecretScanBlockedError, WorkspaceFlo
 from svarog_harness.llm.openai_compatible import default_provider
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPBackend, MCPTool, build_mcp_tools, connect_mcp_servers
-from svarog_harness.memory import MemoryWriter, read_memory
+from svarog_harness.memory import (
+    MemoryProposalManager,
+    MemoryProposalRequest,
+    MemoryWriter,
+    read_memory,
+)
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.agents import adapter_for
@@ -68,6 +74,7 @@ from svarog_harness.storage.models import (
     Approval,
     ApprovalStatus,
     JobOrigin,
+    MemoryProposal,
     Run,
     RunState,
     SkillProposal,
@@ -81,7 +88,11 @@ from svarog_harness.tools.child_tools import (
     SpawnChildRunTool,
 )
 from svarog_harness.tools.file_tools import file_tools
-from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
+from svarog_harness.tools.memory_tools import (
+    ProposeMemoryChangeTool,
+    ReadMemoryTool,
+    RememberTool,
+)
 from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import LoadToolTool, ToolRegistry
 from svarog_harness.tools.schedule_tools import ScheduleRequest, ScheduleTaskTool
@@ -91,6 +102,21 @@ from svarog_harness.tools.user_tools import AskUserTool
 from svarog_harness.trace.lookup import RunNotResumableError, find_run_by_prefix
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import CheckOutcome, Verifier, skill_checks
+
+
+class RunProfile(StrEnum):
+    """Набор инструментов, доступный run'у.
+
+    DREAM — единственный run, который запускается без человека И обрабатывает
+    содержимое, попавшее в память из внешних источников (sources/, заметки
+    прошлых run'ов). Дать ему shell и файловые tools означало бы, что текст в
+    памяти управляет исполнением; профиль закрывает это структурно, а не
+    настройкой, которую можно перепутать.
+    """
+
+    DEFAULT = "default"
+    DREAM = "dream"
+
 
 # Автогейт deferred-схем (ADR-0015 фаза 2) при mcp.defer_schemas="auto":
 # от этого числа MCP-tools их схемы уходят за load_tool.
@@ -119,6 +145,7 @@ class RunHooks:
     on_commit_blocked: Callable[[str], None] | None = None
     on_memory: Callable[[str | None, str | None], None] | None = None
     on_proposal: Callable[[SkillProposal], None] | None = None
+    on_memory_proposal: Callable[[MemoryProposal], None] | None = None
     # Живой промпт решения approval/ask_user во время гейта (§7): вызывается
     # в worker-потоке (может блокироваться на stdin) и сам записывает решение
     # в БД — poll-цикл гейта подхватит его без suspend. None — только notify,
@@ -382,6 +409,8 @@ class TaskRunner:
         mcp_tools: list[MCPTool] | None = None,
         child_spawn: SpawnChildCallback | None = None,
         parent_run_id: str | None = None,
+        memory_proposal_sink: list[MemoryProposalRequest] | None = None,
+        profile: RunProfile = RunProfile.DEFAULT,
     ) -> AgentLoop:
         # Режим автономии и policy-правила фиксируются здесь, при старте run,
         # и не перечитываются во время исполнения (ADR-0010).
@@ -422,6 +451,8 @@ class TaskRunner:
             mem_dir=mem_dir,
             mcp_tools=mcp_tools,
             child_spawn=child_spawn,
+            memory_proposal_sink=memory_proposal_sink,
+            profile=profile,
         )
         return AgentLoop(
             default_provider(cfg.models, self._host_store),  # host-скоуп (ADR-0014 #2)
@@ -522,6 +553,7 @@ class TaskRunner:
             ask_user_timeout_sec=cfg.runtime.ask_user_timeout_sec,
             on_notify=hooks.on_notify,
             on_approval_prompt=_approval_prompt_async(hooks.on_approval_requested),
+            self_docs=external.self_docs,
         )
         assert infra.bridge is not None
         infra.bridge.control_handlers.update(control.handlers())
@@ -576,8 +608,22 @@ class TaskRunner:
         mem_dir: Path | None,
         mcp_tools: list[MCPTool] | None = None,
         child_spawn: SpawnChildCallback | None = None,
+        memory_proposal_sink: list[MemoryProposalRequest] | None = None,
+        profile: RunProfile = RunProfile.DEFAULT,
     ) -> ToolRegistry:
         registry = ToolRegistry()
+        if profile is RunProfile.DREAM:
+            # Только чтение памяти и предложение правок; всё остальное — включая
+            # remember — не регистрируется вовсе (§6 спеки блока C).
+            if mem_dir is not None:
+                registry.register(ReadMemoryTool(mem_dir))
+                if memory_proposal_sink is not None:
+                    registry.register(
+                        ProposeMemoryChangeTool(
+                            on_propose=memory_proposal_sink.append, memory_dir=mem_dir
+                        )
+                    )
+            return registry
         for tool in file_tools(self._workspace):
             registry.register(tool)
         registry.register(
@@ -843,6 +889,7 @@ class TaskRunner:
         session_id: str | None = None,
         history: list[ChatMessage] | None = None,
         resources: "SessionResources | None" = None,
+        profile: RunProfile = RunProfile.DEFAULT,
     ) -> RunOutcome:
         """Полный прогон: workspace prep → sandbox → loop → память → verifier → commit.
 
@@ -911,6 +958,7 @@ class TaskRunner:
                 await recorder.acquire_workspace_lease(str(self._workspace))
                 proposal_sink: list[SkillProposalRequest] = []
                 schedule_sink: list[ScheduleRequest] = []
+                memory_proposal_sink: list[MemoryProposalRequest] = []
                 if external:
                     # Data-plane — внешний агент (ADR-0016): память и скиллы
                     # доступны агенту через MCP-сервер bridge (§4).
@@ -963,10 +1011,13 @@ class TaskRunner:
                         excluded_skills=excluded,
                         mcp_tools=mcp_tools,
                         child_spawn=spawn,
+                        memory_proposal_sink=memory_proposal_sink,
+                        profile=profile,
                     )
                     outcome = await loop.run(task, autonomy, session_id=session_id, history=history)
                 await self.drain_memory(db, hooks)
                 await self.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
+                await self.drain_memory_proposals(db, memory_proposal_sink, outcome.run_id, hooks)
                 await self.drain_schedule(db, schedule_sink, self._workspace, hooks)
                 failed_checks = await self.verify(env, recorder, outcome, hooks)
                 if failed_checks:
@@ -1289,6 +1340,25 @@ class TaskRunner:
             )
             if hooks.on_proposal is not None:
                 hooks.on_proposal(row)
+
+    async def drain_memory_proposals(
+        self,
+        db: AsyncSession,
+        sink: list[MemoryProposalRequest],
+        run_id: str,
+        hooks: RunHooks,
+    ) -> None:
+        """Материализовать предложения правок памяти (блок C, ADR-0020)."""
+        if not sink:
+            return
+        mem_dir = memory_dir(self._cfg)
+        if mem_dir is None or not mem_dir.is_dir():
+            return
+        manager = MemoryProposalManager(db, mem_dir)
+        for request in sink:
+            row = await manager.persist(replace(request, source_run_id=run_id))
+            if hooks.on_memory_proposal is not None:
+                hooks.on_memory_proposal(row)
 
     def _proposals_dir(self) -> Path | None:
         """Каталог skills для proposals — первый настроенный путь (project ./skills)."""
