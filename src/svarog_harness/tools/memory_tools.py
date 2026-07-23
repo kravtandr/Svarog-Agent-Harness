@@ -13,14 +13,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from svarog_harness.memory.apply import (
-    MemoryApplyError,
-    has_section,
-    preview_content,
-    resolve_memory_path,
-)
+from svarog_harness.memory.apply import MemoryApplyError, resolve_memory_path
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
-from svarog_harness.memory.project_page import project_slug_from_path, validate_project_page
+from svarog_harness.memory.validate import validate_change
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult, truncate_text
 
 # Лимит вывода read_memory — как у файловых tools workspace.
@@ -114,70 +109,14 @@ class RememberTool(Tool[RememberArgs]):
         """Отловить предсказуемые ошибки применения до постановки в очередь."""
         if self._memory_dir is None:
             return None
-        try:
-            target = resolve_memory_path(self._memory_dir, args.file)
-        except MemoryApplyError as exc:
-            return str(exc)
-        if args.file.split("/", 1)[0] == "sources" and args.operation in (
-            MemoryOperation.APPEND,
-            MemoryOperation.REPLACE_SECTION,
-            MemoryOperation.UPDATE_FIELD,
-        ):
-            # sources/ — raw-слой (ADR-0011): исходники неизменяемы, правки
-            # запрещены. Нужен новый вариант — create нового файла.
-            return (
-                f"'{args.file}' в sources/ — неизменяемый исходник; "
-                f"правки запрещены, создай новый файл через create"
-            )
-        if args.operation is MemoryOperation.CREATE and target.exists():
-            return (
-                f"файл '{args.file}' уже существует; create перезаписывает файл "
-                f"целиком — используй append или replace_section"
-            )
-        if args.operation is MemoryOperation.REPLACE_SECTION:
-            if not args.section:
-                return "для replace_section нужно указать section"
-            if target.exists():
-                text = target.read_text(encoding="utf-8")
-                if not has_section(text, args.section):
-                    return (
-                        f"секция '{args.section}' не найдена в '{args.file}'; "
-                        f"проверь заголовок или используй append"
-                    )
-            elif str(target) not in self._pending_files:
-                # Файл, поставленный в очередь этим же run'ом, ещё не применён —
-                # для него проверку пропускаем (оптимистично).
-                return f"файл '{args.file}' не существует для replace_section"
-
-        if args.operation is MemoryOperation.UPDATE_FIELD:
-            if not args.field:
-                return "для update_field нужно указать field (имя поля frontmatter)"
-            if not target.exists() and str(target) not in self._pending_files:
-                return f"файл '{args.file}' не существует для update_field"
-
-        slug = project_slug_from_path(args.file)
-        if slug is not None and args.operation is not MemoryOperation.DELETE:
-            # Контракт страницы проекта (ADR-0011): frontmatter должен быть
-            # валиден в прогнозируемом содержимом. Заявку, поставленную в
-            # очередь этим же run'ом и ещё не применённую (нет на диске),
-            # пропускаем — она провалидируется своей заявкой.
-            if str(target) in self._pending_files and not target.exists():
-                return None
-            try:
-                prospective = preview_content(
-                    self._memory_dir,
-                    MemoryChangeRequest(
-                        file=args.file,
-                        operation=args.operation,
-                        content=args.content,
-                        section=args.section,
-                        field=args.field,
-                    ),
-                )
-            except MemoryApplyError as exc:
-                return str(exc)
-            return validate_project_page(prospective, expected_slug=slug)
-        return None
+        request = MemoryChangeRequest(
+            file=args.file,
+            operation=args.operation,
+            content=args.content,
+            section=args.section,
+            field=args.field,
+        )
+        return validate_change(self._memory_dir, request, pending_files=self._pending_files)
 
 
 class ReadMemoryArgs(BaseModel):
