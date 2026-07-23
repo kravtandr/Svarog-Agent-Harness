@@ -25,6 +25,8 @@ from svarog_harness.runtime.self_docs import self_docs_hint
 # конфиг в ~/.config/opencode, состояние в ~/.local/share/opencode —
 # персистентным делаем весь home.
 _STATE_DIR = PurePosixPath("/tmp/home")
+# Файл контекста Svarog внутри state_dir (см. instructions в provider_files).
+_CONTEXT_FILE = ".config/opencode/AGENTS.md"
 
 
 class OpencodeAdapter:
@@ -64,7 +66,7 @@ class OpencodeAdapter:
         return _STATE_DIR
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+        self, memory: str, skill_cards: str, self_docs: bool = False
     ) -> dict[str, str]:
         """Глобальные правила OpenCode: ~/.config/opencode/AGENTS.md."""
         sections: list[str] = []
@@ -88,9 +90,9 @@ class OpencodeAdapter:
         )
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
-        if self_docs_path:
-            sections.append(self_docs_hint(self_docs_path))
-        return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
+        if self_docs:
+            sections.append(self_docs_hint("svarog_read_svarog_docs"))
+        return {_CONTEXT_FILE: "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
         """Managed-конфиг провайдера: ~/.config/opencode/opencode.jsonc.
@@ -104,6 +106,11 @@ class OpencodeAdapter:
         config: dict[str, object] = {
             "$schema": "https://opencode.ai/config.json",
             "plugin": ["/opt/superpowers/node_modules/superpowers"],
+            # Явная доставка контекста Svarog. Полагаться на автоподхват
+            # <config>/AGENTS.md нельзя: в 1.18.4 файл в контекст модели не
+            # попадает (проверено канарейкой — модель его не видит), и тогда
+            # молча теряются правила памяти, ask_user и указатель на доку.
+            "instructions": [str(_STATE_DIR / _CONTEXT_FILE)],
         }
         if model is not None:
             config["provider"] = {
