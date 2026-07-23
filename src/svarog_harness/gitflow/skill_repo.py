@@ -39,8 +39,20 @@ class SkillRepoFlow:
         return self._repo
 
     async def ready(self) -> bool:
-        """Репозиторий инициализирован и имеет базовый коммит для ветвления."""
-        return await self._repo.is_repo() and await self._repo.has_commits()
+        """Путь САМ является skills-репозиторием и имеет базовый коммит.
+
+        Сравнение toplevel с самим путём здесь обязательно, а не придирка:
+        `is_repo()` отвечает «я внутри какого-то рабочего дерева», поэтому
+        каталог скиллов, лежащий внутри чужого репозитория (например
+        `agent-home/skills` внутри чекаута проекта), прошёл бы проверку. Тогда
+        `create_proposal` завёл бы ветку в ЧУЖОМ репозитории, `add_all` смёл бы
+        в коммит всё незакоммиченное рабочее дерево человека, а `checkout`
+        обратно на базовую ветку выбросил бы его из дерева. Кампания 23.07.2026.
+        """
+        toplevel = await self._repo.toplevel()
+        if toplevel is None or toplevel.resolve() != self._repo.path.resolve():
+            return False
+        return await self._repo.has_commits()
 
     async def create_proposal(
         self, request: SkillProposalRequest, *, known_values: frozenset[str] = frozenset()
