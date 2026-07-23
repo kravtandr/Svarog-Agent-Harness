@@ -25,7 +25,7 @@ from svarog_harness.runtime.bridge import (
     UpstreamConfig,
 )
 from svarog_harness.runtime.executor import AgentAdapter, AgentAuth
-from svarog_harness.runtime.self_docs import stage_self_docs
+from svarog_harness.runtime.self_docs import resolve_docs_root
 from svarog_harness.sandbox.docker import find_docker
 from svarog_harness.sandbox.reaper import reap_orphaned_agents
 from svarog_harness.sandbox.relay import AgentNetwork
@@ -35,10 +35,6 @@ from svarog_harness.secrets import SecretStore
 # ссылаются на него как на PreToolUse-команду (ADR-0016 §6).
 _HOOK_CONTAINER_PATH = "/run/svarog/hook.py"
 _MCP_CONTAINER_PATH = "/run/svarog/mcp.json"
-
-# Документация Svarog в контейнере (ro-mount): агент читает нативными
-# Read/Grep, отвечая на вопросы о самом Svarog (спека self-docs).
-_SELF_DOCS_CONTAINER_PATH = "/opt/svarog-docs"
 
 # PreToolUse-мост: stdin (JSON вызова) → bridge /svarog/hook → решение.
 # Fail-closed: bridge недоступен — deny. Требование к образу агента: python3.
@@ -166,10 +162,14 @@ class ExternalAgentInfra:
         verifier его не видят). MCP-конфиг, hook-скрипт и managed-настройки —
         одноразовые ro-mounts вне state volume: агент не может их переписать.
         """
-        docs_path: str | None = None
-        if self._external_cfg.self_docs:
-            docs_path = self._add_launch_dir("docs", _SELF_DOCS_CONTAINER_PATH)
-        state_files = dict(self._adapter.context_files(memory, skill_cards, docs_path))
+        # Документация Svarog отдаётся reverse-tool'ом `read_svarog_docs`
+        # (bridge), поэтому указатель имеет смысл только при наличии MCP.
+        self_docs = (
+            self._external_cfg.self_docs
+            and self._adapter.capabilities().mcp
+            and resolve_docs_root() is not None
+        )
+        state_files = dict(self._adapter.context_files(memory, skill_cards, self_docs))
         # Managed-конфиг провайдера (executor.external.model): перезаписывает
         # одноимённый файл в state — источник истины по модели у Svarog.
         state_files.update(self._adapter.provider_files(self._external_cfg.model))
@@ -221,21 +221,6 @@ class ExternalAgentInfra:
             # на хосте, пути хостовые.
             return str(host_path)
         self._extra_mounts.append((host_path, container_path, True))
-        return container_path
-
-    def _add_launch_dir(self, name: str, container_path: str) -> str | None:
-        """Стейдж доков в launch-dir и ro-mount директории.
-
-        None — docs-root не найден (фича мягко отключается). Локально (тесты)
-        монтирования нет — возвращается хостовый путь.
-        """
-        self._launch_dir.mkdir(parents=True, exist_ok=True)
-        host_dir = self._launch_dir / name
-        if stage_self_docs(host_dir) is None:
-            return None
-        if not self._docker_mode:
-            return str(host_dir)
-        self._extra_mounts.append((host_dir, container_path, True))
         return container_path
 
     @property

@@ -101,7 +101,7 @@ class ClaudeCodeAdapter:
         return _STATE_DIR
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+        self, memory: str, skill_cards: str, self_docs: bool = False
     ) -> dict[str, str]:
         """~/.claude/CLAUDE.md — глобальная память агента: контекст Svarog
         не попадает в workspace и не коммитится git-flow (ADR-0016 §4)."""
@@ -120,8 +120,8 @@ class ClaudeCodeAdapter:
                 "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
                 + skill_cards
             )
-        if self_docs_path:
-            sections.append(self_docs_hint(self_docs_path))
+        if self_docs:
+            sections.append(self_docs_hint("mcp__svarog__read_svarog_docs"))
         if not sections:
             return {}
         return {"CLAUDE.md": "\n\n".join(sections) + "\n"}
