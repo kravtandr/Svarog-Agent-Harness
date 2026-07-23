@@ -120,6 +120,11 @@ class GitRepo:
         code, _, _ = await self._git("rev-parse", "HEAD", check=False)
         return code == 0
 
+    async def head_sha(self) -> str | None:
+        """SHA текущего HEAD (None — репозитория нет или в нём нет коммитов)."""
+        code, out, _ = await self._git("rev-parse", "HEAD", check=False)
+        return out.strip() if code == 0 and out.strip() else None
+
     async def create_branch(self, name: str) -> None:
         await self._git("checkout", "-b", name)
 
