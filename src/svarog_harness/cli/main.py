@@ -17,10 +17,17 @@ from prompt_toolkit.shortcuts import prompt as prompt_toolkit
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
-from svarog_harness.cli import cron_commands, mcp_commands, secrets_commands, tenant_commands
+from svarog_harness.cli import (
+    approvals_commands,
+    cron_commands,
+    mcp_commands,
+    secrets_commands,
+    tenant_commands,
+    traces_commands,
+)
 from svarog_harness.cli import install as install_module
 from svarog_harness.cli import remote as remote_module
-from svarog_harness.cli._shared import console
+from svarog_harness.cli._shared import console, show_approval
 from svarog_harness.cli._shared import load_config_or_exit as _load_config_or_exit
 from svarog_harness.cli._shared import resolve_autonomy as _resolve_autonomy
 from svarog_harness.cli.chat_display import format_tool_call
@@ -121,25 +128,12 @@ from svarog_harness.storage.models import (
     utcnow,
 )
 from svarog_harness.trace.lookup import (
-    ApprovalNotFoundError,
     RunNotFoundError,
     RunNotResumableError,
     SessionNotFoundError,
     find_run_by_prefix,
-    find_session_by_prefix,
 )
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
-from svarog_harness.trace.viewer import (
-    fetch_run,
-    fetch_runs,
-    fetch_sessions,
-    render_run,
-    render_runs_table,
-    render_sessions_table,
-    run_detail_to_dict,
-    run_to_dict,
-    session_to_dict,
-)
 from svarog_harness.verifier import CheckOutcome
 
 app = typer.Typer(
@@ -147,15 +141,9 @@ app = typer.Typer(
     help="Svarog — Git-native runtime for self-hosted AI agents.",
     no_args_is_help=True,
 )
-traces_app = typer.Typer(help="Просмотр traces выполненных runs.", no_args_is_help=True)
-app.add_typer(traces_app, name="traces")
-sessions_app = typer.Typer(
-    help="Сессии: список, поиск, переименование (продолжение — chat --session).",
-    no_args_is_help=True,
-)
-app.add_typer(sessions_app, name="sessions")
-approvals_app = typer.Typer(help="Approval-запросы: список и решения.", no_args_is_help=True)
-app.add_typer(approvals_app, name="approvals")
+app.add_typer(traces_commands.traces_app, name="traces")
+app.add_typer(traces_commands.sessions_app, name="sessions")
+app.add_typer(approvals_commands.approvals_app, name="approvals")
 skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
 app.add_typer(skills_app, name="skills")
 app.add_typer(policies_app, name="policies")
@@ -1046,21 +1034,6 @@ def _failed_checks(cfg: SvarogConfig, outcome: RunOutcome) -> int:
     return asyncio.run(_with_db(cfg, action))
 
 
-def _show_approval(approval: Approval) -> None:
-    """Показать фактическое действие (команду/аргументы), не пересказ (§12)."""
-    payload = approval.payload or {}
-    console.print(f"[bold]approval {approval.id[:8]}[/bold] | run {approval.run_id[:8]}")
-    console.print(f"  действие: {approval.action_type}")
-    if payload.get("tool"):
-        console.print(f"  tool: {payload['tool']}")
-    if payload.get("arguments"):
-        console.print(
-            f"  аргументы: {json.dumps(payload['arguments'], ensure_ascii=False, indent=2)}"
-        )
-    if payload.get("reason"):
-        console.print(f"  причина: {payload['reason']}")
-
-
 def _pick_option_sync(
     title: str, values: list[tuple[str, str]], default: str | None = None
 ) -> str | None:
@@ -1085,7 +1058,7 @@ _CUSTOM_ANSWER = "\x00custom"
 
 def _confirm_approval(cfg: SvarogConfig, approval: Approval, *, decided_by: str) -> None:
     """Показать действие и записать вердикт человека из терминала."""
-    _show_approval(approval)
+    show_approval(approval)
     choice = _pick_option_sync(
         "approval",
         [
@@ -1242,102 +1215,6 @@ def _report_outcome(outcome: RunOutcome, failed_checks: int = 0, *, as_json: boo
         raise typer.Exit(code=2)
 
 
-@traces_app.command("list")
-def traces_list(
-    limit: Annotated[int, typer.Option("--limit", "-n", help="Сколько runs показать")] = 20,
-    json_output: Annotated[
-        bool, typer.Option("--json", help="NDJSON: по одному JSON-объекту на строку")
-    ] = False,
-) -> None:
-    """Показать последние runs."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        runs = await fetch_runs(db, limit=limit)
-        if json_output:
-            for run in runs:
-                print(json.dumps(run_to_dict(run), ensure_ascii=False))
-            return
-        if not runs:
-            console.print('runs пока нет — запустите `svarog run "задача"`')
-            return
-        console.print(render_runs_table(runs))
-
-    asyncio.run(_with_db(cfg, action))
-
-
-@traces_app.command("show")
-def traces_show(
-    run_id: Annotated[str, typer.Argument(help="id run'а или его уникальный префикс")],
-    json_output: Annotated[
-        bool, typer.Option("--json", help="Полный trace одним JSON-объектом")
-    ] = False,
-) -> None:
-    """Показать полный trace одного run."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        try:
-            run, messages, tool_calls, checks = await fetch_run(db, run_id)
-        except RunNotFoundError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
-        if json_output:
-            detail = run_detail_to_dict(run, messages, tool_calls, checks)
-            print(json.dumps(detail, ensure_ascii=False, indent=2))
-            return
-        console.print(render_run(run, messages, tool_calls, checks))
-
-    asyncio.run(_with_db(cfg, action))
-
-
-@sessions_app.command("list")
-def sessions_list(
-    limit: Annotated[int, typer.Option("--limit", "-n", help="Сколько сессий показать")] = 20,
-    search: Annotated[
-        str | None, typer.Option("--search", help="Подстрока в названии или задачах runs")
-    ] = None,
-    json_output: Annotated[
-        bool, typer.Option("--json", help="NDJSON: по одному JSON-объекту на строку")
-    ] = False,
-) -> None:
-    """Сессии от свежих к старым (продолжить: chat --session <id>)."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        summaries = await fetch_sessions(db, limit=limit, search=search)
-        if json_output:
-            for summary in summaries:
-                print(json.dumps(session_to_dict(summary), ensure_ascii=False))
-            return
-        if not summaries:
-            console.print("сессий не найдено")
-            return
-        console.print(render_sessions_table(summaries))
-
-    asyncio.run(_with_db(cfg, action))
-
-
-@sessions_app.command("rename")
-def sessions_rename(
-    session_id: Annotated[str, typer.Argument(help="id сессии или её префикс")],
-    title: Annotated[str, typer.Argument(help="Новое название")],
-) -> None:
-    """Переименовать сессию."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        session = await find_session_by_prefix(db, session_id)
-        await TraceRecorder(db).rename_session(session, title)
-        console.print(f"[green]сессия {session.id[:8]} → «{title}»[/green]")
-
-    try:
-        asyncio.run(_with_db(cfg, action))
-    except SessionNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-
-
 @app.command()
 def rewind(
     run_id: Annotated[str, typer.Argument(help="id run'а или его префикс")],
@@ -1391,83 +1268,6 @@ def rewind(
         f"[green]workspace откачен[/green] к {target[:8]} "
         f"(отброшено коммитов: {len(dropped)}, run {full_id[:8]})"
     )
-
-
-@approvals_app.command("list")
-def approvals_list() -> None:
-    """Показать ожидающие approval-запросы."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        approvals = await TraceRecorder(db).fetch_pending_approvals()
-        if not approvals:
-            console.print("ожидающих approvals нет")
-            return
-        for approval in approvals:
-            _show_approval(approval)
-            console.print(f"  [dim]решение: svarog approvals approve/deny {approval.id[:8]}[/dim]")
-
-    asyncio.run(_with_db(cfg, action))
-
-
-def _decide_approval_command(approval_id: str, *, approved: bool, reason: str | None) -> None:
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> Approval:
-        recorder = TraceRecorder(db)
-        approval = await recorder.find_approval_by_prefix(approval_id)
-        await recorder.decide_approval(approval, approved=approved, decided_by="cli", reason=reason)
-        return approval
-
-    try:
-        approval = asyncio.run(_with_db(cfg, action))
-    except ApprovalNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    verdict = "[green]одобрен[/green]" if approved else "[red]отклонен[/red]"
-    console.print(f"approval {approval.id[:8]} {verdict}")
-    console.print(f"[dim]продолжить run: svarog resume {approval.run_id[:8]}[/dim]")
-
-
-@approvals_app.command("approve")
-def approvals_approve(
-    approval_id: Annotated[str, typer.Argument(help="id approval'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
-) -> None:
-    """Одобрить действие; run возобновляется командой resume."""
-    _decide_approval_command(approval_id, approved=True, reason=reason)
-
-
-@approvals_app.command("deny")
-def approvals_deny(
-    approval_id: Annotated[str, typer.Argument(help="id approval'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
-) -> None:
-    """Отклонить действие; агент получит причину отказа при resume."""
-    _decide_approval_command(approval_id, approved=False, reason=reason)
-
-
-@approvals_app.command("answer")
-def approvals_answer(
-    approval_id: Annotated[str, typer.Argument(help="id вопроса ask_user или его префикс")],
-    text: Annotated[str, typer.Argument(help="Текст ответа; пусто — продолжить без ответа")] = "",
-) -> None:
-    """Ответить на вопрос ask_user; run возобновляется командой resume (§6.5)."""
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> Approval:
-        recorder = TraceRecorder(db)
-        approval = await recorder.find_approval_by_prefix(approval_id)
-        await recorder.answer_question(approval, answer=text, answered_by="cli")
-        return approval
-
-    try:
-        approval = asyncio.run(_with_db(cfg, action))
-    except ApprovalNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    console.print(f"вопрос {approval.id[:8]} [green]отвечен[/green]")
-    console.print(f"[dim]продолжить run: svarog resume {approval.run_id[:8]}[/dim]")
 
 
 @skills_app.command("list")
