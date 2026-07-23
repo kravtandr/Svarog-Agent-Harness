@@ -17,7 +17,7 @@ from prompt_toolkit.shortcuts import prompt as prompt_toolkit
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness import __version__
-from svarog_harness.cli import cron_commands
+from svarog_harness.cli import cron_commands, mcp_commands, secrets_commands, tenant_commands
 from svarog_harness.cli import install as install_module
 from svarog_harness.cli import remote as remote_module
 from svarog_harness.cli._shared import console
@@ -62,7 +62,6 @@ from svarog_harness.gitflow import (
     separate_gitdir_for,
 )
 from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
-from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
 from svarog_harness.memory.dream import build_dream_task
@@ -2045,119 +2044,11 @@ def memory_proposals_reject(
     _decide_memory_proposal(proposal_id, approved=False, reason=reason)
 
 
-tenant_app = typer.Typer(
-    help="Тенанты мультиарендного режима (ADR-0012/0014).", no_args_is_help=True
-)
-app.add_typer(tenant_app, name="tenant")
-
-
-@tenant_app.command("create")
-def tenant_create(
-    tenant_id: Annotated[str, typer.Argument(help="Идентификатор тенанта")],
-    role: Annotated[
-        str, typer.Option("--role", help="superuser (хост) | standard (только sandbox)")
-    ] = "standard",
-) -> None:
-    """Завести тенанта: home-дерево, git-репозитории, БД и bearer-token (ADR-0014)."""
-    from svarog_harness.config.paths import registry_path
-    from svarog_harness.config.schema import TenantRole
-    from svarog_harness.tenant import TenantExistsError, TenantRegistry, provision_tenant
-
-    try:
-        parsed_role = TenantRole(role)
-    except ValueError:
-        console.print(f"[red]неизвестная роль '{role}'[/red] — ожидается superuser | standard")
-        raise typer.Exit(code=1) from None
-    cfg = _load_config_or_exit()
-    registry = TenantRegistry(registry_path(cfg))
-    try:
-        result = asyncio.run(provision_tenant(cfg, registry, tenant_id, parsed_role))
-    except TenantExistsError:
-        console.print(f"[red]тенант '{tenant_id}' уже существует[/red]")
-        raise typer.Exit(code=1) from None
-    console.print(
-        f"[green]тенант создан:[/green] {result.tenant_id} ({parsed_role.value})\n"
-        f"[dim]home: {result.home}[/dim]\n"
-        f"[bold]bearer-token (сохраните — показывается один раз):[/bold]\n{result.token}"
-    )
-
-
-@tenant_app.command("list")
-def tenant_list() -> None:
-    """Список зарегистрированных тенантов."""
-    from svarog_harness.config.paths import registry_path
-    from svarog_harness.tenant import TenantRegistry
-
-    cfg = _load_config_or_exit()
-    tenants = TenantRegistry(registry_path(cfg)).list_tenants()
-    if not tenants:
-        console.print("тенантов нет — заведите: svarog tenant create <id>")
-        return
-    for rec in tenants:
-        console.print(
-            f"[bold]{rec.tenant_id}[/bold] · {rec.role.value} · "
-            f"principals: {len(rec.principals)} · {rec.created_at}"
-        )
-
-
-@tenant_app.command("add-principal")
-def tenant_add_principal(
-    tenant_id: Annotated[str, typer.Argument(help="Идентификатор тенанта")],
-    principal: Annotated[str, typer.Argument(help="Principal, напр. telegram:123456789")],
-) -> None:
-    """Привязать principal (telegram:<id> / gateway:<token>) к тенанту."""
-    from svarog_harness.config.paths import registry_path
-    from svarog_harness.tenant import (
-        PrincipalConflictError,
-        TenantRegistry,
-        TenantRegistryError,
-    )
-
-    cfg = _load_config_or_exit()
-    registry = TenantRegistry(registry_path(cfg))
-    try:
-        registry.add_principal(tenant_id, principal)
-    except PrincipalConflictError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    except TenantRegistryError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    console.print(f"[green]principal привязан:[/green] {principal} → {tenant_id}")
-
-
-@tenant_app.command("token")
-def tenant_token(
-    tenant_id: Annotated[str, typer.Argument(help="Идентификатор тенанта")],
-    rotate: Annotated[
-        bool, typer.Option("--rotate", help="Выпустить новый токен, отозвав прежний")
-    ] = False,
-) -> None:
-    """Показать текущий или (с --rotate) выпустить новый gateway-token тенанта."""
-    from svarog_harness.config.paths import registry_path
-    from svarog_harness.tenant import (
-        TenantRegistry,
-        current_token,
-        rotate_token,
-    )
-
-    cfg = _load_config_or_exit()
-    registry = TenantRegistry(registry_path(cfg))
-    if registry.get(tenant_id) is None:
-        console.print(f"[red]нет тенанта '{tenant_id}'[/red]")
-        raise typer.Exit(code=1)
-    if rotate:
-        token = rotate_token(cfg, registry, tenant_id)
-        console.print(f"[green]новый bearer-token[/green] для {tenant_id}:\n{token}")
-        return
-    saved = current_token(cfg, tenant_id)
-    if not saved:
-        console.print(
-            f"[yellow]у {tenant_id} нет сохранённого токена[/yellow] — "
-            f"svarog tenant token {tenant_id} --rotate"
-        )
-        raise typer.Exit(code=1)
-    console.print(f"[bold]bearer-token[/bold] {tenant_id}:\n{saved}")
+# Регистрируются здесь, а не в шапке: порядок add_typer задаёт порядок групп
+# в `svarog --help`, и он совпадает с тем, что был до выноса в модули.
+app.add_typer(tenant_commands.tenant_app, name="tenant")
+app.add_typer(mcp_commands.mcp_app, name="mcp")
+app.add_typer(secrets_commands.secrets_app, name="secrets")
 
 
 @app.command()
@@ -2353,75 +2244,3 @@ def telegram(
 
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_all())
-
-
-mcp_app = typer.Typer(help="MCP-серверы: discovery инструментов (§9).", no_args_is_help=True)
-app.add_typer(mcp_app, name="mcp")
-
-
-@mcp_app.command("list")
-def mcp_list() -> None:
-    """Подключить настроенные MCP-серверы и показать обнаруженные инструменты."""
-    cfg = _load_config_or_exit()
-    if not cfg.mcp.servers:
-        console.print("MCP-серверы не настроены (секция mcp.servers в svarog.yaml)")
-        return
-    store = default_secret_store(cfg.secrets.path)
-
-    async def discover() -> None:
-        backends = await connect_mcp_servers(cfg.mcp, store)
-        try:
-            tools = build_mcp_tools(backends)
-            if not tools:
-                console.print("инструменты на MCP-серверах не обнаружены")
-                return
-            for tool in tools:
-                console.print(
-                    f"[cyan]{tool.name}[/cyan] [dim](risk={tool.risk_level.value}, "
-                    f"action={tool.action_type}, по умолчанию approval)[/dim]"
-                )
-                if tool.description:
-                    console.print(f"  {tool.description}")
-        finally:
-            for backend in backends:
-                with contextlib.suppress(Exception):
-                    await backend.close()
-
-    try:
-        asyncio.run(discover())
-    except MCPError as exc:
-        console.print(f"[red]MCP: {exc}[/red]")
-        raise typer.Exit(code=1) from None
-
-
-secrets_app = typer.Typer(
-    help="SecretStore: имена секретов (значения не показываются).", no_args_is_help=True
-)
-app.add_typer(secrets_app, name="secrets")
-
-
-@secrets_app.command("list")
-def secrets_list() -> None:
-    """Показать имена секретов из файла store (значения не раскрываются)."""
-    cfg = _load_config_or_exit()
-    names = default_secret_store(cfg.secrets.path).names()
-    if not names:
-        console.print("секретов в файле store нет (env-секреты по именам не перечисляются)")
-        return
-    for name in names:
-        console.print(name)
-
-
-@secrets_app.command("set")
-def secrets_set(
-    name: Annotated[str, typer.Argument(help="Имя секрета (например PROVIDER_API_KEY)")],
-    value: Annotated[str, typer.Option("--value", prompt=True, hide_input=True, help="Значение")],
-) -> None:
-    """Записать секрет в файл store (права 0600). Значение вводится скрыто."""
-    cfg = _load_config_or_exit()
-    if cfg.secrets.path is None:
-        console.print("[red]secrets.path не задан в конфигурации[/red]")
-        raise typer.Exit(code=1)
-    store = FileSecretStore(cfg.secrets.path.expanduser())
-    store.set(name, value)
-    console.print(f"[green]секрет '{name}' сохранён[/green] в {cfg.secrets.path}")
