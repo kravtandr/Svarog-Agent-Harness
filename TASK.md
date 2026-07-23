@@ -1659,4 +1659,4 @@ Svarog — open-source harness platform for building skill-based, self-hosted AI
 
 ---
 
-Архитектурные решения, снимающие ключевые риски этого ТЗ, зафиксированы в `docs/adr/` (ADR-0001…0010). Структура репозитория — `docs/repo-structure.md`. Список первых issues — `docs/first-issues.md`.
+Архитектурные решения, снимающие ключевые риски этого ТЗ, зафиксированы в `docs/adr/` (ADR-0001…0020). Структура репозитория — `docs/repo-structure.md`. Список первых issues — `docs/first-issues.md`.

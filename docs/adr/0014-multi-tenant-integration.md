@@ -2,7 +2,7 @@
 
 ## Статус
 
-Принято (Фазы 1–3 реализованы в ветке `feat/multi-tenancy`)
+Принято, фазы 1–3 реализованы (`src/svarog_harness/tenant/`, `gateway/hub.py`)
 
 ## Контекст
 
