@@ -116,11 +116,21 @@ def _final_turn(text: str = "сделано") -> CompletionResult:
 
 
 async def _wait_completed(service: GatewayService, run_id: str) -> str:
+    """Дождаться терминального состояния run'а И его фоновой пост-обработки.
+
+    Состояние в БД переключается раньше, чем фоновая задача сервиса отпускает
+    workspace: дренаж памяти и автокоммит держат `.git/index.lock` ещё
+    какое-то время. Тест, который сразу после этого сам лезет в git того же
+    каталога, ловит `Unable to create index.lock` — поэтому ждём и задачи
+    (`wait_for_background` заведён ровно под этот случай).
+    """
     for _ in range(600):
         detail = await service.get_run(run_id)
         if detail.state in {"completed", "failed"}:
+            await service.wait_for_background()
             return detail.state
         await asyncio.sleep(0.01)
+    await service.wait_for_background()
     return (await service.get_run(run_id)).state
 
 
