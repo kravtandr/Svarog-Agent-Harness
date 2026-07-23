@@ -164,7 +164,7 @@ svarog remote run "…" --workspace ws                 # run на сервере
 * **Cloud-режим (ADR-0017, фазы 1–2)**: постоянный сервер поверх `svarog serve` + thin CLI: `svarog login <url>` и `svarog remote run|chat|resume|cancel|runs|show|approvals|skills|whoami` — тонкий 1:1 маппинг на REST/NDJSON, локально не исполняется ничего. Серверные workspaces двух видов: git-клон по `--repo` (hardened clone, per-tenant git-credentials только host-side) и постоянный **named workspace** (`--workspace`), живущий между runs и сессиями; результаты — push task-ветки (Flow C), `GET /runs/{id}/diff` или `svarog remote workspace pull` (файл / tar.gz). Сессии `remote chat` держат **тёплый sandbox** (env, инфраструктура, MCP живут между сообщениями), одноразовые workspaces подметает retention-GC.
 * **Тестирование агента**: **agent-based user simulation** (`simulation/`) — сценарии × личности для регрессионной проверки поведения агента на реальном LLM (какие tools, зацикливание, маршрутизация результата в файл/память); плюс полный набор unit-тестов и eval-сценарии критериев готовности MVP, гоняемые в CI.
 
-Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0017](docs/adr/) (hardening рантайма — 0015, внешний агент как data-plane — 0016, cloud-режим — 0017).
+Архитектурные решения за этими свойствами зафиксированы в [ADR-0001…0020](docs/adr/) (hardening рантайма — 0015, внешний агент как data-plane — 0016, cloud-режим — 0017, чат-TUI — 0018, планировщик — 0019, memory-proposals и Dream — 0020).
 
 ## Режимы работы
 
@@ -300,7 +300,7 @@ Workspace на сервере берётся из двух источников 
 | Документ | Содержание |
 |---|---|
 | [TASK.md](TASK.md) | полное ТЗ |
-| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0017 (мультиарендность — 0012/0013/0014; hardening рантайма — 0015; внешний агент как data-plane — 0016; cloud-режим — 0017) |
+| [docs/adr/](docs/adr/) | архитектурные решения ADR-0001…0020 (мультиарендность — 0012/0013/0014; hardening рантайма — 0015; внешний агент как data-plane — 0016; cloud-режим — 0017; чат-TUI — 0018; планировщик — 0019; memory-proposals и Dream — 0020) |
 | [docker/agent-claude/](docker/agent-claude/) | образ sandbox для внешнего Claude Code (ADR-0016) + инструкция сборки |
 | [docker/agent-opencode/](docker/agent-opencode/) | образ sandbox для внешнего OpenCode (ADR-0016) + инструкция сборки |
 | [docs/repo-structure.md](docs/repo-structure.md) | структура пакета |
