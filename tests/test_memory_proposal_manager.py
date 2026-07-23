@@ -196,3 +196,43 @@ async def test_applied_changes_reach_files_after_drain(db: AsyncSession, tmp_pat
     await MemoryWriter(db, mem).drain()
 
     assert "строка" in (mem / "notes.md").read_text(encoding="utf-8")
+
+
+async def test_writer_does_not_sweep_parent_repo(db: AsyncSession, tmp_path: Path) -> None:
+    """Reproducer: каталог памяти внутри чужого репо не утаскивает его дерево.
+
+    Кампания 23.07.2026: `git add -A` без pathspec стейджит ВСЁ рабочее дерево
+    репозитория, а не текущий каталог. Каталог памяти, лежащий внутри чужого
+    репо (agent-home/memory внутри чекаута проекта), заставлял writer'а
+    коммитить незакоммиченную работу человека под сообщением «memory: …».
+    """
+    outer = tmp_path / "outer"
+    (outer / "memory").mkdir(parents=True)
+    repo = GitRepo(outer)
+    await repo.init()
+    await repo.ensure_identity()
+    (outer / "tracked.txt").write_text("исходное\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("init outer")
+    (outer / "tracked.txt").write_text("несохранённая работа\n", encoding="utf-8")
+    (outer / "new.txt").write_text("новый файл\n", encoding="utf-8")
+
+    writer = MemoryWriter(db, outer / "memory")
+    await writer.enqueue(_append(content="факт"))
+    await writer.drain()
+
+    # Коммиты writer'а содержат только файлы памяти — чужие правки не утащены.
+    _, log, _ = await repo._git("log", "--name-only", "--format=%x00%s")
+    for entry in log.split("\x00"):
+        subject, _, files = entry.partition("\n")
+        if not subject.startswith("memory:"):
+            continue
+        touched = [line for line in files.splitlines() if line.strip()]
+        assert touched, f"коммит '{subject}' пуст"
+        assert all(name.startswith("memory/") for name in touched), (
+            f"коммит '{subject}' утащил чужие файлы: {touched}"
+        )
+    # И они по-прежнему незакоммичены в рабочем дереве.
+    _, status, _ = await repo._git("status", "--short")
+    assert "tracked.txt" in status, "правка человека должна остаться незакоммиченной"
+    assert "new.txt" in status
