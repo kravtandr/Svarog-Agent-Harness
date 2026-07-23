@@ -11,15 +11,28 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import httpx
 import typer
 import yaml
+from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
 
 from svarog_harness.config.loader import USER_CONFIG_PATH
+from svarog_harness.gateway.models import (
+    ApprovalView,
+    CancelView,
+    RunDetail,
+    RunDiffView,
+    RunRef,
+    RunSummary,
+    SessionView,
+    SkillCard,
+    WhoamiView,
+    WorkspaceView,
+)
 from svarog_harness.secrets import default_secret_store
 from svarog_harness.secrets.store import FileSecretStore
 
@@ -63,11 +76,19 @@ class RemoteClient:
             return resp.json()
         return resp.content
 
-    def _json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        return cast(dict[str, Any], self._request(method, path, **kwargs))
+    def _model[M: BaseModel](self, model: type[M], method: str, path: str, **kwargs: Any) -> M:
+        """Разобрать ответ моделью контракта gateway (`gateway/models.py`).
 
-    def _json_list(self, method: str, path: str, **kwargs: Any) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], self._request(method, path, **kwargs))
+        Клиент и сервер делят одну схему: дрейф API падает валидацией здесь,
+        а не KeyError глубоко внутри команды.
+        """
+        return model.model_validate(self._request(method, path, **kwargs))
+
+    def _models[M: BaseModel](
+        self, model: type[M], method: str, path: str, **kwargs: Any
+    ) -> list[M]:
+        raw = self._request(method, path, **kwargs)
+        return [model.model_validate(item) for item in raw]
 
     # --- runs ---
     def create_run(
@@ -78,7 +99,7 @@ class RemoteClient:
         repo_url: str | None = None,
         ref: str | None = None,
         workspace: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunRef:
         payload: dict[str, Any] = {"task": task}
         if autonomy:
             payload["autonomy"] = autonomy
@@ -86,22 +107,22 @@ class RemoteClient:
             payload["repo"] = {"url": repo_url, **({"ref": ref} if ref else {})}
         if workspace:
             payload["workspace"] = workspace
-        return self._json("POST", "/runs", json=payload)
+        return self._model(RunRef, "POST", "/runs", json=payload)
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
-        return self._json("GET", f"/runs/{run_id}")
+    def get_run(self, run_id: str) -> RunDetail:
+        return self._model(RunDetail, "GET", f"/runs/{run_id}")
 
-    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
-        return self._json_list("GET", "/runs", params={"limit": limit})
+    def list_runs(self, limit: int = 20) -> list[RunSummary]:
+        return self._models(RunSummary, "GET", "/runs", params={"limit": limit})
 
-    def resume(self, run_id: str) -> dict[str, Any]:
-        return self._json("POST", f"/runs/{run_id}/resume")
+    def resume(self, run_id: str) -> RunRef:
+        return self._model(RunRef, "POST", f"/runs/{run_id}/resume")
 
-    def cancel(self, run_id: str) -> dict[str, Any]:
-        return self._json("POST", f"/runs/{run_id}/cancel")
+    def cancel(self, run_id: str) -> CancelView:
+        return self._model(CancelView, "POST", f"/runs/{run_id}/cancel")
 
-    def diff(self, run_id: str) -> dict[str, Any]:
-        return self._json("GET", f"/runs/{run_id}/diff")
+    def diff(self, run_id: str) -> RunDiffView:
+        return self._model(RunDiffView, "GET", f"/runs/{run_id}/diff")
 
     def stream_events(self, run_id: str) -> Iterator[dict[str, Any]]:
         """Живые события run'а (NDJSON); завершается на run_finished."""
@@ -120,30 +141,35 @@ class RemoteClient:
             raise RemoteError(f"стрим оборвался: {exc}") from None
 
     # --- approvals ---
-    def approvals(self) -> list[dict[str, Any]]:
-        return self._json_list("GET", "/approvals")
+    def approvals(self) -> list[ApprovalView]:
+        return self._models(ApprovalView, "GET", "/approvals")
 
-    def decide(self, approval_id: str, *, approved: bool, reason: str | None) -> dict[str, Any]:
-        return self._json(
-            "POST", f"/approvals/{approval_id}", json={"approved": approved, "reason": reason}
+    def decide(self, approval_id: str, *, approved: bool, reason: str | None) -> RunRef:
+        return self._model(
+            RunRef,
+            "POST",
+            f"/approvals/{approval_id}",
+            json={"approved": approved, "reason": reason},
         )
 
-    def answer(self, approval_id: str, text: str) -> dict[str, Any]:
-        return self._json("POST", f"/approvals/{approval_id}/answer", json={"answer": text})
+    def answer(self, approval_id: str, text: str) -> RunRef:
+        return self._model(
+            RunRef, "POST", f"/approvals/{approval_id}/answer", json={"answer": text}
+        )
 
     # --- разное ---
-    def skills(self) -> list[dict[str, Any]]:
-        return self._json_list("GET", "/skills")
+    def skills(self) -> list[SkillCard]:
+        return self._models(SkillCard, "GET", "/skills")
 
-    def whoami(self) -> dict[str, Any]:
-        return self._json("GET", "/whoami")
+    def whoami(self) -> WhoamiView:
+        return self._model(WhoamiView, "GET", "/whoami")
 
     # --- workspaces ---
-    def workspaces(self) -> list[dict[str, Any]]:
-        return self._json_list("GET", "/workspaces")
+    def workspaces(self) -> list[WorkspaceView]:
+        return self._models(WorkspaceView, "GET", "/workspaces")
 
-    def workspace_create(self, name: str) -> dict[str, Any]:
-        return self._json("POST", "/workspaces", json={"name": name})
+    def workspace_create(self, name: str) -> WorkspaceView:
+        return self._model(WorkspaceView, "POST", "/workspaces", json={"name": name})
 
     def workspace_rm(self, name: str) -> None:
         self._request("DELETE", f"/workspaces/{name}")
@@ -159,16 +185,16 @@ class RemoteClient:
     # --- сессии ---
     def session_create(
         self, *, title: str = "", repo_url: str | None = None, workspace: str | None = None
-    ) -> dict[str, Any]:
+    ) -> SessionView:
         payload: dict[str, Any] = {"title": title}
         if repo_url:
             payload["repo"] = {"url": repo_url}
         if workspace:
             payload["workspace"] = workspace
-        return self._json("POST", "/sessions", json=payload)
+        return self._model(SessionView, "POST", "/sessions", json=payload)
 
-    def send_message(self, session_id: str, text: str) -> dict[str, Any]:
-        return self._json("POST", f"/sessions/{session_id}/messages", json={"text": text})
+    def send_message(self, session_id: str, text: str) -> RunRef:
+        return self._model(RunRef, "POST", f"/sessions/{session_id}/messages", json={"text": text})
 
 
 def _detail(resp: httpx.Response) -> str:
@@ -250,26 +276,26 @@ def _finish_summary(client: RemoteClient, run_id: str, state: str) -> None:
     console.print(f"[{color}]run {run_id[:8]} → {state}[/{color}]")
     if state == "waiting_approval":
         for a in client.approvals():
-            if a["run_id"] == run_id:
+            if a.run_id == run_id:
                 console.print(
-                    f"[yellow]approval {a['approval_id'][:8]}[/yellow] "
-                    f"{a['action_type']}: {a.get('payload')}\n"
-                    f"[dim]svarog remote approve {a['approval_id'][:8]} | "
-                    f"deny {a['approval_id'][:8]}[/dim]"
+                    f"[yellow]approval {a.approval_id[:8]}[/yellow] "
+                    f"{a.action_type}: {a.payload}\n"
+                    f"[dim]svarog remote approve {a.approval_id[:8]} | "
+                    f"deny {a.approval_id[:8]}[/dim]"
                 )
 
 
-def _print_runs(runs: list[dict[str, Any]]) -> None:
+def _print_runs(runs: list[RunSummary]) -> None:
     table = Table(header_style="bold")
     for col in ("run", "state", "task", "iter", "cost $"):
         table.add_column(col)
     for r in runs:
         table.add_row(
-            r["run_id"][:8],
-            r["state"],
-            (r["task"][:60] + "…") if len(r["task"]) > 60 else r["task"],
-            str(r["iterations"]),
-            f"{r['cost_usd']:.4f}",
+            r.run_id[:8],
+            r.state,
+            (r.task[:60] + "…") if len(r.task) > 60 else r.task,
+            str(r.iterations),
+            f"{r.cost_usd:.4f}",
         )
     console.print(table)
 
@@ -296,8 +322,7 @@ def login(
     try:
         who = client.whoami()
         console.print(
-            f"[green]подключено[/green] {url} — тенант "
-            f"[bold]{who['tenant_id']}[/bold] ({who['role']})"
+            f"[green]подключено[/green] {url} — тенант [bold]{who.tenant_id}[/bold] ({who.role})"
         )
     except RemoteError as exc:
         console.print(f"[yellow]профиль сохранён, но проверка не прошла:[/yellow] {exc}")
@@ -312,9 +337,9 @@ def remote_whoami() -> None:
         _fail(exc)
         return
     console.print(
-        f"тенант [bold]{who['tenant_id']}[/bold] ({who['role']}) — "
-        f"активных runs: {who['active_runs']}, cost ${who['total_cost_usd']:.4f}, "
-        f"tokens {who['total_tokens']}"
+        f"тенант [bold]{who.tenant_id}[/bold] ({who.role}) — "
+        f"активных runs: {who.active_runs}, cost ${who.total_cost_usd:.4f}, "
+        f"tokens {who.total_tokens}"
     )
 
 
@@ -335,9 +360,9 @@ def remote_run(
         ref_view = client.create_run(
             task, autonomy=autonomy, repo_url=repo, ref=ref, workspace=workspace
         )
-        run_id = ref_view["run_id"]
+        run_id = ref_view.run_id
         console.print(f"[dim]run {run_id[:8]} запущен[/dim]")
-        state = _attach(client, run_id) if attach else ref_view["state"]
+        state = _attach(client, run_id) if attach else ref_view.state
         if attach:
             _finish_summary(client, run_id, state)
     except RemoteError as exc:
@@ -367,7 +392,7 @@ def remote_cancel(run_id: Annotated[str, typer.Argument(help="ID/префикс 
     except RemoteError as exc:
         _fail(exc)
         return
-    console.print(f"run {view['run_id'][:8]} → {view['state']}")
+    console.print(f"run {view.run_id[:8]} → {view.state}")
 
 
 @remote_app.command("runs")
@@ -388,10 +413,10 @@ def remote_show(
     try:
         client = load_remote_client()
         detail = client.get_run(run_id)
-        console.print_json(json.dumps(detail, ensure_ascii=False))
+        console.print_json(detail.model_dump_json())
         if diff:
             d = client.diff(run_id)
-            for label, patch in (("committed", d["committed"]), ("uncommitted", d["uncommitted"])):
+            for label, patch in (("committed", d.committed), ("uncommitted", d.uncommitted)):
                 if patch:
                     console.rule(label)
                     console.print(patch, markup=False, highlight=False)
@@ -412,8 +437,7 @@ def remote_approvals() -> None:
         return
     for a in pending:
         console.print(
-            f"[yellow]{a['approval_id'][:8]}[/yellow] run={a['run_id'][:8]} "
-            f"{a['action_type']}: {a.get('payload')}"
+            f"[yellow]{a.approval_id[:8]}[/yellow] run={a.run_id[:8]} {a.action_type}: {a.payload}"
         )
 
 
@@ -442,7 +466,7 @@ def _decide(approval_id: str, *, approved: bool, reason: str | None) -> None:
         _fail(exc)
         return
     verdict = "одобрен" if approved else "отклонён"
-    console.print(f"approval {verdict}, run {ref['run_id'][:8]} возобновляется")
+    console.print(f"approval {verdict}, run {ref.run_id[:8]} возобновляется")
 
 
 @remote_app.command("skills")
@@ -454,7 +478,7 @@ def remote_skills() -> None:
         _fail(exc)
         return
     for card in cards:
-        console.print(f"[bold]{card['name']}[/bold] v{card['version']} — {card['description']}")
+        console.print(f"[bold]{card.name}[/bold] v{card.version} — {card.description}")
 
 
 workspace_app = typer.Typer(help="Named workspaces на сервере (ADR-0017 §1).")
@@ -488,10 +512,10 @@ def ws_list() -> None:
         table.add_column(col)
     for w in items:
         table.add_row(
-            w["name"],
-            _human_size(w["size_bytes"]),
-            w["modified_at"],
-            "●" if w["busy"] else "",
+            w.name,
+            _human_size(w.size_bytes),
+            w.modified_at.isoformat(),
+            "●" if w.busy else "",
         )
     console.print(table)
 
@@ -547,10 +571,8 @@ def remote_chat(
     except RemoteError as exc:
         _fail(exc)
         return
-    sid = session["session_id"]
-    console.print(
-        f"[dim]сессия {sid[:8]} | workspace: {session.get('workspace')} | /quit — выход[/dim]"
-    )
+    sid = session.session_id
+    console.print(f"[dim]сессия {sid[:8]} | workspace: {session.workspace} | /quit — выход[/dim]")
     while True:
         try:
             text = typer.prompt("›", prompt_suffix=" ").strip()
@@ -559,7 +581,7 @@ def remote_chat(
         if not text or text in {"/quit", "/exit"}:
             break
         try:
-            run_id = client.send_message(sid, text)["run_id"]
+            run_id = client.send_message(sid, text).run_id
             state = _attach(client, run_id)
             _finish_summary(client, run_id, state)
         except RemoteError as exc:
