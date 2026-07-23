@@ -193,6 +193,38 @@ async def test_persist_invalid_records_failed(db: AsyncSession, tmp_path: Path) 
     assert proposal.branch is None
 
 
+async def test_persist_refuses_dir_nested_in_foreign_repo(db: AsyncSession, tmp_path: Path) -> None:
+    """Reproducer: skills-каталог ВНУТРИ чужого репозитория — не skills-репозиторий.
+
+    Кампания 23.07.2026: `skills.paths` указывал на `agent-home/skills` внутри
+    рабочего дерева самого Svarog. `is_repo()` отвечает «я внутри какого-то
+    репозитория», поэтому proposal материализовался в ЧУЖОМ репо: `add_all`
+    смёл в коммит всё незакоммиченное рабочее дерево, а `checkout` обратно на
+    базовую ветку его выбросил. Граница — сравнение toplevel с самим путём.
+    """
+    outer = tmp_path / "outer"
+    (outer / "skills").mkdir(parents=True)
+    repo = GitRepo(outer)
+    await repo.init()
+    await repo.ensure_identity()
+    (outer / "tracked.txt").write_text("исходное\n", encoding="utf-8")
+    await repo.add_all()
+    await repo.commit("init outer")
+    # Незакоммиченная работа человека в чужом репозитории.
+    (outer / "tracked.txt").write_text("несохранённая работа\n", encoding="utf-8")
+    (outer / "new.txt").write_text("новый файл\n", encoding="utf-8")
+    base = await repo.current_branch()
+
+    proposal = await SkillProposalManager(db, outer / "skills").persist(_request())
+
+    assert proposal.status is SkillProposalStatus.FAILED
+    assert proposal.branch is None
+    # Чужое рабочее дерево не тронуто: ни ветки, ни коммита, ни потери правок.
+    assert await repo.current_branch() == base
+    assert (outer / "tracked.txt").read_text(encoding="utf-8") == "несохранённая работа\n"
+    assert (outer / "new.txt").exists()
+
+
 # --- интеграция: run порождает proposal ---
 
 

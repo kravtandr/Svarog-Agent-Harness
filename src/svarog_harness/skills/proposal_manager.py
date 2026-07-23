@@ -44,7 +44,12 @@ class SkillProposalManager:
             return await self._record(
                 request,
                 SkillProposalStatus.FAILED,
-                checks=["skills-репозиторий не инициализирован (нужен git с базовым коммитом)"],
+                checks=[
+                    f"'{self._skills_dir}' не является skills-репозиторием: нужен "
+                    f"отдельный git-репозиторий с базовым коммитом именно по этому "
+                    f"пути. Каталог внутри другого репозитория не подходит — "
+                    f"proposal-ветка ушла бы в него"
+                ],
             )
         try:
             art = await self._flow.create_proposal(request, known_values=known_values)
