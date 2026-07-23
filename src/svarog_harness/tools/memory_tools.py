@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from svarog_harness.memory.apply import MemoryApplyError, resolve_memory_path
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
+from svarog_harness.memory.proposal import MemoryProposalRequest, validate_proposal
 from svarog_harness.memory.validate import validate_change
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult, truncate_text
 
@@ -162,3 +163,82 @@ class ReadMemoryTool(Tool[ReadMemoryArgs]):
         except OSError as exc:
             return ToolResult.failure(f"не удалось прочитать '{args.path}': {exc}")
         return ToolResult.success(truncate_text(content, _MAX_READ_CHARS))
+
+
+# Приёмник proposal'ов: orchestrator материализует их после run'а.
+MemoryProposeCallback = Callable[[MemoryProposalRequest], None]
+
+
+class MemoryChangeItem(BaseModel):
+    """Одна правка внутри замысла. Поля совпадают с RememberArgs."""
+
+    file: str = Field(description="Файл памяти относительно memory/")
+    operation: MemoryOperation = Field(
+        default=MemoryOperation.APPEND,
+        description="create | append | replace_section | update_field | delete",
+    )
+    content: str = Field(default="", description="Содержимое; для update_field — значение поля")
+    section: str = Field(default="", description="Заголовок секции для replace_section (без #)")
+    field: str = Field(default="", description="Имя поля frontmatter для update_field")
+
+
+class ProposeMemoryChangeArgs(BaseModel):
+    title: str = Field(description="Краткое имя замысла — его человек видит в списке на ревью")
+    rationale: str = Field(
+        description="Зачем эта правка. Обязательно: человек читает proposal без контекста прогона"
+    )
+    changes: list[MemoryChangeItem] = Field(
+        description="Правки одного связного замысла; несвязанные правки — отдельными вызовами"
+    )
+
+
+class ProposeMemoryChangeTool(Tool[ProposeMemoryChangeArgs]):
+    """Предложить правку памяти на человеческое ревью (блок C, ADR-0020).
+
+    Прямой записи у Dream нет: инструмент `remember` в его профиле не
+    регистрируется. Один вызов = один замысел = один proposal.
+    """
+
+    name = "propose_memory_change"
+    action_type = "memory.propose"
+    description = (
+        "Предложить изменение долговременной памяти на ревью человеку. "
+        "Один вызов — один связный замысел: несколько правок допустимы, только "
+        "если это части одного изменения (например, слияние двух страниц). "
+        "Несвязанные правки оформляй отдельными вызовами — человек решает по "
+        "каждому замыслу отдельно. Удаление непустой страницы запрещено: чтобы "
+        "вывести проект из оборота, ставь status: archived через update_field."
+    )
+    risk_level = RiskLevel.LOW
+    args_model = ProposeMemoryChangeArgs
+
+    def __init__(self, on_propose: MemoryProposeCallback, memory_dir: Path) -> None:
+        self._on_propose = on_propose
+        self._memory_dir = memory_dir
+
+    async def execute(self, args: ProposeMemoryChangeArgs) -> ToolResult:
+        request = MemoryProposalRequest(
+            title=args.title,
+            rationale=args.rationale,
+            changes=tuple(
+                MemoryChangeRequest(
+                    file=item.file,
+                    operation=item.operation,
+                    content=item.content,
+                    section=item.section,
+                    field=item.field,
+                )
+                for item in args.changes
+            ),
+        )
+        # Валидация здесь, а не при материализации: ошибка должна вернуться
+        # модели сразу, пока она может её исправить.
+        errors = validate_proposal(self._memory_dir, request)
+        if errors:
+            return ToolResult.failure("; ".join(errors))
+        self._on_propose(request)
+        return ToolResult.success(
+            f"предложение '{request.title}' принято ({len(request.changes)} правок); "
+            f"оно ждёт решения человека. Не повторяй его и не проверяй результат "
+            f"через read_memory — память изменится только после одобрения."
+        )

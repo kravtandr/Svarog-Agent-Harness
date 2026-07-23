@@ -3,7 +3,9 @@
 from pathlib import Path
 
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
+from svarog_harness.memory.proposal import MemoryProposalRequest
 from svarog_harness.memory.validate import validate_change
+from svarog_harness.tools.memory_tools import ProposeMemoryChangeTool
 
 
 def _req(file: str, op: MemoryOperation, **kw: str) -> MemoryChangeRequest:
@@ -47,3 +49,59 @@ def test_pending_file_relaxes_existence_check(tmp_path: Path) -> None:
 
 def test_valid_append_passes(tmp_path: Path) -> None:
     assert validate_change(tmp_path, _req("notes.md", MemoryOperation.APPEND, content="x")) is None
+
+
+# --- инструмент propose_memory_change (блок C §2) ----------------------------
+
+
+async def test_propose_tool_collects_request(tmp_path: Path) -> None:
+    sink: list[MemoryProposalRequest] = []
+    tool = ProposeMemoryChangeTool(on_propose=sink.append, memory_dir=tmp_path)
+
+    result = await tool.execute(
+        tool.args_model(
+            title="дубль проектов",
+            rationale="две страницы про один бот",
+            changes=[{"file": "notes.md", "operation": "append", "content": "факт"}],
+        )
+    )
+
+    assert result.ok
+    assert len(sink) == 1
+    assert sink[0].title == "дубль проектов"
+    assert sink[0].changes[0].file == "notes.md"
+
+
+async def test_propose_tool_rejects_delete_of_non_empty(tmp_path: Path) -> None:
+    """Правило §3 возвращается модели сразу, а не всплывает при ревью."""
+    (tmp_path / "page.md").write_text("содержимое\n", encoding="utf-8")
+    sink: list[MemoryProposalRequest] = []
+    tool = ProposeMemoryChangeTool(on_propose=sink.append, memory_dir=tmp_path)
+
+    result = await tool.execute(
+        tool.args_model(
+            title="убрать",
+            rationale="лишняя",
+            changes=[{"file": "page.md", "operation": "delete"}],
+        )
+    )
+
+    assert not result.ok
+    assert "archived" in (result.error or "")
+    assert sink == []
+
+
+async def test_propose_tool_requires_rationale(tmp_path: Path) -> None:
+    sink: list[MemoryProposalRequest] = []
+    tool = ProposeMemoryChangeTool(on_propose=sink.append, memory_dir=tmp_path)
+
+    result = await tool.execute(
+        tool.args_model(
+            title="правка",
+            rationale="  ",
+            changes=[{"file": "notes.md", "operation": "append", "content": "факт"}],
+        )
+    )
+
+    assert not result.ok
+    assert sink == []
