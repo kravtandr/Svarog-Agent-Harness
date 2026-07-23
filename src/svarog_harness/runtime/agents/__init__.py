@@ -1,8 +1,15 @@
 """Адаптеры внешних агентов (ADR-0016, фазы 1 и 4).
 
-Матрица capabilities (§1): у claude-code — hooks + resume + mcp (полный
-tier 2); у codex/opencode — resume без hooks/mcp, поэтому supervised с ними
-отклоняется fail-closed (§6), а память/скиллы не пробрасываются.
+Матрица capabilities (§1) — источник истины в самих адаптерах:
+
+* claude-code — hooks + resume + mcp (полный tier 2);
+* opencode — resume + mcp, без hooks (mcp включён спайком 21.07.2026:
+  мост подключается remote-секцией managed-конфига);
+* codex — только resume: его MCP-конфиг (TOML, stdio) несовместим с
+  HTTP-bridge.
+
+Без hooks supervised отклоняется fail-closed (§6). Без mcp не пробрасываются
+память, скиллы и документация Svarog (`read_svarog_docs`) — то есть у codex.
 """
 
 from svarog_harness.config.schema import ExternalExecutorConfig

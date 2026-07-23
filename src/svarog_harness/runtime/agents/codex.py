@@ -24,7 +24,6 @@ from svarog_harness.runtime.executor import (
     AgentEvent,
     AgentLaunch,
 )
-from svarog_harness.runtime.self_docs import self_docs_hint
 
 _STATE_DIR = PurePosixPath("/tmp/home/.codex")
 
@@ -74,16 +73,18 @@ class CodexAdapter:
         return _STATE_DIR
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+        self, memory: str, skill_cards: str, self_docs: bool = False
     ) -> dict[str, str]:
-        """~/.codex/AGENTS.md — глобальная инструкция Codex."""
+        """~/.codex/AGENTS.md — глобальная инструкция Codex.
+
+        self_docs игнорируется: `read_svarog_docs` — MCP-tool, а у codex
+        mcp=False, так что указатель на него был бы ложью (ср. ask_user).
+        """
         sections: list[str] = []
         if memory:
             sections.append(f"# Память Svarog\n\n{memory}")
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
-        if self_docs_path:
-            sections.append(self_docs_hint(self_docs_path))
         if not sections:
             return {}
         return {"AGENTS.md": "\n\n".join(sections) + "\n"}

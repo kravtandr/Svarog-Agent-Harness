@@ -36,11 +36,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
 from svarog_harness.runtime.bridge import ControlHandler
+from svarog_harness.runtime.self_docs import resolve_docs_root
 from svarog_harness.secrets.redaction import redact
 from svarog_harness.skills import Skill
 from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.storage.models import Approval, ApprovalStatus, Run, utcnow
 from svarog_harness.tools.base import RiskLevel, Tool
+from svarog_harness.tools.docs_tools import ReadSvarogDocsTool
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import question_options
@@ -97,12 +99,14 @@ class BridgeControl:
         ask_user_timeout_sec: int = 3600,
         on_notify: Callable[[str, str], None] | None = None,
         on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
+        self_docs: bool = True,
     ) -> None:
         self._db_action = db_action
         self._policy = policy
         self._memory_dir = memory_dir
         self._skills = skills
         self._proposal_sink = proposal_sink
+        self._self_docs = self_docs
         self._secret_values = secret_values
         self._grace_sec = approval_grace_sec
         self._ask_user_timeout_sec = ask_user_timeout_sec
@@ -142,6 +146,10 @@ class BridgeControl:
         tools["create_skill_proposal"] = CreateSkillProposalTool(
             on_propose=self._proposal_sink.append
         )
+        # Документация самого Svarog: агент отвечает про систему по источнику,
+        # а не по претрейну. Недоступный docs-root — фича молча выключается.
+        if self._self_docs and resolve_docs_root() is not None:
+            tools["read_svarog_docs"] = ReadSvarogDocsTool()
         return tools
 
     def _on_skill_load(self, name: str, version: str | None) -> None:
