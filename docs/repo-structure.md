@@ -15,7 +15,19 @@ svarog/
   src/svarog_harness/
     __init__.py
     cli/                    # Typer-приложение
-      main.py               # все команды + интерактивный approval в терминале (одним модулем)
+      main.py               # точка входа: команды верхнего уровня (init, run, chat, resume,
+                            # rewind, scheduler, push, serve, telegram, doctor, version) +
+                            # интерактивный approval в терминале; группы подключает add_typer
+      _shared.py            # общее для main.py и модулей групп: console, load_config_or_exit,
+                            # resolve_autonomy, show_approval, known_secret_values
+      traces_commands.py    # svarog traces / sessions: просмотр аудита runs
+      approvals_commands.py # svarog approvals: список запросов и решения по ним
+      skills_commands.py    # svarog skills: список, check, proposals, curate, pin (§6.4, §18)
+      memory_commands.py    # svarog memory: show, flush, curate, proposals (Flow A)
+      cron_commands.py      # svarog cron: джобы планировщика (ADR-0019)
+      tenant_commands.py    # svarog tenant: тенанты мультиарендного режима (ADR-0012/0014)
+      mcp_commands.py       # svarog mcp list: discovery инструментов MCP-серверов
+      secrets_commands.py   # svarog secrets: имена секретов и запись значений
       chat_engine.py        # ChatEngine: общий драйвер chat-сессии для фронтендов (ADR-0018)
       chat_inline.py        # inline-режим chat: Rich Live-стрим, слэш-команды
       chat_display.py       # welcome Panel, chat_status_view, tool-карточки
