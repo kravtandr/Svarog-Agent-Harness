@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from svarog_harness.runtime import self_docs
+from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
+from svarog_harness.runtime.agents.codex import CodexAdapter
+from svarog_harness.runtime.agents.opencode import OpencodeAdapter
 from svarog_harness.runtime.self_docs import (
     resolve_docs_root,
     self_docs_hint,
@@ -70,3 +73,25 @@ def test_hint_mentions_index_and_path() -> None:
     hint = self_docs_hint("/opt/svarog-docs")
     assert "/opt/svarog-docs/INDEX.md" in hint
     assert "Svarog" in hint
+
+
+# --- указатель в контекст-файлах адаптеров -----------------------------------
+
+_ADAPTERS = [
+    (ClaudeCodeAdapter, "CLAUDE.md"),
+    (OpencodeAdapter, ".config/opencode/AGENTS.md"),
+    (CodexAdapter, "AGENTS.md"),
+]
+
+
+@pytest.mark.parametrize("adapter_cls, ctx_file", _ADAPTERS)
+def test_context_files_include_hint_when_path_given(adapter_cls, ctx_file) -> None:
+    files = adapter_cls().context_files("mem", "", "/opt/svarog-docs")
+    assert "/opt/svarog-docs/INDEX.md" in files[ctx_file]
+
+
+@pytest.mark.parametrize("adapter_cls, ctx_file", _ADAPTERS)
+def test_context_files_omit_hint_when_none(adapter_cls, ctx_file) -> None:
+    files = adapter_cls().context_files("mem", "")
+    joined = files.get(ctx_file, "")
+    assert "svarog-docs" not in joined
