@@ -63,11 +63,22 @@ from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
 from svarog_harness.mcp import MCPError, build_mcp_tools, connect_mcp_servers
 from svarog_harness.memory import MemoryWriter, read_memory
 from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
+from svarog_harness.memory.dream import build_dream_task
+from svarog_harness.memory.proposal_manager import (
+    MemoryProposalManager,
+    MemoryProposalNotFoundError,
+    MemoryProposalStateError,
+)
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
 from svarog_harness.runtime.config_snapshot import config_digest
 from svarog_harness.runtime.loop import RunOutcome
-from svarog_harness.runtime.orchestrator import ConfigDriftError, RunHooks, TaskRunner
+from svarog_harness.runtime.orchestrator import (
+    ConfigDriftError,
+    RunHooks,
+    RunProfile,
+    TaskRunner,
+)
 from svarog_harness.sandbox import SandboxError
 from svarog_harness.scaffold import (
     DEFAULT_API_KEY_REF,
@@ -77,7 +88,7 @@ from svarog_harness.scaffold import (
 )
 from svarog_harness.scheduler.schedule import ScheduleSpecError, next_run_after, parse_spec
 from svarog_harness.scheduler.store import JobNotFoundError, JobStore, ProtectedJobError
-from svarog_harness.scheduler.system_jobs import ensure_system_jobs
+from svarog_harness.scheduler.system_jobs import DREAM_JOB_NAME, ensure_system_jobs
 from svarog_harness.scheduler.ticker import JobRunRequest, tick
 from svarog_harness.secrets import (
     FileSecretStore,
@@ -105,6 +116,7 @@ from svarog_harness.storage.models import (
     Approval,
     CronJob,
     JobOrigin,
+    MemoryProposal,
     Run,
     RunState,
     ScheduleKind,
@@ -689,6 +701,17 @@ def _console_hooks() -> RunHooks:
             for message in SkillProposalManager.validation_messages(proposal):
                 console.print(f"[yellow]  - {message}[/yellow]")
 
+    def on_memory_proposal(proposal: MemoryProposal) -> None:
+        if proposal.status.value == "pending":
+            console.print(
+                f"[cyan]memory proposal[/cyan] {proposal.title} "
+                f"[dim](review: svarog memory proposals show {proposal.id[:8]})[/dim]"
+            )
+        else:
+            console.print(f"[yellow]memory proposal {proposal.title}: отклонён валидацией[/yellow]")
+            for message in MemoryProposalManager.validation_messages(proposal):
+                console.print(f"[yellow]  - {message}[/yellow]")
+
     def on_progress(
         iterations: int, tokens: int, cost: float, context_ratio: float, cached: int
     ) -> None:
@@ -722,6 +745,7 @@ def _console_hooks() -> RunHooks:
         ),
         on_memory=on_memory,
         on_proposal=on_proposal,
+        on_memory_proposal=on_memory_proposal,
     )
 
 
@@ -1932,6 +1956,22 @@ def cron_remove(job_id: Annotated[str, typer.Argument(help="id джобы или
     asyncio.run(_with_db(cfg, action))
 
 
+async def _dream_blocked(cfg: SvarogConfig, db: AsyncSession) -> str | None:
+    """Причина не запускать Dream сейчас, или None.
+
+    Потолок непросмотренных предложений — предохранитель от бесконечного
+    накопления: без него ежедневная джоба при неактивном человеке копит мусор
+    и тратит токены впустую.
+    """
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None or not mem_dir.is_dir():
+        return "пропущено: память не настроена"
+    pending = await MemoryProposalManager(db, mem_dir).pending_count()
+    if pending >= cfg.dream.max_pending:
+        return f"пропущено: {pending} непросмотренных предложений — сначала ревью"
+    return None
+
+
 async def _scheduler_loop(cfg: SvarogConfig, workspace: Path) -> None:
     """Цикл демона: тик, затем пауза (ADR-0019).
 
@@ -1950,6 +1990,8 @@ async def _scheduler_loop(cfg: SvarogConfig, workspace: Path) -> None:
             config_digest=digest,
             now=utcnow(),
             prune_interval_sec=cfg.curator.prune_interval_sec,
+            dream_enabled=cfg.dream.enabled,
+            dream_interval_sec=cfg.dream.interval_sec,
         )
         for job_id in created:
             console.print(f"[dim]заведена системная джоба {job_id[:8]}[/dim]")
@@ -1957,9 +1999,19 @@ async def _scheduler_loop(cfg: SvarogConfig, workspace: Path) -> None:
     await _with_db(cfg, register_system)
 
     async def run_job(request: JobRunRequest) -> str:
+        task, profile = request.task, RunProfile.DEFAULT
+        if request.name == DREAM_JOB_NAME:
+            blocked = await _with_db(cfg, lambda db: _dream_blocked(cfg, db))
+            if blocked is not None:
+                return blocked
+            mem_dir = memory_dir(cfg)
+            assert mem_dir is not None  # проверено в _dream_blocked
+            report = audit_memory(mem_dir, stale_after_days=cfg.curator.stale_after_days)
+            task, profile = build_dream_task(report), RunProfile.DREAM
+
         runner = TaskRunner(cfg, Path(request.workspace))
         outcome = await runner.run_once(
-            request.task, AutonomyMode(request.autonomy), hooks=RunHooks()
+            task, AutonomyMode(request.autonomy), hooks=RunHooks(), profile=profile
         )
 
         # cron_job_id пишется после run'а: канала для метаданных на старте нет,
@@ -2100,6 +2152,118 @@ def memory_curate() -> None:
         for finding in report.findings:
             console.print(f"[magenta]{finding.kind}[/magenta] {finding.path}: {finding.detail}")
     console.print(f"[dim]отчёт: {path}[/dim]")
+
+
+memory_proposals_app = typer.Typer(
+    help="Memory proposals (блок C): ревью правок памяти, предложенных Dream.",
+    no_args_is_help=True,
+)
+memory_app.add_typer(memory_proposals_app, name="proposals")
+
+
+def _memory_dir_or_exit(cfg: SvarogConfig) -> Path:
+    mem_dir = memory_dir(cfg)
+    if mem_dir is None or not mem_dir.is_dir():
+        console.print("память не настроена или каталог отсутствует")
+        raise typer.Exit(code=1)
+    return mem_dir
+
+
+@memory_proposals_app.command("list")
+def memory_proposals_list() -> None:
+    """Показать предложения правок памяти, ожидающие ревью."""
+    cfg = _load_config_or_exit()
+    mem_dir = _memory_dir_or_exit(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        rows = await MemoryProposalManager(db, mem_dir).list_pending()
+        if not rows:
+            console.print("ожидающих memory proposals нет")
+            return
+        for row in rows:
+            console.print(
+                f"[cyan]{row.id[:8]}[/cyan] {row.title} "
+                f"({len(row.changes)} правок, {row.origin.value})"
+            )
+        console.print("[dim]review: svarog memory proposals show <id> → approve/reject <id>[/dim]")
+
+    asyncio.run(_with_db(cfg, action))
+
+
+@memory_proposals_app.command("show")
+def memory_proposals_show(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+) -> None:
+    """Показать замысел, обоснование и предпросмотр каждой правки."""
+    cfg = _load_config_or_exit()
+    mem_dir = _memory_dir_or_exit(cfg)
+
+    async def action(db: AsyncSession) -> None:
+        manager = MemoryProposalManager(db, mem_dir)
+        try:
+            row = await manager.get(proposal_id)
+        except MemoryProposalNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        console.print(f"[bold]{row.title}[/bold] | {row.status.value} | {row.id[:8]}")
+        console.print(f"  обоснование: {row.rationale}")
+        for message in MemoryProposalManager.validation_messages(row):
+            console.print(f"  [yellow]{message}[/yellow]")
+        if await manager.head_moved(row):
+            console.print(
+                "[yellow]память изменилась с момента предложения — "
+                "предпросмотр ниже посчитан на текущем состоянии[/yellow]"
+            )
+        for path, preview in manager.preview(row):
+            console.print(f"\n[bold]{path}[/bold]")
+            console.print(preview)
+
+    asyncio.run(_with_db(cfg, action))
+
+
+def _decide_memory_proposal(proposal_id: str, *, approved: bool, reason: str | None) -> None:
+    cfg = _load_config_or_exit()
+    mem_dir = _memory_dir_or_exit(cfg)
+
+    async def action(db: AsyncSession) -> tuple[str, int]:
+        manager = MemoryProposalManager(db, mem_dir)
+        row = await manager.get(proposal_id)
+        ids = await manager.decide(row, approved=approved, decided_by="cli", reason=reason)
+        return row.id, len(ids)
+
+    try:
+        row_id, count = asyncio.run(_with_db(cfg, action))
+    except MemoryProposalNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except MemoryProposalStateError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if approved:
+        console.print(
+            f"[green]proposal {row_id[:8]} одобрен[/green]: {count} заявок в очереди; "
+            f"применить сейчас — svarog memory flush"
+        )
+    else:
+        console.print(f"[yellow]proposal {row_id[:8]} отклонён[/yellow]")
+
+
+@memory_proposals_app.command("approve")
+def memory_proposals_approve(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
+) -> None:
+    """Одобрить предложение: заявки уходят в очередь единственного писателя."""
+    _decide_memory_proposal(proposal_id, approved=True, reason=reason)
+
+
+@memory_proposals_app.command("reject")
+def memory_proposals_reject(
+    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
+) -> None:
+    """Отклонить предложение. Память не меняется."""
+    _decide_memory_proposal(proposal_id, approved=False, reason=reason)
 
 
 tenant_app = typer.Typer(

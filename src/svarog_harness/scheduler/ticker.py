@@ -17,6 +17,9 @@ class JobRunRequest:
     """Что именно исполнить по сработавшей джобе."""
 
     job_id: str
+    # Имя нужно диспетчеру: системные джобы исполняются особым путём
+    # (Dream — своим профилем реестра и задачей из аудита, блок C §7).
+    name: str
     task: str
     workspace: str
     autonomy: str
@@ -53,7 +56,11 @@ async def tick(
             await store.finish(job, status="пропущено: workspace занят", now=now)
             continue
         request = JobRunRequest(
-            job_id=job.id, task=job.task, workspace=job.workspace, autonomy=job.autonomy
+            job_id=job.id,
+            name=job.name,
+            task=job.task,
+            workspace=job.workspace,
+            autonomy=job.autonomy,
         )
         try:
             status = await run_job(request)
