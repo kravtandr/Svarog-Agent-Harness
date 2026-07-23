@@ -24,6 +24,7 @@ from svarog_harness.runtime.executor import (
     AgentEvent,
     AgentLaunch,
 )
+from svarog_harness.runtime.self_docs import self_docs_hint
 
 _STATE_DIR = PurePosixPath("/tmp/home/.codex")
 
@@ -72,13 +73,17 @@ class CodexAdapter:
     def state_dir(self) -> PurePosixPath:
         return _STATE_DIR
 
-    def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
+    def context_files(
+        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+    ) -> dict[str, str]:
         """~/.codex/AGENTS.md — глобальная инструкция Codex."""
         sections: list[str] = []
         if memory:
             sections.append(f"# Память Svarog\n\n{memory}")
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
+        if self_docs_path:
+            sections.append(self_docs_hint(self_docs_path))
         if not sections:
             return {}
         return {"AGENTS.md": "\n\n".join(sections) + "\n"}

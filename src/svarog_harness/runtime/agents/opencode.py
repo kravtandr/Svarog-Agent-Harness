@@ -19,6 +19,7 @@ from svarog_harness.runtime.executor import (
     AgentLaunch,
     ask_user_guide,
 )
+from svarog_harness.runtime.self_docs import self_docs_hint
 
 # Домашний каталог контейнера (docker.py: HOME=/tmp/home): OpenCode держит
 # конфиг в ~/.config/opencode, состояние в ~/.local/share/opencode —
@@ -62,7 +63,9 @@ class OpencodeAdapter:
     def state_dir(self) -> PurePosixPath:
         return _STATE_DIR
 
-    def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
+    def context_files(
+        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+    ) -> dict[str, str]:
         """Глобальные правила OpenCode: ~/.config/opencode/AGENTS.md."""
         sections: list[str] = []
         # Имена tools глазами OpenCode — с префиксом svarog_ (спайк 2026-07-21).
@@ -85,6 +88,8 @@ class OpencodeAdapter:
         )
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
+        if self_docs_path:
+            sections.append(self_docs_hint(self_docs_path))
         return {".config/opencode/AGENTS.md": "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
