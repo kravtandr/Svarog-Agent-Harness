@@ -108,3 +108,29 @@ def test_developer_svarog_env_does_not_leak_into_tests() -> None:
     import os
 
     assert [name for name in os.environ if name.startswith("SVAROG_")] == []
+
+
+def test_dream_is_opt_in_by_default() -> None:
+    """Механизм опинионейтед и стоит денег — как curator.semantic (ADR-0009)."""
+    from svarog_harness.config.schema import DreamConfig
+
+    assert DreamConfig().enabled is False
+
+
+def test_dream_defaults() -> None:
+    from svarog_harness.config.schema import DreamConfig
+
+    cfg = DreamConfig()
+    assert cfg.interval_sec == 86_400
+    assert cfg.max_pending == 20
+    assert cfg.max_iterations == 20
+
+
+def test_dream_rejects_unknown_key() -> None:
+    """StrictModel: опечатка в имени поля — ошибка загрузки, а не тихий дефолт."""
+    from pydantic import ValidationError
+
+    from svarog_harness.config.schema import DreamConfig
+
+    with pytest.raises(ValidationError):
+        DreamConfig.model_validate({"enabled": True, "enabeld": True})
