@@ -8,7 +8,7 @@ svarog/
   README.md
   TASK.md                   # ТЗ
   docs/
-    adr/                    # ADR-0001…0010
+    adr/                    # ADR-0001…0020
     repo-structure.md
     first-issues.md
 
@@ -129,6 +129,22 @@ svarog/
       models.py             # MCPToolSpec, MCPBackend
       tool.py               # MCPTool: MCP-инструмент как Tool
       integration.py        # connect_mcp_servers (stdio SDK), build_mcp_tools
+
+    scheduler/              # источник запуска run'ов, отличный от человека (ADR-0019)
+      schedule.py           # расчёт следующего срабатывания джобы (чистые функции)
+      store.py              # хранилище джоб с атомарным захватом (compare-and-set)
+      ticker.py             # один проход планировщика; исполнение приходит колбэком
+      system_jobs.py        # системные джобы, заводимые кодом при старте демона
+
+    tenant/                 # мультитенантность control-plane (ADR-0012/0013/0014)
+      models.py             # типы control-plane тенантов
+      registry.py           # TenantRegistry: реестр в tenants.json под межпроцессным локом
+      provision.py          # провижн тенанта: дерево home + git init + БД + bearer-token
+      quota.py              # квоты: лимиты одновременности и кумулятивные бюджеты
+
+    common/                 # нейтральные утилиты без зависимостей от домена
+      frontmatter.py        # YAML-frontmatter: разбор и сборка markdown (§7, ADR-0011)
+      project_config.py     # чтение и атомарная запись project-config svarog.yaml
 
   skills/                   # official skills (§23), поставляются с платформой
     git-workflow/
