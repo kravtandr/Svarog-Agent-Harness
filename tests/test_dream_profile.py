@@ -38,7 +38,9 @@ def _runner(tmp_path: Path) -> TaskRunner:
 
 def _names(tmp_path: Path, profile: RunProfile) -> list[str]:
     runner = _runner(tmp_path)
-    registry = runner._build_registry(
+    # Сборка реестра живёт в RunAssembly (run_assembly.py); TaskRunner держит
+    # её в _assembly и наружу приватным методом не выставляет.
+    registry = runner._assembly._build_registry(
         LocalEnvironment(tmp_path),
         [],
         [],

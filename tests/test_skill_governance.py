@@ -18,7 +18,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.skills.proposal import SkillProposalRequest, validate_proposal
 from svarog_harness.skills.proposal_manager import SkillProposalManager
@@ -258,7 +258,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
             return self.turns.pop(0)
 
     provider = ScriptedProvider()
-    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
 
 
 async def test_run_creates_skill_proposal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

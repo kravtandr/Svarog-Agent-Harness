@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import AutonomyMode
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
 from svarog_harness.runtime.executor import AgentLaunch
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
@@ -120,7 +120,7 @@ async def test_external_run_once_in_docker(tmp_path: Path, monkeypatch: pytest.M
     _git(ws, "config", "user.name", "t")
     _git(ws, "add", "-A")
     _git(ws, "commit", "-m", "init")
-    monkeypatch.setattr(orchestrator, "adapter_for", lambda cfg: _DockerScriptAdapter())
+    monkeypatch.setattr(run_assembly, "adapter_for", lambda cfg: _DockerScriptAdapter())
 
     runner = TaskRunner(load_config(project_dir=ws), ws)
     outcome = await runner.run_once("сделай agent.txt", AutonomyMode.YOLO, hooks=RunHooks())

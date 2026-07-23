@@ -18,7 +18,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.scheduler.store import JobStore
 from svarog_harness.skills.curator import CuratorStore, prune_layer1
@@ -141,7 +141,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
             return self.turns.pop(0)
 
     provider = ScriptedProvider()
-    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
 
 
 async def test_archived_skill_excluded_from_run(

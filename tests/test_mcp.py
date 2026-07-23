@@ -17,7 +17,7 @@ from svarog_harness.llm.provider import (
 )
 from svarog_harness.mcp import MCPBackend, MCPError, MCPTool, MCPToolSpec, build_mcp_tools
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import orchestrator, run_assembly
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.tools.base import RiskLevel
 
@@ -127,7 +127,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
             return self.turns.pop(0)
 
     provider = ScriptedProvider()
-    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
 
 
 async def test_run_mcp_tool_gated_by_approval(
@@ -227,7 +227,7 @@ def _wire_deferred_run(
     provider = _DefsCapturingProvider(
         [CompletionResult(content="готово", usage=Usage(10, 5), finish_reason="stop")]
     )
-    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
     return TaskRunner(load_config(project_dir=ws), ws), provider
 
 
