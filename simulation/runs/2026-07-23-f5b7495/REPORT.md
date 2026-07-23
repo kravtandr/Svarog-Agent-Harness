@@ -44,7 +44,7 @@
 | **S21** Dream consolidation | cli | — | ⚠️ **НЕ ПРОГНАН** | Dream запускается через scheduler (системная джоба), не через `svarog run`. Отдельная инфра. |
 | **S22** read_svarog_docs | run | 5 | ✅ **PASS 4/5** | `read_svarog_docs` вызван 5/5, верный контент 4/5; p3 — generic GitFlow. Стохастика модели. |
 | **S23** Context canary | run | 2 | ✅ **PASS 2/2** | маркер назван, 0 итераций, 0 read_memory. Контекст доставлен в AGENTS.md (фикс 338b242). |
-| **S24** Schedule approve happy path | run+approval | 2 | ❌ **FAIL 2/2 — РЕАЛЬНЫЙ БАГ** | approve+resume → completed, НО `cron_jobs=0`: одобренная `schedule.create` не материализуется. Агент рапортует «настроено». |
+| **S24** Schedule approve happy path | run+approval | 2 | ❌ **FAIL 2/2 — РЕАЛЬНЫЙ БАГ** *(исправлен: фикс `a2ec830`, перепрогон PASS 2/2)* | approve+resume → completed, НО `cron_jobs=0`: одобренная `schedule.create` не материализуется. Агент рапортует «настроено». **Починено в `a2ec830`** (ветка `fix/s24-schedule-drain-on-resume`): `TaskRunner.resume` зеркалит `run_once` — `schedule_sink` + `drain_schedule`. Перепрогон: PASS 2/2 (P1+P5) — ровно 1 джоба origin=agent enabled=true, daily_at:09:00 tz=Europe/Moscow, next_run_at=06:00 UTC. |
 | **S25** Unschedulable cron | run+approval | 3 | 🔶 **частично 3/3** | daily_at:09:00 заведён (не every=604800), НО без оговорки про ограничение («еженедельно не умею»). |
 | **S26** Team in memory → подбор | run×2 | 3 | ✅ **PASS 3/3** | 5 человек сохранены, baseline цел, ход2: Вера названа, mobile-дыра отмечена. |
 
@@ -52,12 +52,12 @@
 
 - **Зелёные (PASS по всем прогонам): 17** — S1, S2, S3, S4, S5, S8, S11, S13, S14, S15, S16, S18, S19, S20, S22, S23, S26.
 - **FLAKY / частично: 5** — S7 (хобби теряется), S9 (страницы не создаются), S12 (baseline перезапись), S17 (инфрафлейк «стрим без result»), S25 (нет оговорки про ограничение).
-- **Реальный баг: 1** — **S24** (critical: approve+resume → completed, но cron-джоба не материализуется).
+- **Реальный баг: 1 — S24** (critical: approve+resume → completed, но cron-джоба не материализуется). **Починен в `a2ec830`** — перепрогон PASS 2/2.
 - **Не прогнаны (инфра): 3** — S6 (нужен remote), S10 (нужен serve), S21 (нужен scheduler). Покрыты юнит-тестами.
 
 ## Главные находки
 
-1. **S24 — критический дефект Svarog.** `drain_schedule` после `approve --reason` + `resume` не материализует одобренную `schedule.create`-заявку в `cron_jobs`: run `completed` с rapported «настроено», но джобы нет. Контраст с deny-путём S18 (там корректно — после deny джобы нет). Кандидат-фикс: `drain_schedule` после resume должен включать одобренную заявку в `cron_jobs`.
+1. **S24 — критический дефект Svarog (ИСПРАВЛЕН).** `drain_schedule` после `approve --reason` + `resume` не материализует одобренную `schedule.create`-заявку в `cron_jobs`: run `completed` с rapported «настроено», но джобы нет. Контраст с deny-путём S18 (там корректно — после deny джобы нет). **Фикс `a2ec830`** (ветка `fix/s24-schedule-drain-on-resume`, слит в `main` как `f2bb5f9`): `TaskRunner.resume` (internal path) теперь зеркалит `run_once` — передаёт `schedule_sink` в `build_loop` и вызывает `drain_schedule` после `loop.resume(...)`. Регрессия `tests/test_schedule_resume.py` (approve+resume → 1 джоба; deny+resume → 0 джоб). Red-green подтверждён, полный прогон 932 passed, перепрогон S24 в песочнице: PASS 2/2 (P1+P5) — origin=agent, enabled=true, daily_at:09:00 tz=Europe/Moscow, next_run_at=06:00 UTC.
 
 2. **S7 — стохастическая потеря данных.** `replace_section` профиля: модель вкладывает в `content` то, что убрать, вместо того, что оставить → хобби (личное) теряется в 2/3 прогонов. Кандидат: усилить гайд (`content` = то, что ОСТАЁТСЯ).
 
