@@ -27,7 +27,7 @@
 1. Перед задачей — прочитать соответствующий раздел `TASK.md` и связанные ADR; задачи брать в порядке `docs/first-issues.md`.
 2. Работать в feature-ветке; в `main` — только рабочее состояние.
 3. Перед коммитом: `ruff check` + `ruff format`, `mypy`, `pytest` — всё зелёное.
-4. Интерфейсы (`ModelProvider`, `SandboxBackend`, `QueueBackend`, `SecretStore` и т.д.) закладывать сразу, даже при единственной реализации (ADR-0008).
+4. Интерфейсы (`ModelProvider`, `ExecutionEnvironment`, `SecretStore` и т.д.) закладывать сразу, даже при единственной реализации (ADR-0008; отклонения по `QueueBackend` и `PolicyEngine` — в разделе «Отклонения» ADR-0008).
 5. Правила зависимостей из `repo-structure.md` не нарушать: `cli` → `runtime` → компоненты → `storage`/`trace`; никаких импортов из `cli` в ядро.
 
 ## Правила коммитов

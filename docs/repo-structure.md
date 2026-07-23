@@ -112,7 +112,9 @@ svarog/
       migrations/           # Alembic
       events.py             # EventStream: in-process pub/sub | (redis позже)
       locks.py              # LockBackend + FileLockBackend (flock): сериализация memory-writer
-      # QueueBackend отдельным модулем нет — очередь памяти = таблица memory_queue
+      # QueueBackend отдельным интерфейсом нет: очередь памяти — таблица
+      # memory_queue (ORM MemoryChange), дренирует её MemoryWriter
+      # (ADR-0008, «Отклонения»)
 
     trace/                  # (§6.12, §15)
       recorder.py           # единственный писатель в БД: запись всех сущностей аудита
@@ -162,6 +164,6 @@ svarog/
 ## Принципы
 
 * **Зависимости направлены вниз**: `cli` → `runtime` → (`tools`, `policy`, `sandbox`, `memory`, `gitflow`, `skills`, `llm`) → `storage`/`trace`. Никаких импортов из `cli` в ядро.
-* **Каждый pluggable-интерфейс** (ModelProvider, SandboxBackend, QueueBackend, SecretStore) живет в `base.py`/`provider.py` своего пакета; реализации — соседние модули.
+* **Каждый pluggable-интерфейс** (ModelProvider, ExecutionEnvironment, SecretStore) живет в `base.py`/`provider.py` своего пакета; реализации — соседние модули. Отклонения по `QueueBackend` и `PolicyEngine` — в разделе «Отклонения» ADR-0008.
 * **`gateway/` — первый внешний интерфейс (M5)**: `runtime` общается с внешним миром только через `RunHooks` оркестратора, события (`storage/events.py`) и approvals, поэтому REST/WS/Telegram подключены без изменений ядра. CLI и gateway гоняют один `TaskRunner`.
 * **`skills/` в корне** — это контент, не код: официальные скиллы копируются в agent-home при `svarog init`.
