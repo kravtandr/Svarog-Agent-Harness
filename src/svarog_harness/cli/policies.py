@@ -1,13 +1,16 @@
 """Интерактивное редактирование policy-профилей в project ``svarog.yaml``."""
 
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
-import yaml
 from pydantic import ValidationError
 
+from svarog_harness.common.project_config import (
+    ProjectConfigError,
+    read_project_config,
+    write_yaml,
+)
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME
 from svarog_harness.config.schema import AutonomyMode, PoliciesConfig
 
@@ -19,21 +22,6 @@ policies_app = typer.Typer(
 _PROFILE_NAMES = tuple(mode.value for mode in AutonomyMode)
 
 
-def _read_project_config(path: Path) -> dict[str, Any]:
-    """Вернуть исходный project-config, не смешивая его с user-config."""
-    if not path.exists():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise typer.BadParameter(f"невалидный YAML в {path}: {exc}") from exc
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise typer.BadParameter(f"{path}: верхний уровень должен быть mapping")
-    return data
-
-
 def _patterns(value: str) -> list[str]:
     """Разобрать ввод вида ``file.write, git.push`` в список glob-паттернов."""
     return [pattern.strip() for pattern in value.split(",") if pattern.strip()]
@@ -42,16 +30,6 @@ def _patterns(value: str) -> list[str]:
 def _prompt_patterns(label: str, current: list[str]) -> list[str]:
     value = typer.prompt(label, default=", ".join(current), show_default=bool(current))
     return _patterns(value)
-
-
-def _write_yaml(path: Path, data: Mapping[str, Any]) -> None:
-    """Атомарно сохранить YAML, чтобы Ctrl+C не оставил усеченный конфиг."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        yaml.safe_dump(dict(data), allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 @policies_app.command("configure")
@@ -70,7 +48,10 @@ def configure(
         raise typer.Exit(code=1)
 
     config_path = workspace / PROJECT_CONFIG_NAME
-    raw_config = _read_project_config(config_path)
+    try:
+        raw_config = read_project_config(config_path)
+    except ProjectConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     raw_policies = raw_config.get("policies", {})
     if not isinstance(raw_policies, dict):
         raise typer.BadParameter("policies должен быть mapping")
@@ -130,5 +111,5 @@ def configure(
         return
 
     raw_config["policies"] = updated_policies
-    _write_yaml(config_path, raw_config)
+    write_yaml(config_path, raw_config)
     typer.echo(f"Policy-профиль '{profile}' сохранён в {config_path}.")
