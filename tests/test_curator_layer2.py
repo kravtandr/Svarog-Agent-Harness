@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from svarog_harness.cli import main as cli_main
+from svarog_harness.cli import skills_commands
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.provider import (
     ChatMessage,
@@ -146,8 +147,12 @@ def test_curate_semantic_creates_description_proposal(
             ]
         }
     )
+    # Патчим модуль, который владеет символом: команды skills живут в
+    # cli/skills_commands.py, main.py их только регистрирует.
     monkeypatch.setattr(
-        cli_main, "auxiliary_provider", lambda models_cfg, store=None: ScriptedProvider(payload)
+        skills_commands,
+        "auxiliary_provider",
+        lambda models_cfg, store=None: ScriptedProvider(payload),
     )
 
     result = runner.invoke(cli_main.app, ["skills", "curate", "--semantic"])

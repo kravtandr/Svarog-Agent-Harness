@@ -21,13 +21,15 @@ from svarog_harness.cli import (
     approvals_commands,
     cron_commands,
     mcp_commands,
+    memory_commands,
     secrets_commands,
+    skills_commands,
     tenant_commands,
     traces_commands,
 )
 from svarog_harness.cli import install as install_module
 from svarog_harness.cli import remote as remote_module
-from svarog_harness.cli._shared import console, show_approval
+from svarog_harness.cli._shared import console, known_secret_values, show_approval
 from svarog_harness.cli._shared import load_config_or_exit as _load_config_or_exit
 from svarog_harness.cli._shared import resolve_autonomy as _resolve_autonomy
 from svarog_harness.cli.chat_display import format_tool_call
@@ -57,7 +59,6 @@ from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import (
     WorkspaceLayoutError,
     memory_dir,
-    skills_dirs,
     workspace_layout_violations,
 )
 from svarog_harness.config.schema import AutonomyMode, SecretsConfig, SvarogConfig
@@ -68,14 +69,11 @@ from svarog_harness.gitflow import (
     WorkspacePrep,
     separate_gitdir_for,
 )
-from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider
-from svarog_harness.memory import MemoryWriter, read_memory
-from svarog_harness.memory.curator import MemoryAuditReport, audit_memory
+from svarog_harness.llm.openai_compatible import ApiKeyError
+from svarog_harness.memory.curator import audit_memory
 from svarog_harness.memory.dream import build_dream_task
 from svarog_harness.memory.proposal_manager import (
     MemoryProposalManager,
-    MemoryProposalNotFoundError,
-    MemoryProposalStateError,
 )
 from svarog_harness.policy import PolicyEngine, PolicyRulesError
 from svarog_harness.policy.engine import PolicyAction
@@ -99,24 +97,10 @@ from svarog_harness.scheduler.system_jobs import DREAM_JOB_NAME, ensure_system_j
 from svarog_harness.scheduler.ticker import JobRunRequest, tick
 from svarog_harness.secrets import (
     FileSecretStore,
-    SecretStore,
     default_secret_store,
-    selected_values,
 )
-from svarog_harness.skills import scan_skills
-from svarog_harness.skills.curator import (
-    CurationReport,
-    CuratorStore,
-    consolidate_layer2,
-    prune_layer1,
-    rewrite_description,
-)
-from svarog_harness.skills.models import Skill
-from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.skills.proposal_manager import (
     SkillProposalManager,
-    SkillProposalNotFoundError,
-    SkillProposalStateError,
 )
 from svarog_harness.storage.locks import default_lock_backend
 from svarog_harness.storage.models import (
@@ -144,8 +128,7 @@ app = typer.Typer(
 app.add_typer(traces_commands.traces_app, name="traces")
 app.add_typer(traces_commands.sessions_app, name="sessions")
 app.add_typer(approvals_commands.approvals_app, name="approvals")
-skills_app = typer.Typer(help="Скиллы: список и проверка.", no_args_is_help=True)
-app.add_typer(skills_app, name="skills")
+app.add_typer(skills_commands.skills_app, name="skills")
 app.add_typer(policies_app, name="policies")
 # Thin CLI cloud-режима (ADR-0017 §3): svarog remote … / svarog login.
 app.add_typer(remote_module.remote_app, name="remote")
@@ -599,22 +582,6 @@ def init(
         f"\n[bold]agent-home готов:[/bold] {target}\n"
         f"[dim]модель {model} @ {base_url}{executor_note}; {next_step}[/dim]"
     )
-
-
-def _known_secret_values(cfg: SvarogConfig, store: SecretStore) -> frozenset[str]:
-    refs = list(cfg.secrets.inject)
-    refs.extend(
-        provider.api_key_ref
-        for provider in cfg.models.providers.values()
-        if provider.api_key_ref is not None
-    )
-    for server in cfg.mcp.servers.values():
-        refs.extend(server.env_refs)
-    if cfg.gateway.token_ref is not None:
-        refs.append(cfg.gateway.token_ref)
-    if cfg.telegram.token_ref is not None:
-        refs.append(cfg.telegram.token_ref)
-    return store.values() | selected_values(store, refs)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -1270,270 +1237,6 @@ def rewind(
     )
 
 
-@skills_app.command("list")
-def skills_list() -> None:
-    """Показать доступные скиллы и их карточки."""
-    cfg = _load_config_or_exit()
-    workspace = Path.cwd().resolve()
-    scan = scan_skills(skills_dirs(cfg, workspace))
-    if not scan.skills and not scan.errors:
-        console.print("скиллов не найдено (проверьте skills.paths в svarog.yaml)")
-        return
-    for skill in scan.skills:
-        console.print(skill.card())
-    for skill_error in scan.errors:
-        console.print(f"[yellow]пропущен ({skill_error.path.name}): {skill_error.reason}[/yellow]")
-
-
-@skills_app.command("check")
-def skills_check() -> None:
-    """Проверить валидность SKILL.md всех скиллов; exit code 1 при ошибках."""
-    cfg = _load_config_or_exit()
-    workspace = Path.cwd().resolve()
-    scan = scan_skills(skills_dirs(cfg, workspace))
-    for skill in scan.skills:
-        console.print(f"[green]ok[/green] {skill.name} (v{skill.metadata.version})")
-    for skill_error in scan.errors:
-        console.print(f"[red]ошибка[/red] {skill_error.path}: {skill_error.reason}")
-    if scan.errors:
-        raise typer.Exit(code=1)
-    console.print(f"проверено скиллов: {len(scan.skills)}, ошибок нет")
-
-
-proposals_app = typer.Typer(
-    help="Skill proposals (Flow B): review, merge, reject.", no_args_is_help=True
-)
-skills_app.add_typer(proposals_app, name="proposals")
-
-
-def _proposals_skills_dir(cfg: SvarogConfig) -> Path:
-    dirs = skills_dirs(cfg, Path.cwd().resolve())
-    if not dirs:
-        console.print("[red]skills.paths пуст в svarog.yaml[/red]")
-        raise typer.Exit(code=1)
-    return dirs[0]
-
-
-@proposals_app.command("list")
-def skills_proposals_list() -> None:
-    """Показать skill proposals, ожидающие review (Flow B, §18)."""
-    cfg = _load_config_or_exit()
-    skills_dir = _proposals_skills_dir(cfg)
-
-    async def action(db: AsyncSession) -> None:
-        proposals = await SkillProposalManager(db, skills_dir).list_pending()
-        if not proposals:
-            console.print("ожидающих skill proposals нет")
-            return
-        for proposal in proposals:
-            console.print(
-                f"[cyan]{proposal.id[:8]}[/cyan] {proposal.skill_name} "
-                f"({proposal.action}) → ветка {proposal.branch}"
-            )
-            console.print(
-                f"  [dim]review: svarog skills proposals show {proposal.id[:8]} → "
-                f"approve/reject {proposal.id[:8]}[/dim]"
-            )
-
-    asyncio.run(_with_db(cfg, action))
-
-
-@proposals_app.command("show")
-def skills_proposals_show(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-) -> None:
-    """Показать diff и метаданные skill proposal (фактические изменения, §12)."""
-    cfg = _load_config_or_exit()
-    skills_dir = _proposals_skills_dir(cfg)
-
-    async def action(db: AsyncSession) -> None:
-        try:
-            proposal = await SkillProposalManager(db, skills_dir).get(proposal_id)
-        except SkillProposalNotFoundError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
-        console.print(f"[bold]proposal {proposal.id[:8]}[/bold] | {proposal.status.value}")
-        console.print(f"  скилл: {proposal.skill_name} ({proposal.action})")
-        console.print(f"  ветка: {proposal.branch} → {proposal.base}")
-        if proposal.note:
-            console.print(f"  примечание: {proposal.note}")
-        for message in SkillProposalManager.validation_messages(proposal):
-            console.print(f"  [yellow]валидация: {message}[/yellow]")
-        console.print(proposal.diff or "(diff пуст)")
-
-    asyncio.run(_with_db(cfg, action))
-
-
-def _decide_proposal(proposal_id: str, *, approved: bool, reason: str | None) -> None:
-    cfg = _load_config_or_exit()
-    skills_dir = _proposals_skills_dir(cfg)
-
-    async def action(db: AsyncSession) -> tuple[SkillProposal, str | None]:
-        manager = SkillProposalManager(db, skills_dir)
-        proposal = await manager.get(proposal_id)
-        sha = await manager.decide(proposal, approved=approved, decided_by="cli", reason=reason)
-        return proposal, sha
-
-    try:
-        proposal, sha = asyncio.run(_with_db(cfg, action))
-    except SkillProposalNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    except (SkillProposalStateError, GitError) as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    if approved:
-        console.print(f"[green]proposal {proposal.id[:8]} влит[/green] в {proposal.base} ({sha})")
-    else:
-        console.print(f"[yellow]proposal {proposal.id[:8]} отклонён[/yellow]")
-
-
-@proposals_app.command("approve")
-def skills_proposals_approve(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
-) -> None:
-    """Одобрить и влить skill proposal в базовую ветку (§18)."""
-    _decide_proposal(proposal_id, approved=True, reason=reason)
-
-
-@proposals_app.command("reject")
-def skills_proposals_reject(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
-) -> None:
-    """Отклонить skill proposal и удалить его ветку."""
-    _decide_proposal(proposal_id, approved=False, reason=reason)
-
-
-@skills_app.command("curate")
-def skills_curate(
-    semantic: Annotated[
-        bool,
-        typer.Option("--semantic", help="Слой 2: LLM-консолидация на auxiliary-модели (opt-in)"),
-    ] = False,
-) -> None:
-    """Curator: слой 1 (lifecycle по usage) и опц. слой 2 (LLM-консолидация, §18.1)."""
-    cfg = _load_config_or_exit()
-    workspace = Path.cwd().resolve()
-    scan = scan_skills(skills_dirs(cfg, workspace))
-
-    async def action(db: AsyncSession) -> None:
-        transitions = await prune_layer1(db, scan.skills, cfg.curator)
-        if transitions:
-            for t in transitions:
-                console.print(
-                    f"[cyan]{t.skill_name}[/cyan]: {t.old.value} → {t.new.value} "
-                    f"[dim]({t.reason})[/dim]"
-                )
-        else:
-            console.print("curator слой 1: lifecycle-изменений нет")
-        if semantic or cfg.curator.semantic:
-            await _curate_semantic(cfg, workspace, scan.skills, db)
-
-    asyncio.run(_with_db(cfg, action))
-
-
-async def _curate_semantic(
-    cfg: SvarogConfig, workspace: Path, skills: list[Skill], db: AsyncSession
-) -> None:
-    """Слой 2: LLM-находки → отчёт в artifacts/ + description-proposals (§18.1)."""
-    try:
-        provider = auxiliary_provider(cfg.models, default_secret_store(cfg.secrets.path))
-    except ApiKeyError as exc:
-        console.print(f"[red]слой 2 недоступен: {exc}[/red]")
-        return
-    console.print("[dim]curator слой 2: анализ библиотеки auxiliary-моделью…[/dim]")
-    report = await consolidate_layer2(provider, skills)
-    path = _write_curation_report(workspace, report)
-    console.print(f"[dim]отчёт: {path}[/dim]")
-    if report.parse_error:
-        console.print(
-            f"[yellow]слой 2: LLM вернул неразбираемый ответ ({report.parse_error})[/yellow]"
-        )
-        return
-    if not report.findings:
-        console.print("curator слой 2: находок нет")
-        return
-    for finding in report.findings:
-        console.print(
-            f"[magenta]{finding.kind}[/magenta] {', '.join(finding.skills)}: {finding.detail}"
-        )
-    await _propose_description_improvements(cfg, workspace, skills, report, db)
-
-
-def _write_curation_report(workspace: Path, report: CurationReport) -> Path:
-    from datetime import UTC, datetime
-
-    artifacts = workspace / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    path = artifacts / f"skill-curation-{stamp}.md"
-    path.write_text(report.to_markdown(), encoding="utf-8")
-    return path
-
-
-async def _propose_description_improvements(
-    cfg: SvarogConfig,
-    workspace: Path,
-    skills: list[Skill],
-    report: CurationReport,
-    db: AsyncSession,
-) -> None:
-    """Содержательные правки — только через proposals (Flow B, §18.1)."""
-    by_name = {s.name: s for s in skills}
-    skills_dir = skills_dirs(cfg, workspace)[0] if cfg.skills.paths else None
-    if skills_dir is None:
-        return
-    manager = SkillProposalManager(db, skills_dir)
-    store = default_secret_store(cfg.secrets.path)
-    for finding in report.improvements():
-        for name in finding.skills:
-            skill = by_name.get(name)
-            # Curator предлагает правки только agent-created скиллов (§18.1).
-            if skill is None or skill.metadata.provenance != "agent":
-                continue
-            files = {"SKILL.md": rewrite_description(skill, finding.suggested_description or "")}
-            request = SkillProposalRequest(
-                skill_name=name,
-                action="update",
-                files=files,
-                note=f"curator: улучшить описание — {finding.detail}",
-            )
-            proposal = await manager.persist(request, known_values=_known_secret_values(cfg, store))
-            console.print(
-                f"[cyan]proposal[/cyan] {name}: обновить описание "
-                f"[dim]({proposal.status.value}, {proposal.id[:8]})[/dim]"
-            )
-
-
-def _set_pin(name: str, pinned: bool) -> None:
-    cfg = _load_config_or_exit()
-
-    async def action(db: AsyncSession) -> None:
-        await CuratorStore(db).set_pinned(name, pinned)
-
-    asyncio.run(_with_db(cfg, action))
-    verb = "закреплён" if pinned else "откреплён"
-    console.print(f"скилл '{name}' {verb} (pinned={str(pinned).lower()})")
-
-
-@skills_app.command("pin")
-def skills_pin(
-    name: Annotated[str, typer.Argument(help="Имя скилла")],
-) -> None:
-    """Закрепить скилл: вывести из-под автоматических lifecycle-переходов (§18.1)."""
-    _set_pin(name, True)
-
-
-@skills_app.command("unpin")
-def skills_unpin(
-    name: Annotated[str, typer.Argument(help="Имя скилла")],
-) -> None:
-    """Снять закрепление скилла."""
-    _set_pin(name, False)
-
-
 async def _dream_blocked(cfg: SvarogConfig, db: AsyncSession) -> str | None:
     """Причина не запускать Dream сейчас, или None.
 
@@ -1653,199 +1356,9 @@ def scheduler(
         console.print("планировщик остановлен")
 
 
-memory_app = typer.Typer(help="Память агента (Flow A).", no_args_is_help=True)
-app.add_typer(memory_app, name="memory")
-
-
-@memory_app.command("show")
-def memory_show() -> None:
-    """Показать память, как она попадёт в контекст."""
-    cfg = _load_config_or_exit()
-    mem_dir = memory_dir(cfg)
-    if mem_dir is None:
-        console.print("память не настроена (задайте memory.path в svarog.yaml)")
-        return
-    text = read_memory(mem_dir, limit_bytes=cfg.memory.context_limit_bytes)
-    console.print(text or "память пуста")
-
-
-@memory_app.command("flush")
-def memory_flush() -> None:
-    """Применить очередь заявок памяти single writer'ом (обычно вызывается после run)."""
-    cfg = _load_config_or_exit()
-    mem_dir = memory_dir(cfg)
-    if mem_dir is None or not mem_dir.is_dir():
-        console.print("память не настроена или каталог отсутствует")
-        raise typer.Exit(code=1)
-
-    store = default_secret_store(cfg.secrets.path)
-
-    async def action(db: AsyncSession) -> int:
-        writer = MemoryWriter(
-            db,
-            mem_dir,
-            lock=default_lock_backend(cfg.storage.db_path),
-            index_max_lines=cfg.memory.index_max_lines,
-        )
-        rows = await writer.drain(known_values=_known_secret_values(cfg, store))
-        for row in rows:
-            if row.error:
-                console.print(f"[yellow]отклонено: {row.error}[/yellow]")
-            elif row.commit_sha:
-                console.print(f"[green]{row.commit_sha}[/green] применено")
-        return len(rows)
-
-    count = asyncio.run(_with_db(cfg, action))
-    console.print(f"обработано заявок: {count}")
-
-
-def _write_memory_audit(workspace: Path, report: MemoryAuditReport) -> Path:
-    from datetime import UTC, datetime
-
-    artifacts = workspace / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    path = artifacts / f"memory-curation-{stamp}.md"
-    path.write_text(report.to_markdown(), encoding="utf-8")
-    return path
-
-
-@memory_app.command("curate")
-def memory_curate() -> None:
-    """Аудит здоровья памяти (ADR-0011): осиротевшие, битые, устаревшие, пустые страницы.
-
-    Детерминированный, только чтение — ничего не мутирует и не блокирует run'ы.
-    Находки печатаются и пишутся отчётом в artifacts/.
-    """
-    cfg = _load_config_or_exit()
-    mem_dir = memory_dir(cfg)
-    if mem_dir is None or not mem_dir.is_dir():
-        console.print("память не настроена или каталог отсутствует")
-        raise typer.Exit(code=1)
-    report = audit_memory(mem_dir, stale_after_days=cfg.curator.stale_after_days)
-    path = _write_memory_audit(Path.cwd().resolve(), report)
-    if not report.findings:
-        console.print("memory curator: находок нет — память в порядке")
-    else:
-        for finding in report.findings:
-            console.print(f"[magenta]{finding.kind}[/magenta] {finding.path}: {finding.detail}")
-    console.print(f"[dim]отчёт: {path}[/dim]")
-
-
-memory_proposals_app = typer.Typer(
-    help="Memory proposals (блок C): ревью правок памяти, предложенных Dream.",
-    no_args_is_help=True,
-)
-memory_app.add_typer(memory_proposals_app, name="proposals")
-
-
-def _memory_dir_or_exit(cfg: SvarogConfig) -> Path:
-    mem_dir = memory_dir(cfg)
-    if mem_dir is None or not mem_dir.is_dir():
-        console.print("память не настроена или каталог отсутствует")
-        raise typer.Exit(code=1)
-    return mem_dir
-
-
-@memory_proposals_app.command("list")
-def memory_proposals_list() -> None:
-    """Показать предложения правок памяти, ожидающие ревью."""
-    cfg = _load_config_or_exit()
-    mem_dir = _memory_dir_or_exit(cfg)
-
-    async def action(db: AsyncSession) -> None:
-        rows = await MemoryProposalManager(db, mem_dir).list_pending()
-        if not rows:
-            console.print("ожидающих memory proposals нет")
-            return
-        for row in rows:
-            console.print(
-                f"[cyan]{row.id[:8]}[/cyan] {row.title} "
-                f"({len(row.changes)} правок, {row.origin.value})"
-            )
-        console.print("[dim]review: svarog memory proposals show <id> → approve/reject <id>[/dim]")
-
-    asyncio.run(_with_db(cfg, action))
-
-
-@memory_proposals_app.command("show")
-def memory_proposals_show(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-) -> None:
-    """Показать замысел, обоснование и предпросмотр каждой правки."""
-    cfg = _load_config_or_exit()
-    mem_dir = _memory_dir_or_exit(cfg)
-
-    async def action(db: AsyncSession) -> None:
-        manager = MemoryProposalManager(db, mem_dir)
-        try:
-            row = await manager.get(proposal_id)
-        except MemoryProposalNotFoundError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
-        console.print(f"[bold]{row.title}[/bold] | {row.status.value} | {row.id[:8]}")
-        console.print(f"  обоснование: {row.rationale}")
-        for message in MemoryProposalManager.validation_messages(row):
-            console.print(f"  [yellow]{message}[/yellow]")
-        if await manager.head_moved(row):
-            console.print(
-                "[yellow]память изменилась с момента предложения — "
-                "предпросмотр ниже посчитан на текущем состоянии[/yellow]"
-            )
-        for path, preview in manager.preview(row):
-            console.print(f"\n[bold]{path}[/bold]")
-            console.print(preview)
-
-    asyncio.run(_with_db(cfg, action))
-
-
-def _decide_memory_proposal(proposal_id: str, *, approved: bool, reason: str | None) -> None:
-    cfg = _load_config_or_exit()
-    mem_dir = _memory_dir_or_exit(cfg)
-
-    async def action(db: AsyncSession) -> tuple[str, int]:
-        manager = MemoryProposalManager(db, mem_dir)
-        row = await manager.get(proposal_id)
-        ids = await manager.decide(row, approved=approved, decided_by="cli", reason=reason)
-        return row.id, len(ids)
-
-    try:
-        row_id, count = asyncio.run(_with_db(cfg, action))
-    except MemoryProposalNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    except MemoryProposalStateError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from None
-    if approved:
-        console.print(
-            f"[green]proposal {row_id[:8]} одобрен[/green]: {count} заявок в очереди; "
-            f"применить сейчас — svarog memory flush"
-        )
-    else:
-        console.print(f"[yellow]proposal {row_id[:8]} отклонён[/yellow]")
-
-
-@memory_proposals_app.command("approve")
-def memory_proposals_approve(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Комментарий")] = None,
-) -> None:
-    """Одобрить предложение: заявки уходят в очередь единственного писателя."""
-    _decide_memory_proposal(proposal_id, approved=True, reason=reason)
-
-
-@memory_proposals_app.command("reject")
-def memory_proposals_reject(
-    proposal_id: Annotated[str, typer.Argument(help="id proposal'а или его префикс")],
-    reason: Annotated[str | None, typer.Option("--reason", help="Причина отказа")] = None,
-) -> None:
-    """Отклонить предложение. Память не меняется."""
-    _decide_memory_proposal(proposal_id, approved=False, reason=reason)
-
-
 # Регистрируются здесь, а не в шапке: порядок add_typer задаёт порядок групп
 # в `svarog --help`, и он совпадает с тем, что был до выноса в модули.
+app.add_typer(memory_commands.memory_app, name="memory")
 app.add_typer(tenant_commands.tenant_app, name="tenant")
 app.add_typer(mcp_commands.mcp_app, name="mcp")
 app.add_typer(secrets_commands.secrets_app, name="secrets")
@@ -1879,7 +1392,7 @@ def push(
                 f"push в '{target}' требует approval ({decision.reason}); "
                 f"protected ветки нельзя пушить командой push напрямую"
             )
-        findings = await flow.push_precheck(target, known_values=_known_secret_values(cfg, store))
+        findings = await flow.push_precheck(target, known_values=known_secret_values(cfg, store))
         if findings:
             raise GitError(
                 f"secret scan перед push нашёл {len(findings)} секрет(ов) — push отменён"
