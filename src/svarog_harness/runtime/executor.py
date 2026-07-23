@@ -170,10 +170,13 @@ class AgentAdapter(Protocol):
         сюда монтируется persistent agent-state volume (ADR-0016 §5)."""
         ...
 
-    def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
+    def context_files(
+        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+    ) -> dict[str, str]:
         """Файлы контекста агента (ADR-0016 §4): относительный путь внутри
         state_dir → содержимое (CLAUDE.md / AGENTS.md); пусто — контекст
-        не передаётся."""
+        не передаётся. self_docs_path, если задан, — путь смонтированной
+        документации Svarog для указателя в контексте."""
         ...
 
     def provider_files(self, model: str | None) -> dict[str, str]:

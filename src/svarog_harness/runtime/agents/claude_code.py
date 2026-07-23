@@ -26,6 +26,7 @@ from svarog_harness.runtime.executor import (
     AgentLaunch,
     ask_user_guide,
 )
+from svarog_harness.runtime.self_docs import self_docs_hint
 
 # HOME в sandbox-контейнере задан явно (docker.py: -e HOME=/tmp/home).
 _STATE_DIR = PurePosixPath("/tmp/home/.claude")
@@ -99,7 +100,9 @@ class ClaudeCodeAdapter:
     def state_dir(self) -> PurePosixPath:
         return _STATE_DIR
 
-    def context_files(self, memory: str, skill_cards: str) -> dict[str, str]:
+    def context_files(
+        self, memory: str, skill_cards: str, self_docs_path: str | None = None
+    ) -> dict[str, str]:
         """~/.claude/CLAUDE.md — глобальная память агента: контекст Svarog
         не попадает в workspace и не коммитится git-flow (ADR-0016 §4)."""
         sections: list[str] = []
@@ -117,6 +120,8 @@ class ClaudeCodeAdapter:
                 "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
                 + skill_cards
             )
+        if self_docs_path:
+            sections.append(self_docs_hint(self_docs_path))
         if not sections:
             return {}
         return {"CLAUDE.md": "\n\n".join(sections) + "\n"}
