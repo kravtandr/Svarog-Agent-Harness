@@ -750,6 +750,12 @@ class TaskRunner:
             await environment.start()
             try:
                 proposal_sink: list[SkillProposalRequest] = []
+                # schedule.create — неотключаемый critical-набор (ADR-0010/0019):
+                # на resume одобренный critical переигрывается и попадает в sink,
+                # а drain_schedule после resume материализует его в cron_jobs.
+                # Зеркало run_once (см. строки 611/661/672) — иначе approval+resume
+                # даёт completed без джобы (баг S24).
+                schedule_sink: list[ScheduleRequest] = []
                 excluded = frozenset(await CuratorStore(db).archived_names())
 
                 async def spawn(args: SpawnChildRunArgs) -> str:
@@ -769,6 +775,7 @@ class TaskRunner:
                     AutonomyMode(run.autonomy),
                     hooks,
                     proposal_sink,
+                    schedule_sink,
                     excluded_skills=excluded,
                     mcp_tools=build_mcp_tools(backends),
                     child_spawn=spawn,
@@ -776,6 +783,7 @@ class TaskRunner:
                 outcome = await loop.resume(run, state)
                 await runner.drain_memory(db, hooks)
                 await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
+                await runner.drain_schedule(db, schedule_sink, workspace, hooks)
                 failed_checks = await runner.verify(environment, recorder, outcome, hooks)
                 if failed_checks:
                     error = f"verifier: {failed_checks} проверок не прошли"
