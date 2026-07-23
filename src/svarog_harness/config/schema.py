@@ -365,6 +365,10 @@ class ExternalExecutorConfig(StrictModel):
     # (chat-completions — Responses API у произвольных upstream'ов ломается на
     # resume). None — агент выбирает модель сам. claude-code/codex игнорируют.
     model: str | None = None
+    # Монтировать документацию Svarog (README, AGENTS.md, ADR) в sandbox
+    # read-only (/opt/svarog-docs) и дать агенту указатель в контексте, чтобы
+    # он отвечал на вопросы о самом Svarog по доке. False — не стейджить.
+    self_docs: bool = True
     # Образ relay-sidecar'а (internal-сеть → bridge, §2): нужен python3.
     relay_image: str = "python:3.12-slim"
     # Цены за миллион токенов — для cost-бюджета на прокси; 0 = не считаем.
