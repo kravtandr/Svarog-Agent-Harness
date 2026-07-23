@@ -26,7 +26,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 
 
 class ScriptedProvider(ModelProvider):
@@ -86,7 +86,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
     def fake_default_provider(models_cfg: ModelsConfig, store: object = None) -> ModelProvider:
         return provider
 
-    monkeypatch.setattr(orchestrator, "default_provider", fake_default_provider)
+    monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)
 
 
 def _final(text: str = "готово") -> CompletionResult:

@@ -17,7 +17,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 
 runner = CliRunner()
 
@@ -72,7 +72,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
 
     # Оркестрация прогона (и с ней default_provider) вынесена в runtime.orchestrator;
     # CLI лишь делегирует TaskRunner'у (см. рефакторинг M5).
-    monkeypatch.setattr(orchestrator, "default_provider", fake_default_provider)
+    monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)
 
 
 def test_run_completes_and_prints_answer(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

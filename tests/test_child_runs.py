@@ -18,7 +18,7 @@ from svarog_harness.llm.provider import (
     ToolDefinition,
     Usage,
 )
-from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime import run_assembly
 from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
 from svarog_harness.runtime.executor import AgentLaunch
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
@@ -50,7 +50,7 @@ def _patch_provider(
     monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResult]
 ) -> ScriptedProvider:
     provider = ScriptedProvider(turns)
-    monkeypatch.setattr(orchestrator, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
     return provider
 
 
@@ -338,7 +338,7 @@ async def test_delegate_child_to_external_agent(
         ],
     )
     monkeypatch.setattr(
-        orchestrator, "adapter_for", lambda cfg: _ScriptAgent(_external_agent_script(tmp_path))
+        run_assembly, "adapter_for", lambda cfg: _ScriptAgent(_external_agent_script(tmp_path))
     )
     # Fail-closed гейт docker-only тестируется отдельно; здесь исполняем локально.
     monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
