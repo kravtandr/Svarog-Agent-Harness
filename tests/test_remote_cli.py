@@ -109,11 +109,11 @@ async def test_remote_reads_and_stream(
     run_id = await service.create_run("задача", None)
     await _drain(service, run_id)
 
-    assert remote.whoami()["tenant_id"] == "local"
-    assert any(r["run_id"] == run_id for r in remote.list_runs())
-    assert remote.get_run(run_id)["state"] == "completed"
+    assert remote.whoami().tenant_id == "local"
+    assert any(r.run_id == run_id for r in remote.list_runs())
+    assert remote.get_run(run_id).state == "completed"
     diff = remote.diff(run_id)
-    assert diff["committed"] == "" and diff["uncommitted"] == ""
+    assert diff.committed == "" and diff.uncommitted == ""
 
     events = list(remote.stream_events(run_id))
     assert events[-1]["type"] == "run_finished"
@@ -144,7 +144,7 @@ async def test_remote_approval_decision(
     await _drain(service, run_id)
 
     pending = remote.approvals()
-    assert len(pending) == 1 and pending[0]["run_id"] == run_id
+    assert len(pending) == 1 and pending[0].run_id == run_id
     # decide через сервис (resume — фоновая задача, см. заголовок модуля);
     # remote.decide проверяем на 404-контракт.
     with pytest.raises(RemoteError, match="404"):
@@ -161,8 +161,10 @@ def test_remote_workspace_surface(remote: RemoteClient, service: GatewayService)
     (ws / "sub" / "a.txt").write_text("данные", encoding="utf-8")
 
     listed = remote.workspaces()
-    assert [w["name"] for w in listed] == ["proj"]
+    assert [w.name for w in listed] == ["proj"]
 
+    # workspace_files остаётся нетипизированным: роут отдаёт либо JSON-листинг,
+    # либо байты файла (response_model=None в gateway/api.py).
     listing = remote.workspace_files("proj", ".")
     assert [e["name"] for e in listing["entries"]] == ["sub"]
     content = remote.workspace_files("proj", "sub/a.txt")
