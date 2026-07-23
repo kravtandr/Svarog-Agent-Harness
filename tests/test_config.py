@@ -97,3 +97,14 @@ def test_deep_merge_replaces_lists_and_scalars() -> None:
     base = {"a": {"x": 1, "y": [1, 2]}, "b": 1}
     override = {"a": {"y": [3]}, "c": 2}
     assert deep_merge(base, override) == {"a": {"x": 1, "y": [3]}, "b": 1, "c": 2}
+
+
+def test_developer_svarog_env_does_not_leak_into_tests() -> None:
+    """Окружение разработчика не должно подменять tmp-пути теста.
+
+    Autouse-фикстура в conftest снимает SVAROG_*; без неё `load_config` в
+    тесте возвращал реальные agent-home, БД и каталог скиллов.
+    """
+    import os
+
+    assert [name for name in os.environ if name.startswith("SVAROG_")] == []
