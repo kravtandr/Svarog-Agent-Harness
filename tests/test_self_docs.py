@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from svarog_harness.config.schema import ExternalExecutorConfig, RuntimeConfig
+from svarog_harness.runtime import agent_infra as agent_infra_mod
 from svarog_harness.runtime import self_docs
+from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.agents.claude_code import ClaudeCodeAdapter
 from svarog_harness.runtime.agents.codex import CodexAdapter
 from svarog_harness.runtime.agents.opencode import OpencodeAdapter
@@ -16,6 +19,7 @@ from svarog_harness.runtime.self_docs import (
     self_docs_hint,
     stage_self_docs,
 )
+from svarog_harness.secrets import EnvSecretStore
 
 
 def _fake_root(tmp_path: Path, *, with_agents: bool = True) -> Path:
@@ -95,3 +99,57 @@ def test_context_files_omit_hint_when_none(adapter_cls, ctx_file) -> None:
     files = adapter_cls().context_files("mem", "")
     joined = files.get(ctx_file, "")
     assert "svarog-docs" not in joined
+
+
+# --- монтирование доков в prepare_launch -------------------------------------
+
+
+def _codex_infra(tmp_path: Path, *, self_docs_on: bool = True) -> ExternalAgentInfra:
+    # codex шлёт openai-трафик — валидатор требует явный base_url провайдера.
+    cfg = ExternalExecutorConfig(
+        image="img:1",
+        adapter="codex",
+        base_url="https://openrouter.ai/api",
+        self_docs=self_docs_on,
+    )
+    return ExternalAgentInfra(
+        cfg,
+        RuntimeConfig(),
+        CodexAdapter(),
+        EnvSecretStore(),
+        state_root=tmp_path / ".svarog",
+        docker_mode=True,
+    )
+
+
+def test_config_self_docs_defaults_on() -> None:
+    assert ExternalExecutorConfig(image="img:1").self_docs is True
+
+
+def test_prepare_launch_mounts_self_docs(tmp_path: Path) -> None:
+    infra = _codex_infra(tmp_path)
+    infra.prepare_launch("mem", "", cooperative=False)
+    mounts = {container: (host, ro) for host, container, ro in infra.extra_mounts}
+    assert "/opt/svarog-docs" in mounts
+    host, ro = mounts["/opt/svarog-docs"]
+    assert ro is True
+    assert (host / "INDEX.md").is_file()
+    agents_md = infra.state_dir / "AGENTS.md"
+    assert "/opt/svarog-docs/INDEX.md" in agents_md.read_text(encoding="utf-8")
+
+
+def test_prepare_launch_self_docs_disabled(tmp_path: Path) -> None:
+    infra = _codex_infra(tmp_path, self_docs_on=False)
+    infra.prepare_launch("mem", "", cooperative=False)
+    assert "/opt/svarog-docs" not in {c for _, c, _ in infra.extra_mounts}
+    assert "svarog-docs" not in (infra.state_dir / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_prepare_launch_degrades_without_docs_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_infra_mod, "stage_self_docs", lambda dest: None)
+    infra = _codex_infra(tmp_path)
+    infra.prepare_launch("mem", "", cooperative=False)  # не должно падать
+    assert "/opt/svarog-docs" not in {c for _, c, _ in infra.extra_mounts}
+    assert "svarog-docs" not in (infra.state_dir / "AGENTS.md").read_text(encoding="utf-8")
