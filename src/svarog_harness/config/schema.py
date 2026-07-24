@@ -270,16 +270,32 @@ class SchedulerConfig(StrictModel):
     interval_sec: int = Field(default=30, gt=0)
 
 
+class AutocaptureConfig(StrictModel):
+    """Автозахват фактов о пользователе в профиль (#1, Flow A, прямая запись).
+
+    Aux-LLM по границе сессии аддитивно дописывает долговечные факты в
+    user/profile.md. Включён по умолчанию (гиперперсонализация — заявленная
+    фича, ADR-0021); стоимость гасится дешёвой aux-моделью, гейтом и дедупом.
+    """
+
+    enabled: bool = True
+    # Потолок правок за один проход извлечения.
+    max_facts: int = Field(default=5, gt=0)
+    # Догоняющий порог: extractor запускается mid-session каждые N новых ходов
+    # (иначе — только при закрытии сессии).
+    every_n_turns: int = Field(default=6, gt=0)
+
+
 class DreamConfig(StrictModel):
     """Dream — семантический слой памяти (блок C, ADR-0020).
 
-    Выключен по умолчанию: механизм опинионейтед и тратит токены, поэтому
-    opt-in — как слой 2 skill-curator'а (ADR-0009). Конфиг служит гейтом при
-    заводке системной джобы; после заводки джоба управляется через
+    Включён по умолчанию (ADR-0021 отменяет дефолт ADR-0020): гиперперсонализация
+    — заявленная фича, память-самообслуживание работает из коробки. Конфиг служит
+    гейтом при заводке системной джобы; после заводки джоба управляется через
     `svarog cron enable|disable`, и конфиг её больше не переключает.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     interval_sec: int = Field(default=86_400, gt=0)
     # Потолок непросмотренных предложений: без него ежедневная джоба при
     # неактивном человеке копит мусор без границы и платно.
@@ -480,6 +496,7 @@ class SvarogConfig(BaseSettings):
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    autocapture: AutocaptureConfig = Field(default_factory=AutocaptureConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     tenancy: TenancyConfig = Field(default_factory=TenancyConfig)

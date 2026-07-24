@@ -110,11 +110,28 @@ def test_developer_svarog_env_does_not_leak_into_tests() -> None:
     assert [name for name in os.environ if name.startswith("SVAROG_")] == []
 
 
-def test_dream_is_opt_in_by_default() -> None:
-    """Механизм опинионейтед и стоит денег — как curator.semantic (ADR-0009)."""
+def test_dream_enabled_by_default() -> None:
+    """ADR-0021 отменяет дефолт ADR-0020: гиперперсонализация из коробки."""
     from svarog_harness.config.schema import DreamConfig
 
-    assert DreamConfig().enabled is False
+    assert DreamConfig().enabled is True
+
+
+def test_autocapture_and_dream_defaults_enabled() -> None:
+    from svarog_harness.config.schema import SvarogConfig
+
+    cfg = SvarogConfig.model_validate(
+        {
+            "models": {
+                "default": "m",
+                "providers": {"m": {"base_url": "http://x", "model": "m"}},
+            }
+        }
+    )
+    assert cfg.autocapture.enabled is True
+    assert cfg.autocapture.max_facts == 5
+    assert cfg.autocapture.every_n_turns == 6
+    assert cfg.dream.enabled is True
 
 
 def test_dream_defaults() -> None:
