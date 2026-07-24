@@ -25,6 +25,7 @@ from svarog_harness.gitflow import GitRepo, WorkspaceFlow, WorkspacePrep
 from svarog_harness.llm.openai_compatible import default_provider
 from svarog_harness.mcp import MCPTool
 from svarog_harness.memory import MemoryProposalRequest, read_memory
+from svarog_harness.memory.profile import load_profile, render_persona_directive
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.agents import adapter_for
@@ -258,6 +259,7 @@ class RunAssembly:
             if mem_dir is not None
             else ""
         )
+        persona = render_persona_directive(load_profile(mem_dir)) if mem_dir is not None else ""
         skill_load_sink: list[tuple[str, str | None]] = []
         memory_sink: list[dict[str, object]] = []
         plan_update_sink: list[dict[str, object]] = []
@@ -286,6 +288,7 @@ class RunAssembly:
             config_hash=config_digest(cfg, workspace),  # снимок security-конфига (§0.4)
             skill_cards=skill_cards(active_skills),
             memory=memory_text,
+            persona=persona,
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
             plan_update_sink=plan_update_sink,

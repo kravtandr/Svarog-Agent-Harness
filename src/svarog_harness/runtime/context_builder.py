@@ -54,7 +54,12 @@ remember и read_memory указываются относительно него
 - index.md — каталог всей памяти. АВТОГЕН, руками не трогай. В контекст \
 подаётся целиком: по нему находи нужную страницу и подгружай её read_memory;
 - log.md — хронология изменений. АВТОГЕН, руками не трогай;
-- user/profile.md — факты о пользователе: предпочтения, расписание, работа;
+- user/profile.md — профиль пользователя типизированными H2-секциями. \
+Поведенческие (влияют на то, как ты отвечаешь): «## Тон», «## Язык», \
+«## Предпочтения», «## Не трогать». Фактические (справка): «## Роль», \
+«## Расписание», «## Прочее». Секции опциональны, лишние допустимы. \
+Долговечные факты и предпочтения о пользователе сохраняй сюда через \
+remember replace_section по нужной секции (нет секции — append «## Имя\\nтекст»);
 - projects/<slug>/overview.md — по одной папке на проект; overview.md \
 обязателен и начинается с YAML-frontmatter (см. ниже). Доп. заметки — \
 notes.md, decisions.md в той же папке;
@@ -118,8 +123,10 @@ edit_file: delete удалит страницу целиком, а edit_file п�
 """
 
 
-def _system_prompt(workspace: Path, *, skill_cards: str, memory: str) -> str:
+def _system_prompt(workspace: Path, *, skill_cards: str, memory: str, persona: str = "") -> str:
     system = _SYSTEM_PROMPT.format(workspace=workspace)
+    if persona:
+        system = f"{system}\n{persona}\n"
     if memory:
         # Память — доверенный контекст агента (в отличие от файлов workspace).
         system = (
@@ -136,13 +143,16 @@ def build_initial_messages(
     *,
     skill_cards: str = "",
     memory: str = "",
+    persona: str = "",
     history: list[ChatMessage] | None = None,
 ) -> list[ChatMessage]:
     # history — предыдущий диалог сессии (chat, §6.3 recent conversation).
     return [
         ChatMessage(
             role="system",
-            content=_system_prompt(workspace, skill_cards=skill_cards, memory=memory),
+            content=_system_prompt(
+                workspace, skill_cards=skill_cards, memory=memory, persona=persona
+            ),
         ),
         *(history or []),
         ChatMessage(role="user", content=task),
@@ -156,13 +166,16 @@ def build_refuel_messages(
     *,
     skill_cards: str = "",
     memory: str = "",
+    persona: str = "",
 ) -> list[ChatMessage]:
     """Пересобрать контекст после refuel из task_state.md (§6.10) — раздутая
     история отбрасывается, состояние восстанавливается из сохранённого summary."""
     return [
         ChatMessage(
             role="system",
-            content=_system_prompt(workspace, skill_cards=skill_cards, memory=memory),
+            content=_system_prompt(
+                workspace, skill_cards=skill_cards, memory=memory, persona=persona
+            ),
         ),
         ChatMessage(
             role="user",

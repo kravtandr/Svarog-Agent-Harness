@@ -186,6 +186,7 @@ class AgentLoop:
         config_hash: str | None = None,
         skill_cards: str = "",
         memory: str = "",
+        persona: str = "",
         skill_load_sink: list[tuple[str, str | None]] | None = None,
         memory_sink: list[dict[str, object]] | None = None,
         workspace_flow: WorkspaceFlow | None = None,
@@ -208,6 +209,7 @@ class AgentLoop:
         self._config_hash = config_hash
         self._skill_cards = skill_cards
         self._memory = memory
+        self._persona = persona
         self._workspace_flow = workspace_flow
         # Значения секретов для redaction в tool outputs и trace (ADR-0006, §12).
         self._secret_values = secret_values
@@ -270,6 +272,7 @@ class AgentLoop:
             self._workspace,
             skill_cards=self._skill_cards,
             memory=self._memory,
+            persona=self._persona,
             history=history,
         )
         for message in messages:
@@ -721,6 +724,7 @@ class AgentLoop:
             task_state,
             skill_cards=self._skill_cards,
             memory=self._memory,
+            persona=self._persona,
         )
         state.refuel_pending = False
         state.iterations_since_refuel = 0
