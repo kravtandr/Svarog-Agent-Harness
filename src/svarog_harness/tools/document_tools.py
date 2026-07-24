@@ -6,13 +6,29 @@
 Оба читают ТОЛЬКО из workspace: побег пути — fail-closed ToolError.
 """
 
+import asyncio
 import base64
+import importlib.util
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult
+from svarog_harness.tools.base import RiskLevel, Tool, ToolError, ToolResult, truncate_text
 
+# Потолок одного ответа — как у read_svarog_docs (§6.3 backpressure).
+_OUTPUT_LIMIT = 40_000
+# Форматы, которые markitdown конвертирует в Markdown надёжно.
+_DOCUMENT_SUFFIXES = (
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".pptx",
+    ".html",
+    ".htm",
+    ".epub",
+    ".csv",
+)
 # Лимит Anthropic API на изображение — ~5 MB; больший файл модель не примет.
 _IMAGE_LIMIT_BYTES = 5 * 1024 * 1024
 _IMAGE_MIME = {
@@ -22,6 +38,11 @@ _IMAGE_MIME = {
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
+
+
+def document_tools_available() -> bool:
+    """Установлена ли опциональная группа `docs` (markitdown)."""
+    return importlib.util.find_spec("markitdown") is not None
 
 
 def resolve_workspace_path(workspace: Path, rel: str) -> Path:
@@ -35,6 +56,65 @@ def resolve_workspace_path(workspace: Path, rel: str) -> Path:
     if not candidate.is_file():
         raise ToolError(f"файла '{rel}' нет в workspace")
     return candidate
+
+
+class ReadDocumentArgs(BaseModel):
+    path: str = Field(
+        description="Путь к документу относительно workspace: PDF/DOCX/XLSX/PPTX/HTML/EPUB/CSV"
+    )
+    offset: int = Field(default=0, ge=0, description="С какой строки Markdown-результата начать")
+    limit: int | None = Field(
+        default=None, ge=1, description="Сколько строк вернуть; пусто — до конца"
+    )
+
+
+class ReadDocumentTool(Tool[ReadDocumentArgs]):
+    name = "read_document"
+    action_type = "file.read"
+    description = (
+        "Прочитать документ из workspace как Markdown: PDF, DOCX, XLSX, PPTX, "
+        "HTML, EPUB, CSV. Для длинных документов листай offset/limit. "
+        "Сканы без текстового слоя конвертер не прочтёт — используй tesseract "
+        "или pdftoppm + read_image"
+    )
+    risk_level = RiskLevel.LOW
+    args_model = ReadDocumentArgs
+    # Крупный PDF конвертируется дольше дефолтных 60с.
+    timeout_sec = 120.0
+
+    def __init__(self, workspace_dir: Path) -> None:
+        self._workspace = workspace_dir
+
+    def is_read_only(self, args: ReadDocumentArgs) -> bool:
+        return True
+
+    async def execute(self, args: ReadDocumentArgs) -> ToolResult:
+        path = resolve_workspace_path(self._workspace, args.path)
+        if path.suffix.lower() not in _DOCUMENT_SUFFIXES:
+            supported = ", ".join(_DOCUMENT_SUFFIXES)
+            return ToolResult.failure(
+                f"формат '{path.suffix}' не поддержан ({supported}); "
+                "другие форматы конвертируй в sandbox через pandoc/pdftotext"
+            )
+        from markitdown import MarkItDown
+
+        def _convert() -> str:
+            return str(MarkItDown(enable_plugins=False).convert(str(path)).text_content)
+
+        try:
+            text = await asyncio.to_thread(_convert)
+        except Exception as exc:  # парсеры кидают разнотипное; мост не падает
+            return ToolResult.failure(f"не удалось сконвертировать '{args.path}': {exc}")
+        lines = text.splitlines()
+        window = lines[args.offset :]
+        if args.limit is not None:
+            window = window[: args.limit]
+        header = (
+            f"# {args.path} (строки {args.offset}–{args.offset + len(window)} из {len(lines)})"
+        )
+        return ToolResult.success(
+            truncate_text(header + "\n\n" + "\n".join(window), _OUTPUT_LIMIT)
+        )
 
 
 class ReadImageArgs(BaseModel):

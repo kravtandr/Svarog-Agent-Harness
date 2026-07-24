@@ -46,6 +46,11 @@ server = [
 mcp = [
     "mcp>=1.2",
 ]
+# Конвертация документов для MCP-tool read_document (spec 2026-07-24).
+# Ставится как `svarog-harness[docs]`; без неё read_document отсутствует.
+docs = [
+    "markitdown[pdf,docx,xlsx,xls,pptx,epub]>=0.1.2",
+]
 
 [project.urls]
 Repository = "https://github.com/kravtandr/Svarog-Agent-Harness"
@@ -64,6 +69,7 @@ dev = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "mcp>=1.2",
+    "markitdown[pdf,docx,xlsx,xls,pptx,epub]>=0.1.2",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -111,6 +117,11 @@ exclude = ["src/svarog_harness/storage/migrations/"]
 [[tool.mypy.overrides]]
 module = "svarog_harness.storage.migrations.*"
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# У markitdown нет type stubs.
+module = "markitdown.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
