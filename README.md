@@ -223,9 +223,11 @@ Telegram-бот (§10.2) — тот же `GatewayService` поверх Bot API: 
 
 MCP-серверы (`svarog-harness[mcp]`, §9) подключаются секцией `mcp.servers` в `svarog.yaml`: их инструменты проходят discovery и регистрируются как обычные tools, но по умолчанию получают `risk: high` и требуют approval (ADR-0010), пока администратор не ослабит их профилем `notify`. Токены серверов — секреты (`env_refs` → SecretStore).
 
+Документы (`svarog-harness[docs]`) — MCP-tool `read_document` на мосте: внешний агент читает PDF/DOCX/XLSX/PPTX/HTML/EPUB/CSV из workspace как Markdown (конвертация markitdown на хосте). Без группы `docs` инструмент молча отсутствует, `svarog doctor` подскажет установку.
+
 ### Внешний агент как data-plane (ADR-0016)
 
-Svarog может выполнять run не своим нативным циклом, а внешним кодинг-агентом (Claude Code / Codex / OpenCode) внутри собственного sandbox — оставаясь control-plane: прокси LLM с бюджетами, память/скиллы/approvals через MCP-мост, policy-хуки. Соберите образ агента (CLI не пиннится — всегда свежий, см. [`docker/agent-claude/`](docker/agent-claude/), [`docker/agent-opencode/`](docker/agent-opencode/)) и включите `executor: external`:
+Svarog может выполнять run не своим нативным циклом, а внешним кодинг-агентом (Claude Code / Codex / OpenCode) внутри собственного sandbox — оставаясь control-plane: прокси LLM с бюджетами, память/скиллы/approvals через MCP-мост, policy-хуки. Образы включают `pandoc`, `poppler-utils` (pdftotext/pdftoppm) и `tesseract` (rus/eng): агент конвертирует документы и OCR'ит сканы через bash; изображения модель видит через нативный `Read` (claude) или MCP-tool `read_image` моста (все агенты с MCP). Соберите образ агента (CLI не пиннится — всегда свежий, см. [`docker/agent-claude/`](docker/agent-claude/), [`docker/agent-opencode/`](docker/agent-opencode/)) и включите `executor: external`:
 
 ```bash
 docker build -t svarog/agent-claude:latest docker/agent-claude

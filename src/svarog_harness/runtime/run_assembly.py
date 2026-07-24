@@ -367,6 +367,7 @@ class RunAssembly:
             db_action=self.with_db,
             policy=policy,
             memory_dir=memory_dir(cfg),
+            workspace_dir=workspace,
             skills=scan_skills(skills_dirs(cfg, workspace)).skills,
             proposal_sink=proposal_sink,
             secret_values=self.known_secret_values(),

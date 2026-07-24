@@ -43,6 +43,11 @@ from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.storage.models import Approval, ApprovalStatus, Run, utcnow
 from svarog_harness.tools.base import RiskLevel, Tool
 from svarog_harness.tools.docs_tools import ReadSvarogDocsTool
+from svarog_harness.tools.document_tools import (
+    ReadDocumentTool,
+    ReadImageTool,
+    document_tools_available,
+)
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import question_options
@@ -92,6 +97,7 @@ class BridgeControl:
         db_action: DbAction,
         policy: PolicyEngine,
         memory_dir: Path | None,
+        workspace_dir: Path | None = None,
         skills: list[Skill],
         proposal_sink: list[SkillProposalRequest],
         secret_values: frozenset[str] = frozenset(),
@@ -104,6 +110,7 @@ class BridgeControl:
         self._db_action = db_action
         self._policy = policy
         self._memory_dir = memory_dir
+        self._workspace_dir = workspace_dir
         self._skills = skills
         self._proposal_sink = proposal_sink
         self._self_docs = self_docs
@@ -150,6 +157,13 @@ class BridgeControl:
         # а не по претрейну. Недоступный docs-root — фича молча выключается.
         if self._self_docs and resolve_docs_root() is not None:
             tools["read_svarog_docs"] = ReadSvarogDocsTool()
+        # Документы/изображения workspace (spec 2026-07-24): read_image без
+        # зависимостей; read_document — только при установленном markitdown
+        # (группа `docs`), отсутствие — фича молча выключена, doctor подскажет.
+        if self._workspace_dir is not None:
+            tools["read_image"] = ReadImageTool(self._workspace_dir)
+            if document_tools_available():
+                tools["read_document"] = ReadDocumentTool(self._workspace_dir)
         return tools
 
     def _on_skill_load(self, name: str, version: str | None) -> None:
@@ -192,18 +206,15 @@ class BridgeControl:
                 name = str(params.get("name", ""))
                 arguments = params.get("arguments")
                 arguments = arguments if isinstance(arguments, dict) else {}
-                text, is_error = await self._call_tool(name, arguments)
-                return _rpc_result(
-                    msg_id,
-                    {
-                        "content": [{"type": "text", "text": text}],
-                        "isError": is_error,
-                    },
-                )
+                content, is_error = await self._call_tool(name, arguments)
+                return _rpc_result(msg_id, {"content": content, "isError": is_error})
             case _:
                 return _rpc_error(msg_id, -32601, f"метод не поддерживается: {method}")
 
-    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def _call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Вызов MCP-tool → список content blocks + признак ошибки."""
         if name == "ask_user":
             payload: dict[str, Any] = {
                 "question": str(arguments.get("question", "")),
@@ -212,14 +223,15 @@ class BridgeControl:
             options = question_options(arguments)
             if options:
                 payload["options"] = options
-            return await self._human_gate(
+            text, is_error = await self._human_gate(
                 action_type="user.question",
                 payload=payload,
                 pending_reason="ask_user: ждём ответа человека",
                 approved_prefix="ответ пользователя: ",
             )
+            return [{"type": "text", "text": text}], is_error
         if name == "request_approval":
-            return await self._human_gate(
+            text, is_error = await self._human_gate(
                 action_type="approval.request",
                 payload={
                     "action": str(arguments.get("action", "")),
@@ -228,9 +240,10 @@ class BridgeControl:
                 pending_reason="request_approval: ждём решения человека",
                 approved_prefix="пользователь одобрил: ",
             )
+            return [{"type": "text", "text": text}], is_error
         tool = self._tools.get(name)
         if tool is None:
-            return f"неизвестный MCP-tool: {name}", True
+            return [{"type": "text", "text": f"неизвестный MCP-tool: {name}"}], True
         result = await tool.call(arguments)
         await self._flush_side_effects()
         text = redact(
@@ -238,7 +251,11 @@ class BridgeControl:
         )
         if self._on_notify is not None:
             self._on_notify("bridge.mcp", f"{name}: {'ok' if result.ok else 'ошибка'}")
-        return text, not result.ok
+        if result.ok and result.blocks:
+            # Бинарные блоки redaction не проходят: источник ограничен
+            # workspace, секреты в байтах картинок не живут (spec 2026-07-24).
+            return result.blocks, False
+        return [{"type": "text", "text": text}], not result.ok
 
     async def _flush_side_effects(self) -> None:
         """Перенести заявки remember/read_skill в БД (короткая сессия)."""

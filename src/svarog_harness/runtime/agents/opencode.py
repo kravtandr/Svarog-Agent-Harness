@@ -20,6 +20,7 @@ from svarog_harness.runtime.executor import (
     ask_user_guide,
 )
 from svarog_harness.runtime.self_docs import self_docs_hint
+from svarog_harness.tools.document_tools import document_tools_hint
 
 # Домашний каталог контейнера (docker.py: HOME=/tmp/home): OpenCode держит
 # конфиг в ~/.config/opencode, состояние в ~/.local/share/opencode —
@@ -66,7 +67,7 @@ class OpencodeAdapter:
         return _STATE_DIR
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs: bool = False
+        self, memory: str, skill_cards: str, self_docs: bool = False, doc_tools: bool = False
     ) -> dict[str, str]:
         """Глобальные правила OpenCode: ~/.config/opencode/AGENTS.md."""
         sections: list[str] = []
@@ -92,6 +93,8 @@ class OpencodeAdapter:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
         if self_docs:
             sections.append(self_docs_hint("svarog_read_svarog_docs"))
+        if doc_tools:
+            sections.append(document_tools_hint("svarog_read_document", "svarog_read_image"))
         return {_CONTEXT_FILE: "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:

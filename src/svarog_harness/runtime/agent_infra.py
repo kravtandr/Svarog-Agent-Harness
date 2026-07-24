@@ -169,7 +169,11 @@ class ExternalAgentInfra:
             and self._adapter.capabilities().mcp
             and resolve_docs_root() is not None
         )
-        state_files = dict(self._adapter.context_files(memory, skill_cards, self_docs))
+        state_files = dict(
+            self._adapter.context_files(
+                memory, skill_cards, self_docs, doc_tools=self._adapter.capabilities().mcp
+            )
+        )
         # Managed-конфиг провайдера (executor.external.model): перезаписывает
         # одноимённый файл в state — источник истины по модели у Svarog.
         state_files.update(self._adapter.provider_files(self._external_cfg.model))

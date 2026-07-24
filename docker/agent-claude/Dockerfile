@@ -9,8 +9,13 @@
 # (tests/test_agent_adapters.py) и doctor-gate — не пиннинг (ADR-0016 §8).
 FROM node:22-slim
 
+# poppler-utils (pdftotext/pdftoppm), pandoc, tesseract (+rus/eng) — чтение
+# документов и сканов агентом через bash (spec 2026-07-24): сеть sandbox'а
+# изолирована, скачать конвертер в рантайме нельзя — только из образа.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 git ca-certificates \
+        pandoc poppler-utils \
+        tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Cache-bust: чтобы «всегда свежий» работал вопреки кэшу слоёв, передайте

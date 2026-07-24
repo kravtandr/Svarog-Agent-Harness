@@ -162,3 +162,20 @@ def test_remove_agent_orphans_invokes_docker_rm() -> None:
     remove_agent_orphans(["c1", "c2"], ["n1"], run=fake_run)
     assert ["docker", "rm", "-f", "c1", "c2"] in calls
     assert ["docker", "network", "rm", "n1"] in calls
+
+
+def test_check_document_tools_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from svarog_harness.cli import doctor
+
+    monkeypatch.setattr(doctor, "document_tools_available", lambda: True)
+    check = doctor._check_document_tools()
+    assert check.status == "ok"
+
+
+def test_check_document_tools_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from svarog_harness.cli import doctor
+
+    monkeypatch.setattr(doctor, "document_tools_available", lambda: False)
+    check = doctor._check_document_tools()
+    assert check.status == "warn"
+    assert "svarog-harness[docs]" in check.hint

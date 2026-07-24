@@ -73,12 +73,12 @@ class CodexAdapter:
         return _STATE_DIR
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs: bool = False
+        self, memory: str, skill_cards: str, self_docs: bool = False, doc_tools: bool = False
     ) -> dict[str, str]:
         """~/.codex/AGENTS.md — глобальная инструкция Codex.
 
-        self_docs игнорируется: `read_svarog_docs` — MCP-tool, а у codex
-        mcp=False, так что указатель на него был бы ложью (ср. ask_user).
+        self_docs и doc_tools игнорируются: это MCP-tools моста, а у codex
+        mcp=False, так что указатель на них был бы ложью (ср. ask_user).
         """
         sections: list[str] = []
         if memory:

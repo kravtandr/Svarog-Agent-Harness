@@ -22,6 +22,7 @@ from svarog_harness.config.schema import SvarogConfig
 from svarog_harness.llm.openai_compatible import ApiKeyError, resolve_api_key
 from svarog_harness.secrets import default_secret_store
 from svarog_harness.storage.db import alembic_config
+from svarog_harness.tools.document_tools import document_tools_available
 
 Status = Literal["ok", "warn", "fail"]
 
@@ -50,8 +51,22 @@ def collect_checks(workspace: Path) -> list[DoctorCheck]:
         checks.append(_check_model(cfg))
         checks.append(_check_memory(cfg))
     checks.append(_check_ripgrep())
+    checks.append(_check_document_tools())
     checks.append(_check_agent_orphans())
     return checks
+
+
+def _check_document_tools() -> DoctorCheck:
+    if document_tools_available():
+        return DoctorCheck(
+            "document-tools", "ok", "markitdown установлен — MCP-tool read_document доступен"
+        )
+    return DoctorCheck(
+        "document-tools",
+        "warn",
+        "markitdown не установлен — read_document (PDF/DOCX/XLSX/PPTX через мост) выключен",
+        hint="установить: pip install 'svarog-harness[docs]'",
+    )
 
 
 def _pid_alive(pid: str) -> bool:
