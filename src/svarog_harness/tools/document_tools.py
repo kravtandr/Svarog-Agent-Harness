@@ -72,10 +72,23 @@ def document_tools_hint(read_document: str, read_image: str) -> str:
     return "\n\n".join(parts)
 
 
+# Точка монтирования workspace в sandbox-контейнере (sandbox/docker.py).
+_CONTAINER_WORKSPACE = "/workspace"
+
+
 def resolve_workspace_path(workspace: Path, rel: str) -> Path:
-    """Путь строго внутри workspace; `..` и symlink-побеги — fail-closed."""
+    """Путь строго внутри workspace; `..` и symlink-побеги — fail-closed.
+
+    Абсолютный контейнерный путь `/workspace/…` нормализуется в относительный:
+    агент живёт в контейнере, где workspace примонтирован туда, и передаёт
+    пути своими глазами (прогон S28).
+    """
     if not rel.strip():
         raise ToolError("путь пуст")
+    if rel == _CONTAINER_WORKSPACE or rel.startswith(_CONTAINER_WORKSPACE + "/"):
+        rel = rel[len(_CONTAINER_WORKSPACE) + 1 :]
+        if not rel:
+            raise ToolError("путь пуст")
     root = workspace.resolve()
     candidate = (root / rel).resolve()
     if candidate != root and root not in candidate.parents:
