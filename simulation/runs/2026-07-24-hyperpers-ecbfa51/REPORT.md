@@ -164,3 +164,26 @@ Host-side проверка `OpencodeAdapter.context_files(...)`: контекс�
 
 **Регрессия заведена:** `test_extract_facts_strips_markdown_fences` (S30 →
 фикс `ecbfa51`).
+
+---
+
+## Фиксы находок (2026-07-24, пост-прогон)
+
+Все три находки исправлены с TDD; полный набор **986 passed, 1 skipped**.
+
+1. **Гвард пути + nudge** (`c…`): `validate_change` отклоняет путь с первым
+   сегментом `memory/` (подсказка → модель повторяет верно);
+   `_MEMORY_GUIDE` уточнён — путь без префикса, «только устойчивое, не
+   эфемерику». Регрессии: `test_redundant_memory_prefix_rejected`.
+2. **Run-Id трейлер** (`c…`): `recorder.latest_run_id` + автозахват тегирует
+   `source_run_id` последним run'ом сессии. Регрессия — проверка трейлера в
+   `test_autocapture_writes_fact_to_profile`.
+3. **Сдвоенный заголовок** (`c…`): `_strip_leading_section_header` убирает
+   ведущий дубль заголовка из тела `replace_section`. Регрессия:
+   `test_apply_replace_section_strips_duplicate_header`.
+
+**Подтверждающий прогон S30 на opencode (пост-фикс):** профиль заполнен верно
+(Роль/Язык/Тон); осиротевшего `memory/…`-файла нет; все три автозахват-коммита
+несут `Run-Id: 65d017fe…`. В этом прогоне агент ручной `remember` не вызывал
+вовсе — положился на автозахват. Фиксы 1–2 подтверждены end-to-end, фикс 3 —
+детерминированным юнитом.
