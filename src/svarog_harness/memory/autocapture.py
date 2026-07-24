@@ -8,6 +8,7 @@ Aux-LLM по транскрипту сессии выделяет долгове
 """
 
 import json
+import re
 from typing import Any
 
 from svarog_harness.llm.provider import ChatMessage, ModelProvider
@@ -74,9 +75,21 @@ def _facts_to_changes(
     return changes
 
 
+def _extract_json(content: str) -> str:
+    """Достать JSON из ответа модели: снять markdown-фенсы и обрамляющую прозу.
+
+    Модели часто оборачивают ответ в ```json … ``` или добавляют пояснение —
+    берём тело фенса, иначе срез от первой `{` до последней `}`.
+    """
+    fence = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
+    body = fence.group(1) if fence else content
+    start, end = body.find("{"), body.rfind("}")
+    return body[start : end + 1] if start != -1 and end > start else body
+
+
 def _parse_payload(content: str) -> list[Any]:
     try:
-        data = json.loads(content)
+        data = json.loads(_extract_json(content))
     except (json.JSONDecodeError, TypeError):
         return []
     facts = data.get("facts") if isinstance(data, dict) else None

@@ -66,3 +66,19 @@ async def test_extract_facts_parses_model_json() -> None:
 async def test_extract_facts_tolerates_bad_json() -> None:
     changes = await extract_facts("нечто", "", provider=_FakeProvider("не json"), max_facts=5)
     assert changes == []
+
+
+@pytest.mark.asyncio
+async def test_extract_facts_strips_markdown_fences() -> None:
+    # Регрессия (S30 opencode): deepseek оборачивает JSON в ```json-фенсы —
+    # голый json.loads падал, факты молча терялись.
+    payload = '```json\n{"facts": [{"section": "Роль", "fact": "продакт в Северстали"}]}\n```'
+    changes = await extract_facts("d", "", provider=_FakeProvider(payload), max_facts=5)
+    assert len(changes) == 1 and "Северстали" in changes[0].content
+
+
+@pytest.mark.asyncio
+async def test_extract_facts_tolerates_prose_around_json() -> None:
+    payload = 'Вот факты:\n{"facts": [{"section": "Язык", "fact": "русский"}]}\nГотово.'
+    changes = await extract_facts("d", "", provider=_FakeProvider(payload), max_facts=5)
+    assert len(changes) == 1 and "русский" in changes[0].content
