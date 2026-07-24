@@ -395,6 +395,9 @@ class RunAssembly:
             if mem_dir is not None
             else ""
         )
+        directive = render_persona_directive(load_profile(mem_dir)) if mem_dir is not None else ""
+        if directive:
+            memory_text = f"{directive}\n\n{memory_text}" if memory_text else directive
         cards = skill_cards(scan_skills(skills_dirs(cfg, workspace)).skills)
         infra.prepare_launch(memory_text, cards, cooperative=external.enforcement == "cooperative")
 
