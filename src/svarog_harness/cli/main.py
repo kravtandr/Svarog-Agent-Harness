@@ -715,7 +715,19 @@ async def _run_task(
     allow_layout_overlap: bool = False,
 ) -> RunOutcome:
     runner = TaskRunner(cfg, workspace, allow_layout_overlap=allow_layout_overlap)
-    return await runner.run_once(task, autonomy, hooks=hooks)
+    outcome = await runner.run_once(task, autonomy, hooks=hooks)
+    if cfg.autocapture.enabled and outcome.state is RunState.COMPLETED:
+        # Автозахват фактов о пользователе из завершённой сессии (#1). Вне
+        # критического пути: ответ уже получен, сбой профиль не трогает.
+        async def _autocapture(db: AsyncSession) -> None:
+            recorder = TraceRecorder(db)
+            run = await recorder.get_run(outcome.run_id)
+            if run is not None and run.session_id:
+                await runner.autocapture(db, recorder, run.session_id)
+
+        with contextlib.suppress(Exception):
+            await _with_db(cfg, _autocapture)
+    return outcome
 
 
 async def _resume_task(

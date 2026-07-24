@@ -10,10 +10,28 @@ def test_memory_section_includes_layout_guide() -> None:
         "задача", Path("/ws"), memory="## user/profile.md\nважный факт"
     )
     system = messages[0].content
-    assert "user/profile.md — факты о пользователе" in system
+    assert "user/profile.md — профиль пользователя типизированными H2-секциями" in system
     assert "projects/<slug>/overview.md" in system
     assert "create перезаписывает файл целиком" in system
     assert "важный факт" in system
+
+
+def test_persona_directive_injected_as_instruction() -> None:
+    messages = build_initial_messages(
+        "задача",
+        Path("/ws"),
+        memory="## user/profile.md\n...",
+        persona="# Персонализация (следуй как инструкции)\nТон: кратко",
+    )
+    system = messages[0].content
+    assert messages[0].role == "system"
+    assert "Персонализация (следуй как инструкции)" in system
+    assert "Тон: кратко" in system
+
+
+def test_persona_absent_when_empty() -> None:
+    messages = build_initial_messages("задача", Path("/ws"), persona="")
+    assert "Персонализация" not in messages[0].content
 
 
 def test_memory_guide_documents_wiki_contract() -> None:

@@ -77,6 +77,24 @@ def test_apply_replace_section(tmp_path: Path) -> None:
     assert "хвост" in text
 
 
+def test_apply_replace_section_strips_duplicate_header(tmp_path: Path) -> None:
+    # Находка S32: Dream/модель иногда кладёт в content строку-заголовок секции,
+    # что даёт сдвоенный «## Прочее». Лишний ведущий заголовок срезаем.
+    (tmp_path / "notes.md").write_text("# Заметки\n\n## Прочее\nстарое\n", encoding="utf-8")
+    apply_change(
+        tmp_path,
+        MemoryChangeRequest(
+            file="notes.md",
+            operation=MemoryOperation.REPLACE_SECTION,
+            section="Прочее",
+            content="## Прочее\nновое",
+        ),
+    )
+    text = (tmp_path / "notes.md").read_text(encoding="utf-8")
+    assert text.count("## Прочее") == 1
+    assert "новое" in text and "старое" not in text
+
+
 def test_apply_replace_missing_section(tmp_path: Path) -> None:
     (tmp_path / "notes.md").write_text("# Заметки\n", encoding="utf-8")
     with pytest.raises(MemoryApplyError, match="секция"):

@@ -164,3 +164,12 @@ async def test_disabled_dream_job_stays_disabled_on_restart(db: AsyncSession) ->
 
     job = next(j for j in await store.list_jobs() if j.name == DREAM_JOB_NAME)
     assert job.enabled is False
+
+
+def test_dream_task_mentions_profile() -> None:
+    """Смысловой проход Dream учитывает профиль пользователя (#5)."""
+    from svarog_harness.memory.curator import MemoryAuditReport
+    from svarog_harness.memory.dream import build_dream_task
+
+    task = build_dream_task(MemoryAuditReport(findings=[]))
+    assert "профил" in task.lower()

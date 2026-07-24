@@ -22,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness.config.paths import first_existing_skills_dir, memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.gitflow import GitRepo, WorkspaceFlow, WorkspacePrep
-from svarog_harness.llm.openai_compatible import default_provider
+from svarog_harness.llm.openai_compatible import auxiliary_provider, default_provider
+from svarog_harness.llm.provider import ModelProvider
 from svarog_harness.mcp import MCPTool
 from svarog_harness.memory import MemoryProposalRequest, read_memory
+from svarog_harness.memory.profile import load_profile, render_persona_directive
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.agents import adapter_for
@@ -217,6 +219,10 @@ class RunAssembly:
         # selected_values добавляет env-backed refs (provider-ключ и пр.).
         return self._host_store.values() | selected_values(self._host_store, refs)
 
+    def auxiliary_provider(self) -> ModelProvider:
+        """Провайдер дешёвой aux-модели (автозахват, служебные проходы, ADR-0014 #2)."""
+        return auxiliary_provider(self._cfg.models, self._host_store)
+
     def build_loop(
         self,
         recorder: TraceRecorder,
@@ -258,6 +264,7 @@ class RunAssembly:
             if mem_dir is not None
             else ""
         )
+        persona = render_persona_directive(load_profile(mem_dir)) if mem_dir is not None else ""
         skill_load_sink: list[tuple[str, str | None]] = []
         memory_sink: list[dict[str, object]] = []
         plan_update_sink: list[dict[str, object]] = []
@@ -286,6 +293,7 @@ class RunAssembly:
             config_hash=config_digest(cfg, workspace),  # снимок security-конфига (§0.4)
             skill_cards=skill_cards(active_skills),
             memory=memory_text,
+            persona=persona,
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
             plan_update_sink=plan_update_sink,
@@ -392,6 +400,9 @@ class RunAssembly:
             if mem_dir is not None
             else ""
         )
+        directive = render_persona_directive(load_profile(mem_dir)) if mem_dir is not None else ""
+        if directive:
+            memory_text = f"{directive}\n\n{memory_text}" if memory_text else directive
         cards = skill_cards(scan_skills(skills_dirs(cfg, workspace)).skills)
         infra.prepare_launch(memory_text, cards, cooperative=external.enforcement == "cooperative")
 

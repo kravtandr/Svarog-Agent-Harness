@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +149,8 @@ class ChatEngine:
         self._session_id: str | None = None
         self._history: list[ChatMessage] = []
         self._resources_dirty = False
+        # Watermark автозахвата (#1): сколько ходов сессии уже обработано.
+        self._ac_processed: int = 0
 
     @property
     def session_id(self) -> str | None:
@@ -189,8 +192,39 @@ class ChatEngine:
             session_id=self._session_id, history=list(self._history), label=label
         )
 
+    async def _maybe_autocapture(
+        self,
+        runner: "TaskRunner",
+        db: "AsyncSession",
+        recorder: "TraceRecorder",
+        *,
+        force: bool,
+    ) -> None:
+        """Автозахват по границе сессии (#1): при закрытии (force) или по порогу.
+
+        Best-effort: сбой не должен ломать ни ход диалога, ни закрытие сессии.
+        """
+        if not self._cfg.autocapture.enabled or self._session_id is None:
+            return
+        turns = len(self._history) // 2
+        due = force or (turns - self._ac_processed >= self._cfg.autocapture.every_n_turns)
+        if not due or turns <= self._ac_processed:
+            return
+        # Автозахват вне критического пути — при сбое watermark не двигаем.
+        with contextlib.suppress(Exception):
+            self._ac_processed = await runner.autocapture(
+                db, recorder, self._session_id, since_turn=self._ac_processed
+            )
+
     async def close(self) -> None:
         """Идемпотентно опустить sandbox и DB; ошибки шагов не блокируют друг друга."""
+        if (
+            self._runner is not None
+            and self._db is not None
+            and self._recorder is not None
+            and self._session_id is not None
+        ):
+            await self._maybe_autocapture(self._runner, self._db, self._recorder, force=True)
         if self._resources is not None:
             await self._resources.close()
             self._resources = None
@@ -276,6 +310,7 @@ class ChatEngine:
             ChatMessage(role="assistant", content=outcome.final_answer or "(без ответа)")
         )
         self._history[:] = self._history[-CHAT_HISTORY_LIMIT:]
+        await self._maybe_autocapture(runner, db, recorder, force=False)
         return outcome
 
     async def resume(self, run_id: str) -> RunOutcome:

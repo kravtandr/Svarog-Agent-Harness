@@ -51,6 +51,22 @@ def test_valid_append_passes(tmp_path: Path) -> None:
     assert validate_change(tmp_path, _req("notes.md", MemoryOperation.APPEND, content="x")) is None
 
 
+def test_redundant_memory_prefix_rejected(tmp_path: Path) -> None:
+    # Находка симуляции S30: слабая модель дописывает лишний префикс memory/
+    # (memory/user/profile.md), путь внутри jail → создавался осиротевший
+    # вложенный файл. Отклоняем с подсказкой, модель повторяет верно.
+    error = validate_change(
+        tmp_path, _req("memory/user/profile.md", MemoryOperation.APPEND, content="x")
+    )
+    assert error is not None and "memory/" in error
+
+
+def test_sources_path_not_falsely_flagged_as_memory_prefix(tmp_path: Path) -> None:
+    # Только первый сегмент 'memory' — ошибка; 'memories/...' или обычные пути нет.
+    req = _req("memories.md", MemoryOperation.APPEND, content="x")
+    assert validate_change(tmp_path, req) is None
+
+
 # --- инструмент propose_memory_change (блок C §2) ----------------------------
 
 
