@@ -29,6 +29,22 @@ def test_resolve_rejects_escape(tmp_path: Path) -> None:
         resolve_workspace_path(tmp_path, "../etc/passwd")
 
 
+def test_resolve_accepts_container_absolute_path(tmp_path: Path) -> None:
+    # Прогон S28: агент в контейнере зовёт файлы по /workspace/… —
+    # глазами агента это и есть workspace.
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "x.md").write_text("x", encoding="utf-8")
+    assert (
+        resolve_workspace_path(tmp_path, "/workspace/notes/x.md")
+        == (tmp_path / "notes" / "x.md").resolve()
+    )
+
+
+def test_resolve_container_prefix_still_fail_closed(tmp_path: Path) -> None:
+    with pytest.raises(ToolError):
+        resolve_workspace_path(tmp_path, "/workspace/../etc/passwd")
+
+
 def test_resolve_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside.png"
     outside.write_bytes(_PNG_1PX)
