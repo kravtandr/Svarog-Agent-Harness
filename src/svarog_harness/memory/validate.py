@@ -36,6 +36,15 @@ def validate_change(
     except MemoryApplyError as exc:
         return str(exc)
 
+    if request.file.split("/", 1)[0] == "memory":
+        # Пути относительны корню memory/ — лишний префикс memory/ (частая
+        # ошибка слабых моделей, находка S30) создал бы осиротевший вложенный
+        # файл внутри jail. Отклоняем с подсказкой — модель повторяет верно.
+        return (
+            f"путь '{request.file}' начинается с 'memory/' — пути уже относительны "
+            f"корню памяти, убери префикс (например 'user/profile.md')"
+        )
+
     if request.file.split("/", 1)[0] == "sources" and request.operation in (
         MemoryOperation.APPEND,
         MemoryOperation.REPLACE_SECTION,
