@@ -72,3 +72,13 @@ async def test_autocapture_writes_fact_to_profile(tmp_path: Path, monkeypatch) -
 
     assert got == 1
     assert "русский" in (mem / "user" / "profile.md").read_text(encoding="utf-8")
+    # Находка S30: автозахват-коммит тегируется run'ом сессии (Run-Id трейлер).
+    import subprocess
+
+    body = subprocess.run(
+        ["git", "-C", str(mem), "log", "--format=%B", "-n", "5"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert f"Run-Id: {run.id}" in body

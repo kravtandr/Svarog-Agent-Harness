@@ -979,11 +979,14 @@ class TaskRunner:
             max_facts=self._cfg.autocapture.max_facts,
         )
         if changes:
+            # Атрибуция: тегируем правки последним run'ом сессии (Run-Id трейлер),
+            # чтобы автозахват был откатываем и виден в git-истории (#1).
+            run_id = await recorder.latest_run_id(session_id)
             writer = MemoryWriter(
                 db, mem_dir, lock=self._lock, index_max_lines=self._cfg.memory.index_max_lines
             )
             for change in changes:
-                await writer.enqueue(change)
+                await writer.enqueue(replace(change, source_run_id=run_id))
             await writer.drain(known_values=self.known_secret_values())
         return turns
 

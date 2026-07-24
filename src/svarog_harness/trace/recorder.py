@@ -338,6 +338,18 @@ class TraceRecorder:
             history.append({"role": "assistant", "content": answer or "(без ответа)"})
         return history[-limit_messages:]
 
+    async def latest_run_id(self, session_id: str) -> str | None:
+        """id самого свежего run'а сессии (для атрибуции автозахвата, #1)."""
+        row = (
+            await self._db.execute(
+                select(Run.id)
+                .where(Run.session_id == session_id)
+                .order_by(Run.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return row
+
     async def rename_session(self, session: Session, title: str) -> None:
         session.title = title
         await self._db.commit()
