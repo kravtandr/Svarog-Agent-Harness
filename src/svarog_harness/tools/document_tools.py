@@ -149,12 +149,8 @@ class ReadDocumentTool(Tool[ReadDocumentArgs]):
         window = lines[args.offset :]
         if args.limit is not None:
             window = window[: args.limit]
-        header = (
-            f"# {args.path} (строки {args.offset}–{args.offset + len(window)} из {len(lines)})"
-        )
-        return ToolResult.success(
-            truncate_text(header + "\n\n" + "\n".join(window), _OUTPUT_LIMIT)
-        )
+        header = f"# {args.path} (строки {args.offset}–{args.offset + len(window)} из {len(lines)})"
+        return ToolResult.success(truncate_text(header + "\n\n" + "\n".join(window), _OUTPUT_LIMIT))
 
 
 class ReadImageArgs(BaseModel):
@@ -183,9 +179,7 @@ class ReadImageTool(Tool[ReadImageArgs]):
         mime = _IMAGE_MIME.get(path.suffix.lower())
         if mime is None:
             supported = ", ".join(sorted(_IMAGE_MIME))
-            return ToolResult.failure(
-                f"формат '{path.suffix}' не поддержан; доступны: {supported}"
-            )
+            return ToolResult.failure(f"формат '{path.suffix}' не поддержан; доступны: {supported}")
         size = path.stat().st_size
         if size > _IMAGE_LIMIT_BYTES:
             return ToolResult.failure(

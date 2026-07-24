@@ -115,9 +115,7 @@ async def test_read_document_offset_limit(tmp_path: Path) -> None:
     full = await ReadDocumentTool(tmp_path).call({"path": "doc.html"})
     full_lines = full.output.split("\n\n", 1)[1].splitlines()
     assert len(full_lines) >= 2
-    windowed = await ReadDocumentTool(tmp_path).call(
-        {"path": "doc.html", "offset": 1, "limit": 1}
-    )
+    windowed = await ReadDocumentTool(tmp_path).call({"path": "doc.html", "offset": 1, "limit": 1})
     assert windowed.ok
     # Окно — ровно срез строк полного результата (offset=1, одна строка).
     assert windowed.output.split("\n\n", 1)[1] == full_lines[1]
