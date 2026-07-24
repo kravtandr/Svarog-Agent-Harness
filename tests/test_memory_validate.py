@@ -63,7 +63,8 @@ def test_redundant_memory_prefix_rejected(tmp_path: Path) -> None:
 
 def test_sources_path_not_falsely_flagged_as_memory_prefix(tmp_path: Path) -> None:
     # Только первый сегмент 'memory' — ошибка; 'memories/...' или обычные пути нет.
-    assert validate_change(tmp_path, _req("memories.md", MemoryOperation.APPEND, content="x")) is None
+    req = _req("memories.md", MemoryOperation.APPEND, content="x")
+    assert validate_change(tmp_path, req) is None
 
 
 # --- инструмент propose_memory_change (блок C §2) ----------------------------
