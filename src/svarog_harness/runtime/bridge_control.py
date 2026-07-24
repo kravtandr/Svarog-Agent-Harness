@@ -43,6 +43,11 @@ from svarog_harness.skills.proposal import SkillProposalRequest
 from svarog_harness.storage.models import Approval, ApprovalStatus, Run, utcnow
 from svarog_harness.tools.base import RiskLevel, Tool
 from svarog_harness.tools.docs_tools import ReadSvarogDocsTool
+from svarog_harness.tools.document_tools import (
+    ReadDocumentTool,
+    ReadImageTool,
+    document_tools_available,
+)
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import question_options
@@ -92,6 +97,7 @@ class BridgeControl:
         db_action: DbAction,
         policy: PolicyEngine,
         memory_dir: Path | None,
+        workspace_dir: Path | None = None,
         skills: list[Skill],
         proposal_sink: list[SkillProposalRequest],
         secret_values: frozenset[str] = frozenset(),
@@ -104,6 +110,7 @@ class BridgeControl:
         self._db_action = db_action
         self._policy = policy
         self._memory_dir = memory_dir
+        self._workspace_dir = workspace_dir
         self._skills = skills
         self._proposal_sink = proposal_sink
         self._self_docs = self_docs
@@ -150,6 +157,13 @@ class BridgeControl:
         # а не по претрейну. Недоступный docs-root — фича молча выключается.
         if self._self_docs and resolve_docs_root() is not None:
             tools["read_svarog_docs"] = ReadSvarogDocsTool()
+        # Документы/изображения workspace (spec 2026-07-24): read_image без
+        # зависимостей; read_document — только при установленном markitdown
+        # (группа `docs`), отсутствие — фича молча выключена, doctor подскажет.
+        if self._workspace_dir is not None:
+            tools["read_image"] = ReadImageTool(self._workspace_dir)
+            if document_tools_available():
+                tools["read_document"] = ReadDocumentTool(self._workspace_dir)
         return tools
 
     def _on_skill_load(self, name: str, version: str | None) -> None:
