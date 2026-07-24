@@ -41,6 +41,24 @@ def has_section(text: str, section: str) -> bool:
     return _find_header(text.splitlines(), section) is not None
 
 
+def _strip_leading_section_header(body: str, section: str) -> str:
+    """Убрать из тела ведущую строку-заголовок этой же секции, если модель её
+    продублировала (находка S32: content с «## Секция» давал сдвоенный заголовок).
+    """
+    lines = body.splitlines()
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start < len(lines):
+        stripped = lines[start].strip()
+        if stripped.startswith("#") and stripped.lstrip("#").strip() == section:
+            rest = start + 1
+            while rest < len(lines) and not lines[rest].strip():
+                rest += 1
+            return "\n".join(lines[rest:])
+    return body
+
+
 def _replace_section(text: str, section: str, new_body: str) -> str:
     """Заменить тело markdown-секции (по заголовку любого уровня) на new_body.
 
@@ -52,6 +70,7 @@ def _replace_section(text: str, section: str, new_body: str) -> str:
     if header is None:
         raise MemoryApplyError(f"секция '{section}' не найдена в файле")
     header_idx, header_level = header
+    new_body = _strip_leading_section_header(new_body, section)
 
     end_idx = len(lines)
     for idx in range(header_idx + 1, len(lines)):
