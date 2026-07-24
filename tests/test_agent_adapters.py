@@ -324,3 +324,24 @@ def test_claude_context_steers_questions_to_ask_user() -> None:
     text = files["CLAUDE.md"]
     assert "ask_user" in text
     assert "не завершай" in text.lower()
+
+
+def test_claude_context_files_doc_tools() -> None:
+    files = ClaudeCodeAdapter().context_files("", "", doc_tools=True)
+    body = files["CLAUDE.md"]
+    assert "mcp__svarog__read_image" in body
+    assert "pdftotext" in body
+    # dev-среда ставит markitdown — hint упоминает и read_document.
+    assert "mcp__svarog__read_document" in body
+
+
+def test_claude_context_files_no_doc_tools() -> None:
+    files = ClaudeCodeAdapter().context_files("", "")
+    assert "read_image" not in files.get("CLAUDE.md", "")
+
+
+def test_opencode_context_files_doc_tools() -> None:
+    files = OpencodeAdapter().context_files("", "", doc_tools=True)
+    body = files[".config/opencode/AGENTS.md"]
+    assert "svarog_read_image" in body
+    assert "svarog_read_document" in body

@@ -45,6 +45,33 @@ def document_tools_available() -> bool:
     return importlib.util.find_spec("markitdown") is not None
 
 
+def document_tools_hint(read_document: str, read_image: str) -> str:
+    """Блок контекст-файла агента: как читать документы и изображения.
+
+    Имена tools у адаптеров разные (mcp__svarog__* / svarog_*) — подставляются
+    параметрами, ср. ask_user_guide. Упоминание read_document — только при
+    установленном markitdown: иначе указатель был бы ложью.
+    """
+    parts = [
+        "# Документы и изображения",
+        "В sandbox есть конвертеры: `pdftotext` (текстовый слой PDF), `pandoc` "
+        "(DOCX/HTML/EPUB/RTF → Markdown), `tesseract -l rus+eng` (OCR сканов), "
+        "`pdftoppm -png -r 150` (PDF → PNG постранично).",
+        f"Показать модели картинку из workspace — MCP-tool `{read_image}` "
+        "(PNG/JPEG/GIF/WebP до 5 MB).",
+    ]
+    if document_tools_available():
+        parts.append(
+            f"XLSX/PPTX и любой офисный формат целиком — MCP-tool `{read_document}` "
+            "(результат — Markdown, длинные документы листай offset/limit)."
+        )
+    parts.append(
+        "Скан без текстового слоя: `tesseract` (дёшево) либо `pdftoppm` → "
+        f"`{read_image}` постранично (vision, качество выше, дороже по токенам)."
+    )
+    return "\n\n".join(parts)
+
+
 def resolve_workspace_path(workspace: Path, rel: str) -> Path:
     """Путь строго внутри workspace; `..` и symlink-побеги — fail-closed."""
     if not rel.strip():

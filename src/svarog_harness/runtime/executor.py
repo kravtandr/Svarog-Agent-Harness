@@ -171,12 +171,14 @@ class AgentAdapter(Protocol):
         ...
 
     def context_files(
-        self, memory: str, skill_cards: str, self_docs: bool = False
+        self, memory: str, skill_cards: str, self_docs: bool = False, doc_tools: bool = False
     ) -> dict[str, str]:
         """Файлы контекста агента (ADR-0016 §4): относительный путь внутри
         state_dir → содержимое (CLAUDE.md / AGENTS.md); пусто — контекст
-        не передаётся. self_docs — доступен ли reverse-tool `read_svarog_docs`
-        (адаптер называет его в своём неймспейсе; при mcp=False игнорируется)."""
+        не передаётся. self_docs — доступен ли reverse-tool `read_svarog_docs`;
+        doc_tools — зарегистрированы ли инструменты документов/изображений
+        моста (spec 2026-07-24). Адаптер называет tools в своём неймспейсе;
+        при mcp=False оба флага игнорируются."""
         ...
 
     def provider_files(self, model: str | None) -> dict[str, str]:
