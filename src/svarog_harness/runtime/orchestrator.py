@@ -32,6 +32,8 @@ from svarog_harness.memory import (
     MemoryProposalRequest,
     MemoryWriter,
 )
+from svarog_harness.memory.autocapture import extract_facts
+from svarog_harness.memory.profile import load_profile
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
 from svarog_harness.runtime.bridge_control import BridgeControl
 from svarog_harness.runtime.checkpoint import LoopState
@@ -942,6 +944,48 @@ class TaskRunner:
         for row in await writer.drain(known_values=self.known_secret_values()):
             if hooks.on_memory is not None:
                 hooks.on_memory(row.commit_sha, row.error)
+
+    async def autocapture(
+        self,
+        db: AsyncSession,
+        recorder: TraceRecorder,
+        session_id: str,
+        *,
+        since_turn: int = 0,
+    ) -> int:
+        """Автозахват фактов о пользователе из сессии в профиль (#1).
+
+        Best-effort и вне критического пути: aux-LLM извлекает долговечные факты
+        из транскрипта сессии и аддитивно дописывает их в user/profile.md через
+        штатную очередь writer'а (Flow A). Возвращает число обработанных ходов
+        (новый watermark). Сбои извлечения профиль не трогают.
+        """
+        if not self._cfg.autocapture.enabled:
+            return since_turn
+        mem_dir = memory_dir(self._cfg)
+        if mem_dir is None or not mem_dir.is_dir():
+            return since_turn
+        history = await recorder.session_history(session_id, limit_messages=48)
+        turns = len(history) // 2
+        if turns <= since_turn:
+            return since_turn
+        transcript = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+        provider = self._assembly.auxiliary_provider()
+        profile_text = load_profile(mem_dir)
+        changes = await extract_facts(
+            transcript,
+            profile_text,
+            provider=provider,
+            max_facts=self._cfg.autocapture.max_facts,
+        )
+        if changes:
+            writer = MemoryWriter(
+                db, mem_dir, lock=self._lock, index_max_lines=self._cfg.memory.index_max_lines
+            )
+            for change in changes:
+                await writer.enqueue(change)
+            await writer.drain(known_values=self.known_secret_values())
+        return turns
 
     async def drain_schedule(
         self,

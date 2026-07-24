@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness.config.paths import first_existing_skills_dir, memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.gitflow import GitRepo, WorkspaceFlow, WorkspacePrep
-from svarog_harness.llm.openai_compatible import default_provider
+from svarog_harness.llm.openai_compatible import auxiliary_provider, default_provider
+from svarog_harness.llm.provider import ModelProvider
 from svarog_harness.mcp import MCPTool
 from svarog_harness.memory import MemoryProposalRequest, read_memory
 from svarog_harness.memory.profile import load_profile, render_persona_directive
@@ -217,6 +218,10 @@ class RunAssembly:
         # Redaction покрывает оба скоупа: host-store перечисляет тот же файл, а
         # selected_values добавляет env-backed refs (provider-ключ и пр.).
         return self._host_store.values() | selected_values(self._host_store, refs)
+
+    def auxiliary_provider(self) -> ModelProvider:
+        """Провайдер дешёвой aux-модели (автозахват, служебные проходы, ADR-0014 #2)."""
+        return auxiliary_provider(self._cfg.models, self._host_store)
 
     def build_loop(
         self,
