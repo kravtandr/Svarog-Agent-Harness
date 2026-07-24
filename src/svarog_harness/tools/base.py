@@ -66,6 +66,9 @@ class ToolResult(BaseModel):
     # Класс жёсткой границы, если отказ упёрся в неё (блок E). В trace не
     # попадает — используется только при рендере результата для модели.
     boundary: BoundaryKind | None = None
+    # MCP content blocks (image и т.п., spec 2026-07-24): мост отдаёт их
+    # вместо текстового блока. None — обычный текстовый результат.
+    blocks: list[dict[str, Any]] | None = None
 
     @classmethod
     def success(cls, output: str) -> "ToolResult":

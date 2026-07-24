@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +42,7 @@ from svarog_harness.runtime.bridge_control import (
 from svarog_harness.secrets.store import EnvSecretStore
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, ApprovalStatus, MemoryChange
+from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
 from svarog_harness.trace.recorder import TraceRecorder
 
 # --- Фейковый upstream (провайдер) ------------------------------------------
@@ -399,6 +401,57 @@ async def test_mcp_initialize_and_tools_list(tmp_path: Path) -> None:
         "ask_user",
         "request_approval",
     } <= names
+
+
+class _BlocksArgs(BaseModel):
+    pass
+
+
+class _BlocksTool(Tool[_BlocksArgs]):
+    name = "fake_blocks"
+    description = "тестовый tool с image-блоком"
+    risk_level = RiskLevel.LOW
+    args_model = _BlocksArgs
+
+    async def execute(self, args: _BlocksArgs) -> ToolResult:
+        return ToolResult(
+            ok=True,
+            output="картинка",
+            blocks=[{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+        )
+
+
+async def test_mcp_tool_result_blocks(tmp_path: Path) -> None:
+    control = _control(tmp_path)
+    control._tools["fake_blocks"] = _BlocksTool()
+    reply = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "fake_blocks", "arguments": {}},
+        }
+    )
+    content = reply["result"]["content"]
+    assert content == [{"type": "image", "data": "aGk=", "mimeType": "image/png"}]
+    assert reply["result"]["isError"] is False
+
+
+async def test_mcp_tool_result_text_unchanged(tmp_path: Path) -> None:
+    """Регресс: текстовые инструменты отдают одиночный text-блок как раньше."""
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    control = _control(tmp_path, memory_dir=mem)
+    reply = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "read_memory", "arguments": {}},
+        }
+    )
+    content = reply["result"]["content"]
+    assert len(content) == 1 and content[0]["type"] == "text"
 
 
 async def test_mcp_remember_enqueues_memory(db: AsyncSession, tmp_path: Path) -> None:
