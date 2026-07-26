@@ -105,8 +105,19 @@ class GitRepo:
             args.append(f"--separate-git-dir={separate_git_dir}")
         await self._git(*args)
 
-    async def ensure_identity(self, name: str = "Svarog", email: str = "svarog@localhost") -> None:
-        """Локальная git-идентичность, если глобальная не настроена (для commit)."""
+    async def ensure_identity(
+        self,
+        name: str = "Svarog",
+        email: str = "58266324+kravtandr@users.noreply.github.com",
+    ) -> None:
+        """Локальная git-идентичность, если глобальная не настроена (для commit).
+
+        Email обязан быть привязан к аккаунту GitHub: граф контрибуций считает
+        коммиты по email автора, и всё, что уходило под `svarog@localhost`, в него
+        не попадало. noreply-адрес с user id привязан к аккаунту гарантированно и
+        не раскрывает личную почту. Имя остаётся «Svarog» — по нему видно, что
+        коммит сделал агент, а на атрибуцию имя не влияет.
+        """
         code, out, _ = await self._git("config", "user.email", check=False)
         if code != 0 or not out.strip():
             await self._git("config", "user.email", email)
