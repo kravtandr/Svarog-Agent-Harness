@@ -415,7 +415,10 @@ class TaskRunner:
             child_cfg = child_cfg.model_copy(
                 update={"executor": self._cfg.executor.model_copy(update={"type": "external"})}
             )
-        child_runner = TaskRunner(child_cfg, child_ws, role=self._role)
+        # Довесок родителя должен доехать до дочернего run'а: config_hash
+        # ребёнка уже несёт эффект override (child_cfg — model_copy от
+        # self._cfg), а без run_meta его Run.meta разошёлся бы с этим хэшем.
+        child_runner = TaskRunner(child_cfg, child_ws, role=self._role, run_meta=self._run_meta)
         child_infra: ExternalAgentInfra | None = None
         if delegate:
             # Fail-closed гейты (docker-only §2, supervised §6) возвращаются

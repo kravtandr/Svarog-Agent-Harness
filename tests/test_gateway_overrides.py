@@ -1,18 +1,24 @@
 """Override исполнителя/провайдера/модели в сообщении чата (план 2026-07-28)."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
+from svarog_harness.config.schema import AutonomyMode
 from svarog_harness.gateway.overrides import (
     OVERRIDE_META_KEY,
     OverrideError,
     RunOverride,
     apply_override,
 )
+from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+from svarog_harness.tools.child_tools import SpawnChildRunArgs
 from svarog_harness.trace.recorder import TraceRecorder
 
 
@@ -138,3 +144,77 @@ async def test_start_run_stores_extra_meta(tmp_path: Path) -> None:
     assert run.meta[OVERRIDE_META_KEY] == {"provider": "router"}
     assert run.meta["model"] == "fake-model", "штатные ключи не затёрты"
     await engine.dispose()
+
+
+def _git(ws: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(ws), *args], check=True, capture_output=True, text=True)
+
+
+async def test_spawn_child_run_passes_run_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_meta родителя должен долететь до TaskRunner дочернего run'а.
+
+    В отличие от parent_run_id (передаётся per-call и уже проверен на
+    дочерних runs), run_meta запечён в конструкторе TaskRunner/RunAssembly —
+    его легко забыть протащить в spawn_child_run, а забытым он делает
+    child.meta несогласованным с child.config_hash, унаследовавшим эффект
+    override через model_copy от self._cfg. Полный e2e (ScriptedProvider,
+    выполнение ребёнка до конца) непропорционален этой проверке: достаточно
+    убедиться, что TaskRunner дочернего run'а сконструирован с тем же
+    run_meta, что и у родителя — тест обрывает spawn_child_run сразу после
+    этой точки шпионским __init__.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    (ws / "README.md").write_text("проект\n", encoding="utf-8")
+    _git(ws, "init", "-b", "main")
+    _git(ws, "config", "user.email", "t@t")
+    _git(ws, "config", "user.name", "t")
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-m", "init")
+
+    cfg = load_config(project_dir=ws, user_config_path=tmp_path / "nonexistent")
+    run_meta = {OVERRIDE_META_KEY: {"provider": "router"}}
+    runner = TaskRunner(cfg, ws, run_meta=run_meta)
+
+    captured: list[dict[str, object] | None] = []
+
+    class _StopAfterCaptureError(Exception):
+        """Сигнал «конструктор ребёнка вызван» — дальше эту ветку не гоняем."""
+
+    def spy_init(self: TaskRunner, cfg: object, workspace: object, **kwargs: object) -> None:
+        captured.append(kwargs.get("run_meta"))
+        raise _StopAfterCaptureError()
+
+    monkeypatch.setattr(orchestrator.TaskRunner, "__init__", spy_init)
+
+    async def action(db: AsyncSession) -> None:
+        recorder = TraceRecorder(db)
+        parent = await recorder.start_run(
+            task="родитель", autonomy="yolo", model="m", workspace=str(ws)
+        )
+        with pytest.raises(_StopAfterCaptureError):
+            await runner.spawn_child_run(
+                recorder,
+                parent,
+                AutonomyMode.YOLO,
+                SpawnChildRunArgs(task="подзадача"),
+                RunHooks(),
+            )
+
+    await runner.with_db(action)
+    assert captured == [run_meta], "run_meta родителя не долетел до TaskRunner ребёнка"
