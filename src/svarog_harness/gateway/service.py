@@ -384,6 +384,15 @@ class GatewayService:
             on_commit=lambda sha, branch, push: emit(
                 {"type": "commit", "sha": sha, "branch": branch}
             ),
+            # Гейт появляется в ленте сразу, а не по опросу /approvals.
+            on_approval_requested=lambda approval: emit(
+                {
+                    "type": "approval_required",
+                    "approval_id": approval.id,
+                    "action_type": approval.action_type,
+                    "payload": approval.payload or {},
+                }
+            ),
         )
 
     def _publish_finished(self, outcome: RunOutcome) -> None:

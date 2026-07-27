@@ -115,3 +115,34 @@ async def test_tool_events_carry_arg_and_result(service: GatewayService) -> None
         {"type": "tool_call", "tool": "write_file", "arg": "memory/index.py"},
         {"type": "tool_result", "tool": "write_file", "status": "succeeded", "result": "+58 −4"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_approval_event_published(service: GatewayService) -> None:
+    from svarog_harness.storage.models import Approval
+
+    published: list[dict[str, object]] = []
+    service.events.publish = lambda run_id, event: published.append(event)  # type: ignore[method-assign]
+
+    started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    holder = _RunHolder()
+    holder.run_id = "run-1"
+    hooks = service._event_hooks(holder, started)
+
+    approval = Approval(
+        id="ap-1",
+        run_id="run-1",
+        action_type="run_shell",
+        payload={"command": "uv run pytest -q"},
+    )
+    assert hooks.on_approval_requested is not None
+    hooks.on_approval_requested(approval)
+
+    assert published == [
+        {
+            "type": "approval_required",
+            "approval_id": "ap-1",
+            "action_type": "run_shell",
+            "payload": {"command": "uv run pytest -q"},
+        }
+    ]
