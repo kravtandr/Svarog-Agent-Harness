@@ -242,6 +242,7 @@ def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
         "      base_url: http://localhost:9/v1\n"
         "      model: router-model\n"
         "sandbox:\n  type: local-trusted\n"
+        "cloud:\n  warm_session_ttl_sec: 60\n"
         f"storage:\n  db_path: {db_path}\n",
         encoding="utf-8",
     )
@@ -355,3 +356,21 @@ async def test_send_message_reuses_shared_runner_without_override(
     await service.send_message(session.session_id, "задача", None)
 
     assert captured == [service._runner], "общий runner не переиспользован"
+
+
+@pytest.mark.asyncio
+async def test_warm_slot_not_reused_with_other_override(
+    service: GatewayService,
+) -> None:
+    """Слот держит runner с конфигом прошлого сообщения — переиспользовать нельзя."""
+    ws = service.workspace
+    first = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride())
+    second = await service._acquire_warm(
+        "s1", ws, AutonomyMode.YOLO, RunOverride(provider="router")
+    )
+    assert first is not second
+    assert second.runner.cfg.models.default == "router"
+
+    again = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride(provider="router"))
+    assert again is second, "тот же override — тот же слот"
+    await service.close_warm_sessions()

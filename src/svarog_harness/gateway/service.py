@@ -129,6 +129,7 @@ class _WarmSlot:
     runner: TaskRunner
     resources: SessionResources
     last_used: float
+    override: RunOverride = RunOverride()
 
 
 @dataclass
@@ -246,25 +247,35 @@ class GatewayService:
         """Слот тёплого sandbox сессии; None — фича выключена (ttl=0).
 
         Первый вызов сессии поднимает env/infra/MCP один раз; дальнейшие
-        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s). При
-        override сообщения (задача 3) тёплый слот не создаётся и не
-        переиспользуется: он держит runner на self.cfg без override, и если
-        отдать его как есть — override сообщения молча проигнорируется.
+        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s). Слот
+        держит override, под которым он поднят: сообщение с тем же override
+        переиспользует слот, а с другим — получает свежий (старый закрывается,
+        иначе исполнитель или провайдер прошлого сообщения молча просочится
+        в новое).
         """
-        if self.cfg.cloud.warm_session_ttl_sec <= 0 or not override.is_empty():
+        if self.cfg.cloud.warm_session_ttl_sec <= 0:
             return None
         async with self._warm_lock:
             slot = self._warm.get(session_id)
-            if slot is not None:
+            if slot is not None and slot.override == override:
                 slot.last_used = time.monotonic()
                 return slot
-            runner = self._runner_for(workspace)
+            if slot is not None:
+                # Слот держит env/MCP, поднятые под прошлым конфигом: с другим
+                # исполнителем или провайдером это чужой sandbox.
+                await self._drop_warm(session_id)
+            cfg = apply_override(self.cfg, override)
+            run_meta: dict[str, object] | None = (
+                {OVERRIDE_META_KEY: override.to_meta()} if not override.is_empty() else None
+            )
+            runner = self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
             resources = await runner.prepare_session_resources(autonomy)
             slot = _WarmSlot(
                 workspace=workspace,
                 runner=runner,
                 resources=resources,
                 last_used=time.monotonic(),
+                override=override,
             )
             self._warm[session_id] = slot
             return slot
