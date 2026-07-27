@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
 from svarog_harness.runtime.bridge import ControlHandler
@@ -48,7 +48,7 @@ from svarog_harness.tools.document_tools import (
     ReadImageTool,
     document_tools_available,
 )
-from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool
+from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool, SearchMemoryTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import question_options
 from svarog_harness.trace.recorder import TraceRecorder
@@ -106,6 +106,7 @@ class BridgeControl:
         on_notify: Callable[[str, str], None] | None = None,
         on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
         self_docs: bool = True,
+        search_sessions: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
         self._db_action = db_action
         self._policy = policy
@@ -114,6 +115,10 @@ class BridgeControl:
         self._skills = skills
         self._proposal_sink = proposal_sink
         self._self_docs = self_docs
+        # Read-фабрика к runtime-БД для search_memory (связка B). BridgeControl
+        # конфига не держит, поэтому фабрику собирает и передаёт RunAssembly;
+        # None — FTS выключен, tool не регистрируется.
+        self._search_sessions = search_sessions
         self._secret_values = secret_values
         self._grace_sec = approval_grace_sec
         self._ask_user_timeout_sec = ask_user_timeout_sec
@@ -148,6 +153,10 @@ class BridgeControl:
                 memory_dir=self._memory_dir,
             )
             tools["read_memory"] = ReadMemoryTool(self._memory_dir)
+            # Поиск по содержимому памяти (связка B): внешний агент получает
+            # retrieval тем же tool'ом, что и native-реестр.
+            if self._search_sessions is not None:
+                tools["search_memory"] = SearchMemoryTool(self._search_sessions)
         if self._skills:
             tools["read_skill"] = ReadSkillTool(self._skills, on_load=self._on_skill_load)
         tools["create_skill_proposal"] = CreateSkillProposalTool(

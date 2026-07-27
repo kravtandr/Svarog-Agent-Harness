@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from svarog_harness.config.paths import first_existing_skills_dir, memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
@@ -43,7 +43,12 @@ from svarog_harness.storage.models import Approval, MemoryProposal, Run, SkillPr
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.child_tools import SpawnChildCallback, SpawnChildRunTool
 from svarog_harness.tools.file_tools import file_tools
-from svarog_harness.tools.memory_tools import ProposeMemoryChangeTool, ReadMemoryTool, RememberTool
+from svarog_harness.tools.memory_tools import (
+    ProposeMemoryChangeTool,
+    ReadMemoryTool,
+    RememberTool,
+    SearchMemoryTool,
+)
 from svarog_harness.tools.plan_tools import UpdatePlanTool
 from svarog_harness.tools.registry import LoadToolTool, ToolRegistry
 from svarog_harness.tools.schedule_tools import ScheduleRequest, ScheduleTaskTool
@@ -143,6 +148,22 @@ class RunAssembly:
         self._workspace = workspace
         self._store = store
         self._host_store = host_store
+        # Ленивая read-фабрика к runtime-БД (связка B): создаётся при первом
+        # обращении и живёт до конца процесса — держат её только read-only
+        # потребители FTS (search_memory, авто-инъекция).
+        self._read_sessions: async_sessionmaker[AsyncSession] | None = None
+
+    def _read_session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Session-factory к runtime-БД для read-запросов FTS (связка B).
+
+        Отдельная от `with_db`: та открывает движок на одно действие и закрывает
+        его, а tool живёт весь run и открывает короткую сессию на каждый поиск.
+        """
+        if self._read_sessions is None:
+            self._read_sessions = create_session_factory(
+                create_engine(self._cfg.storage.db_path.expanduser())
+            )
+        return self._read_sessions
 
     async def with_db[T](self, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
         init_db(self._cfg.storage.db_path)
@@ -384,6 +405,9 @@ class RunAssembly:
             on_notify=hooks.on_notify,
             on_approval_prompt=_approval_prompt_async(hooks.on_approval_requested),
             self_docs=external.self_docs,
+            # FTS выключен — фабрику не передаём, и search_memory не появится
+            # в наборе бриджа (связка B).
+            search_sessions=self._read_session_factory() if cfg.memory.fts_enabled else None,
         )
         assert infra.bridge is not None
         infra.bridge.control_handlers.update(control.handlers())
@@ -450,6 +474,9 @@ class RunAssembly:
             # remember — не регистрируется вовсе (§6 спеки блока C).
             if mem_dir is not None:
                 registry.register(ReadMemoryTool(mem_dir))
+                if self._cfg.memory.fts_enabled:
+                    # Dream ищет дубли/противоречия по содержимому (связка B).
+                    registry.register(SearchMemoryTool(self._read_session_factory()))
                 if memory_proposal_sink is not None:
                     registry.register(
                         ProposeMemoryChangeTool(
@@ -501,6 +528,9 @@ class RunAssembly:
             )
             # Прогрессивная загрузка (ADR-0011): страницы памяти по требованию.
             registry.register(ReadMemoryTool(mem_dir))
+            if self._cfg.memory.fts_enabled:
+                # Поиск по содержимому (связка B): index.md ищет по заголовкам.
+                registry.register(SearchMemoryTool(self._read_session_factory()))
         if schedule_sink is not None:
             # schedule.create — неотключаемый critical-набор (ADR-0010):
             # approval требуется в любом режиме автономии.
