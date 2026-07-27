@@ -72,3 +72,27 @@ describe("поле ввода", () => {
     expect(mic).toHaveAccessibleDescription(/появится позже/i);
   });
 });
+
+describe("клавиатура", () => {
+  it("отправляет по Enter", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} onSend={onSend} />);
+
+    const field = screen.getByRole("textbox", { name: /написать/i });
+    await userEvent.type(field, "прогони тесты{Enter}");
+
+    expect(onSend).toHaveBeenCalledWith("прогони тесты");
+    expect(field).toHaveValue("");
+  });
+
+  it("Shift+Enter переносит строку, а не отправляет", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} onSend={onSend} />);
+
+    const field = screen.getByRole("textbox", { name: /написать/i });
+    await userEvent.type(field, "первая{Shift>}{Enter}{/Shift}вторая");
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field).toHaveValue("первая\nвторая");
+  });
+});

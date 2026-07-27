@@ -36,6 +36,14 @@ export function Composer({
             rows={1}
             value={text}
             onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter отправляет, Shift+Enter — перенос строки: так ведёт
+              // себя любой чат, и без этого поле кажется сломанным.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
           />
           <div className="composer__foot">
             {/* Автономия — свойство сообщения, её принимает POST /sessions/{id}/messages.
