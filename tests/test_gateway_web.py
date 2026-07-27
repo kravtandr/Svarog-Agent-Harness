@@ -205,6 +205,87 @@ def test_session_thread_endpoint_404(service: GatewayService) -> None:
     assert client.get("/sessions/нет-такой/messages").status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_config_form_built_from_schema(service: GatewayService) -> None:
+    view = service.describe_config()
+
+    fields = {f.path: f for section in view.sections for f in section.fields}
+
+    # Тип и набор значений выведены из схемы, а не заданы руками.
+    assert fields["runtime.autonomy"].kind == "enum"
+    assert fields["runtime.autonomy"].choices == ["supervised", "auto", "yolo"]
+    assert fields["runtime.autonomy"].value == "yolo"  # дефолт RuntimeConfig
+    # Ограничение gt=0 из Field попало в форму.
+    assert fields["runtime.max_iterations"].kind == "int"
+    assert fields["runtime.max_iterations"].minimum == 0
+    assert fields["git.require_approval_for_push"].kind == "bool"
+    assert fields["git.require_approval_for_push"].value is True
+    assert fields["sandbox.type"].choices == ["docker", "local-trusted"]
+    assert view.path.endswith("svarog.yaml")
+
+
+@pytest.mark.asyncio
+async def test_config_preview_shows_diff_without_writing(service: GatewayService) -> None:
+    before = service.config_path.read_text(encoding="utf-8")
+
+    view = service.preview_config({"runtime.autonomy": "supervised"})
+
+    assert view.changes > 0
+    added = [line.text for line in view.lines if line.kind == "add"]
+    assert any("supervised" in text for text in added)
+    # Файл не тронут: запись только по «Сохранить».
+    assert service.config_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_config_write_persists_and_reloads(service: GatewayService) -> None:
+    service.write_config({"runtime.autonomy": "supervised", "runtime.max_iterations": 7})
+
+    reloaded = load_config(project_dir=service.workspace)
+    assert reloaded.runtime.autonomy.value == "supervised"
+    assert reloaded.runtime.max_iterations == 7
+
+
+@pytest.mark.asyncio
+async def test_config_rejects_value_schema_would_reject(service: GatewayService) -> None:
+    from svarog_harness.config.loader import ConfigError
+
+    # max_iterations объявлен как gt=0 — ноль схема не примет.
+    with pytest.raises(ConfigError):
+        service.preview_config({"runtime.max_iterations": 0})
+
+
+@pytest.mark.asyncio
+async def test_config_rejects_field_outside_form(service: GatewayService) -> None:
+    with pytest.raises(ValueError, match="недоступно"):
+        service.preview_config({"storage.db_path": "/tmp/x.db"})
+
+
+def test_config_endpoints(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+
+    assert client.get("/config").status_code == 200
+
+    preview = client.post("/config/preview", json={"values": {"runtime.autonomy": "auto"}})
+    assert preview.status_code == 200
+    assert preview.json()["changes"] > 0
+
+    bad = client.post("/config/preview", json={"values": {"runtime.max_iterations": 0}})
+    assert bad.status_code == 422
+
+
+def test_secrets_never_return_values(
+    service: GatewayService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROVIDER_API_KEY", "sk-очень-секретно")
+    client = TestClient(create_app(service=service))
+
+    response = client.get("/secrets")
+
+    assert response.status_code == 200
+    assert "sk-очень-секретно" not in response.text
+
+
 def test_root_explains_when_bundle_missing(
     service: GatewayService, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -159,6 +159,13 @@ class SessionView(BaseModel):
     runs: list[RunSummary]
 
 
+class SecretView(BaseModel):
+    """Секрет для экрана настроек: имя и факт наличия, без значения (ADR-0006)."""
+
+    name: str
+    present: bool
+
+
 class ThreadItemView(BaseModel):
     """Элемент ленты в той же форме, в какой его собирает живой поток.
 

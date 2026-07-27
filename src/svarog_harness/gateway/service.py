@@ -19,9 +19,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError
 from svarog_harness.config.paths import skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
@@ -31,6 +34,7 @@ from svarog_harness.gateway.models import (
     RunDetail,
     RunDiffView,
     RunSummary,
+    SecretView,
     SessionSummary,
     SessionThread,
     SessionView,
@@ -39,6 +43,13 @@ from svarog_harness.gateway.models import (
     ToolCallView,
     WhoamiView,
     WorkspaceView,
+)
+from svarog_harness.gateway.settings import (
+    ConfigDiffView,
+    ConfigView,
+    apply_values,
+    describe_config,
+    diff_lines,
 )
 from svarog_harness.gitflow.provision import (
     DEFAULT_GIT_CREDENTIALS_REF,
@@ -731,6 +742,63 @@ class GatewayService:
             return SessionThread(session_id=session.id, title=session.title or "", items=items)
 
         return await self._read(action)
+
+    # --- конфигурация и секреты (план 2026-07-27) --------------------------
+
+    @property
+    def config_path(self) -> Path:
+        """Файл, который правит интерфейс: project-уровень рядом с workspace."""
+        return self.workspace / PROJECT_CONFIG_NAME
+
+    def _config_yaml(self) -> tuple[dict[str, Any], str]:
+        """Сырой mapping файла и его текст (для диффа). Нет файла — пусто."""
+        path = self.config_path
+        if not path.is_file():
+            return {}, ""
+        text = path.read_text(encoding="utf-8")
+        raw = yaml.safe_load(text) or {}
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: верхний уровень должен быть mapping")
+        return raw, text
+
+    def describe_config(self) -> ConfigView:
+        return describe_config(self.cfg, str(self.config_path))
+
+    def preview_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Что будет записано — без записи. Валидация та же, что при чтении."""
+        raw, before = self._config_yaml()
+        updated = apply_values(raw, values)
+        # Проверяем результат целиком: форма не должна уметь записать конфиг,
+        # который Сварог потом откажется читать.
+        try:
+            SvarogConfig(**updated)
+        except ValidationError as exc:
+            raise ConfigError(str(exc)) from exc
+        after = yaml.safe_dump(updated, allow_unicode=True, sort_keys=False)
+        lines = diff_lines(before, after)
+        return ConfigDiffView(
+            path=str(self.config_path),
+            lines=lines,
+            changes=sum(1 for line in lines if line.kind != "same"),
+        )
+
+    def write_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Записать изменения в svarog.yaml после той же проверки, что и preview."""
+        view = self.preview_config(values)
+        raw, _ = self._config_yaml()
+        updated = apply_values(raw, values)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(
+            yaml.safe_dump(updated, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
+        return view
+
+    def list_secrets(self) -> list[SecretView]:
+        """Имена секретов и найдено ли значение. Значения не возвращаются никогда."""
+        store = self._runner.store
+        return [
+            SecretView(name=name, present=bool(store.get(name))) for name in sorted(store.names())
+        ]
 
     # --- named workspaces и артефакты (ADR-0017) ---------------------------
 

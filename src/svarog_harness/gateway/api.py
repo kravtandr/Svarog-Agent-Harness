@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+from svarog_harness.config.loader import ConfigError
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
@@ -33,6 +34,7 @@ from svarog_harness.gateway.models import (
     RunDiffView,
     RunRef,
     RunSummary,
+    SecretView,
     SendMessageRequest,
     SessionSummary,
     SessionThread,
@@ -42,6 +44,7 @@ from svarog_harness.gateway.models import (
     WorkspaceView,
 )
 from svarog_harness.gateway.service import CancelNotAllowedError, GatewayService
+from svarog_harness.gateway.settings import ConfigDiffView, ConfigUpdateRequest, ConfigView
 from svarog_harness.gateway.static import web_dist_dir
 from svarog_harness.gitflow.provision import (
     CloneError,
@@ -371,6 +374,30 @@ def create_app(
         # Ответ на ask_user записан — возобновляем run (§6.5, ADR-0005).
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
+
+    # --- конфигурация и секреты (план 2026-07-27) --------------------------
+
+    @app.get("/config", response_model=ConfigView)
+    async def get_config(service: ServiceDep) -> ConfigView:
+        return service.describe_config()
+
+    @app.post("/config/preview", response_model=ConfigDiffView)
+    async def preview_config(req: ConfigUpdateRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return service.preview_config(req.values)
+        except (ConfigError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/config", response_model=ConfigDiffView)
+    async def write_config(req: ConfigUpdateRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return service.write_config(req.values)
+        except (ConfigError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.get("/secrets", response_model=list[SecretView])
+    async def list_secrets(service: ServiceDep) -> list[SecretView]:
+        return service.list_secrets()
 
     # --- собранный клиент (план 2026-07-27) --------------------------------
     # Монтируется последним: маршруты API уже объявлены и в тень не уходят.
