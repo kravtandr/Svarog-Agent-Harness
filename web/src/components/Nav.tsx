@@ -25,13 +25,13 @@ function dayLabel(session: SessionSummary, now: number = Date.now()): string {
   return "Ранее";
 }
 
-export type Section = "chat" | "skills" | "memory" | "settings";
+export type Section = "chat" | "runs" | "skills" | "memory" | "settings";
 
-/** Разделы, у которых уже есть экран. Остальные выключены, а не молча мертвы. */
-const SECTIONS: { key: Section; title: string; ready: boolean }[] = [
-  { key: "skills", title: "Скиллы", ready: false },
-  { key: "memory", title: "Память", ready: true },
-  { key: "settings", title: "Настройки", ready: true },
+const SECTIONS: { key: Section; title: string }[] = [
+  { key: "runs", title: "Запуски" },
+  { key: "skills", title: "Скиллы" },
+  { key: "memory", title: "Память" },
+  { key: "settings", title: "Настройки" },
 ];
 
 export function Nav({
@@ -92,8 +92,6 @@ export function Nav({
             key={item.key}
             type="button"
             className={`nav__section${section === item.key ? " nav__item--active" : ""}`}
-            title={item.ready ? undefined : "Появится в следующем шаге"}
-            disabled={!item.ready}
             onClick={() => onSection(item.key)}
           >
             {item.title}

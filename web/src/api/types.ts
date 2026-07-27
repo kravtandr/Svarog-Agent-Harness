@@ -68,6 +68,44 @@ export interface SecretView {
   present: boolean;
 }
 
+export interface SkillCard {
+  name: string;
+  description: string;
+  version: string;
+  risk: string;
+}
+
+export interface RunSummary {
+  run_id: string;
+  state: string;
+  task: string;
+  autonomy: string;
+  iterations: number;
+  tokens_used: number;
+  cost_usd: number;
+  error: string | null;
+}
+
+export interface ToolCallView {
+  tool_name: string;
+  risk_level: string | null;
+  policy_decision: string | null;
+  status: string;
+  error: string | null;
+}
+
+export interface RunDetail extends RunSummary {
+  messages: Record<string, unknown>[];
+  tool_calls: ToolCallView[];
+  checks: Record<string, unknown>[];
+}
+
+export interface RunDiff {
+  run_id: string;
+  committed: string;
+  uncommitted: string;
+}
+
 export interface MemoryPage {
   path: string;
   size_bytes: number;

@@ -45,13 +45,21 @@ describe("оболочка приложения", () => {
     ).toBeInTheDocument();
   });
 
-  it("оставляет раздел без экрана выключённым, а не молча мёртвым", async () => {
+  it("все разделы навигатора открываются", async () => {
     render(<App api={api()} />);
     await screen.findByRole("button", { name: /FTS-поиск/ });
 
-    const skills = screen.getByRole("button", { name: "Скиллы" });
-    expect(skills).toBeDisabled();
-    expect(skills).toHaveAttribute("title", "Появится в следующем шаге");
+    for (const [title, marker] of [
+      ["Запуски", /поставьте первую задачу|загружаем запуски/i],
+      ["Скиллы", /положите их в каталог skills|загружаем скиллы/i],
+      ["Память", /все записи|память не настроена|загружаем память/i],
+      ["Настройки", /секреты|загружаем настройки/i],
+    ] as const) {
+      const button = screen.getByRole("button", { name: title });
+      expect(button).toBeEnabled();
+      await userEvent.click(button);
+      expect(await screen.findByText(marker)).toBeInTheDocument();
+    }
   });
 
   it("сообщает о недоступном сервере, а не показывает пустоту", async () => {

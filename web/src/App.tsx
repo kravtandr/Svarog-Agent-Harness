@@ -6,13 +6,16 @@ import { Nav, type Section } from "./components/Nav";
 import { Shell } from "./components/Shell";
 import { ChatScreen } from "./screens/ChatScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
+import { RunsScreen } from "./screens/RunsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { SkillsScreen } from "./screens/SkillsScreen";
 
 // Статика раздаётся тем же svarog serve, поэтому базовый URL пустой.
 const defaultApi = createClient({ baseUrl: "" });
 
 const TITLES: Record<Section, string> = {
   chat: "Сварог",
+  runs: "Запуски",
   skills: "Скиллы",
   memory: "Память",
   settings: "Настройки",
@@ -81,7 +84,9 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
     >
       {section === "settings" && <SettingsScreen api={api} />}
       {section === "memory" && <MemoryScreen api={api} />}
-      {section !== "settings" && section !== "memory" && (
+      {section === "skills" && <SkillsScreen api={api} />}
+      {section === "runs" && <RunsScreen api={api} />}
+      {section === "chat" && (
         <ChatScreen
           api={api}
           sessionId={activeId}

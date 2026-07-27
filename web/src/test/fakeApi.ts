@@ -33,6 +33,14 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       modified_at: "2026-07-27T10:00:00Z",
     }),
     memorySearch: vi.fn().mockResolvedValue([]),
+    skills: vi.fn().mockResolvedValue([]),
+    runs: vi.fn().mockResolvedValue([]),
+    run: vi.fn(),
+    runDiff: vi.fn().mockResolvedValue({
+      run_id: "",
+      committed: "",
+      uncommitted: "",
+    }),
     ...over,
   };
 }

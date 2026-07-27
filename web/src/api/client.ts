@@ -5,10 +5,14 @@ import type {
   MemoryFile,
   MemoryHit,
   MemoryPage,
+  RunDetail,
+  RunDiff,
   RunRef,
+  RunSummary,
   SecretView,
   SessionSummary,
   SessionThread,
+  SkillCard,
 } from "./types";
 
 /** Значения формы: путь поля → новое значение. */
@@ -46,6 +50,10 @@ export interface Api {
   memoryTree(): Promise<MemoryPage[]>;
   memoryFile(path: string): Promise<MemoryFile>;
   memorySearch(query: string): Promise<MemoryHit[]>;
+  skills(): Promise<SkillCard[]>;
+  runs(): Promise<RunSummary[]>;
+  run(runId: string): Promise<RunDetail>;
+  runDiff(runId: string): Promise<RunDiff>;
 }
 
 export function createClient({ baseUrl, token }: ClientOptions): Api {
@@ -111,5 +119,10 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
       request<MemoryFile>(`/memory/file?path=${encodeURIComponent(path)}`),
     memorySearch: (query) =>
       request<MemoryHit[]>(`/memory/search?q=${encodeURIComponent(query)}`),
+    skills: () => request<SkillCard[]>("/skills"),
+    runs: () => request<RunSummary[]>("/runs"),
+    run: (runId) => request<RunDetail>(`/runs/${encodeURIComponent(runId)}`),
+    runDiff: (runId) =>
+      request<RunDiff>(`/runs/${encodeURIComponent(runId)}/diff`),
   };
 }
