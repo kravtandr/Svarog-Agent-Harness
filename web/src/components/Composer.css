@@ -1,0 +1,75 @@
+.composer {
+  padding: 12px 24px 16px;
+}
+.composer__inner {
+  max-width: 700px;
+  margin: 0 auto;
+}
+.composer__box {
+  padding: 12px 14px 9px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.composer__field {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  resize: none;
+}
+.composer__field::placeholder {
+  color: var(--faint);
+}
+.composer__field:focus {
+  outline: none;
+}
+.composer__foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 11px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.composer__icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: var(--raised);
+  color: var(--muted);
+  cursor: pointer;
+}
+.composer__icon:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.composer__icon--send {
+  background: var(--ember);
+  color: #1a1210;
+}
+.composer__spacer {
+  flex: 1;
+}
+.composer__hidden {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .composer {
+    padding: 10px 12px 14px;
+  }
+  .composer__icon {
+    width: 44px;
+    height: 44px;
+  }
+  .composer__foot {
+    gap: 8px;
+    font-size: 12px;
+  }
+}
