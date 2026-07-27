@@ -1,5 +1,6 @@
 """Override исполнителя/провайдера/модели в сообщении чата (план 2026-07-28)."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -63,9 +64,7 @@ def test_model_without_provider_applies_to_default(tmp_path: Path) -> None:
 
 def test_prices_replace_provider_prices(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    derived = apply_override(
-        cfg, RunOverride(provider="router", model="x/y"), prices=(0.5, 1.5)
-    )
+    derived = apply_override(cfg, RunOverride(provider="router", model="x/y"), prices=(0.5, 1.5))
     assert derived.models.providers["router"].input_usd_per_mtok == 0.5
     assert derived.models.providers["router"].output_usd_per_mtok == 1.5
 
@@ -79,7 +78,7 @@ def test_unknown_provider_rejected_with_known_names(tmp_path: Path) -> None:
 
 def test_external_without_section_rejected(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    with pytest.raises(OverrideError, match="executor.external"):
+    with pytest.raises(OverrideError, match=re.escape("executor.external")):
         apply_override(cfg, RunOverride(executor="external"))
 
 

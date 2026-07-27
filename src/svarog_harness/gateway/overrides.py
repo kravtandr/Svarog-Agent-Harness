@@ -91,7 +91,9 @@ def apply_override(
     target = ov.provider if ov.provider is not None else cfg.models.default
     if ov.provider is not None and ov.provider not in cfg.models.providers:
         known = ", ".join(sorted(cfg.models.providers)) or "нет"
-        raise OverrideError(f"провайдер '{ov.provider}' не описан в models.providers (есть: {known})")
+        raise OverrideError(
+            f"провайдер '{ov.provider}' не описан в models.providers (есть: {known})"
+        )
 
     provider_update: dict[str, object] = {}
     if ov.model is not None:
@@ -104,8 +106,6 @@ def apply_override(
         providers = dict(cfg.models.providers)
         if provider_update:
             providers[target] = providers[target].model_copy(update=provider_update)
-        update["models"] = cfg.models.model_copy(
-            update={"default": target, "providers": providers}
-        )
+        update["models"] = cfg.models.model_copy(update={"default": target, "providers": providers})
 
     return cfg.model_copy(update=update)
