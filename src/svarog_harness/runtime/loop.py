@@ -202,6 +202,7 @@ class AgentLoop:
         on_run_started: Callable[[Run], None] | None = None,
         on_progress: Callable[[int, int, float, float, int], None] | None = None,
         parent_run_id: str | None = None,
+        extra_run_meta: dict[str, object] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -240,6 +241,9 @@ class AgentLoop:
         self._on_run_started = on_run_started
         # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
         self._parent_run_id = parent_run_id
+        # Довесок вызывающей стороны (override сообщения чата) — прозрачно
+        # пробрасывается в Run.meta, loop его содержимое не читает.
+        self._extra_run_meta = extra_run_meta
         # Тайминги фаз хода (блок A §5): __init__ заводит пустой таймер на
         # случай использования без resume(). run() всегда стартует свежий Run
         # без phases (start_run) — там таймер переинициализируется, а не
@@ -283,6 +287,7 @@ class AgentLoop:
             config_hash=self._config_hash,
             workspace=str(self._workspace),
             parent_run_id=self._parent_run_id,
+            extra_meta=self._extra_run_meta,
         )
         if self._on_run_started is not None:
             self._on_run_started(run)

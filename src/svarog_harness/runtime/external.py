@@ -103,6 +103,7 @@ class ExternalAgentExecutor:
         mcp_config: str | None = None,
         settings_file: str | None = None,
         suspend_signal: SuspendSignal | None = None,
+        extra_run_meta: dict[str, object] | None = None,
     ) -> None:
         self._adapter = adapter
         self._environment = environment
@@ -127,6 +128,9 @@ class ExternalAgentExecutor:
         # Suspend-сигнал control-plane (§7): approval/ask_user без решения за
         # grace → стрим отменяется, run уходит в waiting_approval.
         self._suspend = suspend_signal
+        # Довесок вызывающей стороны (override сообщения чата) — прозрачно
+        # пробрасывается в Run.meta, executor его содержимое не читает.
+        self._extra_run_meta = extra_run_meta
 
     async def run(
         self,
@@ -148,6 +152,7 @@ class ExternalAgentExecutor:
             config_hash=self._config_hash,
             workspace=str(self._workspace),
             parent_run_id=self._parent_run_id,
+            extra_meta=self._extra_run_meta,
         )
         await self._recorder.merge_run_meta(
             run, {EXECUTOR_META_KEY: "external", ADAPTER_META_KEY: self._adapter.name}

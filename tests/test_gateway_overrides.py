@@ -12,6 +12,8 @@ from svarog_harness.gateway.overrides import (
     RunOverride,
     apply_override,
 )
+from svarog_harness.storage.db import create_engine, create_session_factory, init_db
+from svarog_harness.trace.recorder import TraceRecorder
 
 
 def _config(tmp_path: Path, extra: str = "") -> object:
@@ -118,3 +120,21 @@ def test_meta_round_trip_keeps_only_set_fields() -> None:
     assert RunOverride.from_meta(None).is_empty()
     assert RunOverride.from_meta({}).is_empty()
     assert RunOverride.from_meta({OVERRIDE_META_KEY: {"мусор": 1}}).is_empty()
+
+
+@pytest.mark.asyncio
+async def test_start_run_stores_extra_meta(tmp_path: Path) -> None:
+    db_path = tmp_path / "svarog.db"
+    init_db(db_path)
+    engine = create_engine(db_path)
+    factory = create_session_factory(engine)
+    async with factory() as db:
+        run = await TraceRecorder(db).start_run(
+            task="задача",
+            autonomy="yolo",
+            model="fake-model",
+            extra_meta={OVERRIDE_META_KEY: {"provider": "router"}},
+        )
+    assert run.meta[OVERRIDE_META_KEY] == {"provider": "router"}
+    assert run.meta["model"] == "fake-model", "штатные ключи не затёрты"
+    await engine.dispose()

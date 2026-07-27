@@ -153,11 +153,15 @@ class RunAssembly:
         *,
         store: SecretStore,
         host_store: SecretStore,
+        run_meta: dict[str, object] | None = None,
     ) -> None:
         self._cfg = cfg
         self._workspace = workspace
         self._store = store
         self._host_store = host_store
+        # Довесок вызывающей стороны (override сообщения чата, задача 1) —
+        # прозрачно уходит в Run.meta через AgentLoop/ExternalAgentExecutor.
+        self._run_meta = run_meta
         # Ленивая read-фабрика к runtime-БД (связка B): создаётся при первом
         # обращении и живёт до конца процесса — держат её только read-only
         # потребители FTS (search_memory, авто-инъекция).
@@ -357,6 +361,7 @@ class RunAssembly:
             on_run_started=hooks.on_run_started,
             on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,
+            extra_run_meta=self._run_meta,
         )
 
     def build_external_executor(
@@ -399,6 +404,7 @@ class RunAssembly:
             mcp_config=infra.mcp_config_path if infra is not None else None,
             settings_file=infra.settings_path if infra is not None else None,
             suspend_signal=control,
+            extra_run_meta=self._run_meta,
         )
 
     def wire_bridge_control(
