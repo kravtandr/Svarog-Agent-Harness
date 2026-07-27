@@ -47,6 +47,7 @@ from svarog_harness.gateway.models import (
     WhoamiView,
     WorkspaceView,
 )
+from svarog_harness.gateway.overrides import OverrideError, RunOverride
 from svarog_harness.gateway.service import (
     CancelNotAllowedError,
     GatewayService,
@@ -275,7 +276,12 @@ def create_app(
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
         try:
-            run_id = await service.send_message(session_id, req.text, req.autonomy)
+            run_id = await service.send_message(
+                session_id,
+                req.text,
+                req.autonomy,
+                RunOverride(executor=req.executor, provider=req.provider, model=req.model),
+            )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except UnknownWorkspaceError as exc:
@@ -289,6 +295,10 @@ def create_app(
             # workspace, пересекающийся с control-plane (ADR-0015 §0.3).
             # И то и другое — конфигурация запуска, а не сбой сервера:
             # 422 с текстом, а не 500 с трейсбеком в лог.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except OverrideError as exc:
+            # Выбор в поле ввода несовместим с конфигом — это ввод человека,
+            # а не сбой сервера: 422 с текстом, который говорит, что делать.
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 

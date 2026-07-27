@@ -150,6 +150,11 @@ class CreateSessionRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1)
     autonomy: AutonomyMode | None = None
+    # Выбор в поле ввода — свойство сообщения, а не правка svarog.yaml.
+    # None во всех трёх — поведение по конфигу.
+    executor: Literal["native", "external"] | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class SessionView(BaseModel):

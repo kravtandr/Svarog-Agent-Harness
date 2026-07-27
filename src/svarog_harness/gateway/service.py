@@ -47,6 +47,7 @@ from svarog_harness.gateway.models import (
     WhoamiView,
     WorkspaceView,
 )
+from svarog_harness.gateway.overrides import OVERRIDE_META_KEY, RunOverride, apply_override
 from svarog_harness.gateway.settings import (
     ConfigDiffView,
     ConfigView,
@@ -169,17 +170,25 @@ class GatewayService:
 
     # --- per-run workspaces (ADR-0017) ------------------------------------
 
-    def _runner_for(self, workspace: Path) -> TaskRunner:
+    def _runner_for(
+        self,
+        workspace: Path,
+        *,
+        cfg: SvarogConfig | None = None,
+        run_meta: dict[str, object] | None = None,
+    ) -> TaskRunner:
         """Runner для workspace run'а; workspace сервиса — общий self._runner.
 
         Per-run runner делит с сервисом конфиг (та же БД/память/секреты
         тенанта) и отличается только рабочим деревом — изоляция путей ядра
-        уже параметризована по workspace (ADR-0012).
+        уже параметризована по workspace (ADR-0012). Общий runner переиспользуется
+        только когда нет ни override-конфига, ни run_meta — иначе у run'а
+        своя, производная конфигурация (override сообщения, задача 1).
         """
         ws = workspace.expanduser().resolve()
-        if ws == self.workspace.expanduser().resolve():
+        if cfg is None and run_meta is None and ws == self.workspace.expanduser().resolve():
             return self._runner
-        return TaskRunner(self.cfg, ws, role=self.role)
+        return TaskRunner(cfg or self.cfg, ws, role=self.role, run_meta=run_meta)
 
     async def _provision_workspace(
         self, task: str, repo: RepoSpec | None, name: str | None
@@ -228,14 +237,21 @@ class GatewayService:
     # --- тёплые sandbox'ы сессий (ADR-0017) --------------------------------
 
     async def _acquire_warm(
-        self, session_id: str, workspace: Path, autonomy: AutonomyMode
+        self,
+        session_id: str,
+        workspace: Path,
+        autonomy: AutonomyMode,
+        override: RunOverride = RunOverride(),
     ) -> _WarmSlot | None:
         """Слот тёплого sandbox сессии; None — фича выключена (ttl=0).
 
         Первый вызов сессии поднимает env/infra/MCP один раз; дальнейшие
-        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s).
+        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s). При
+        override сообщения (задача 3) тёплый слот не создаётся и не
+        переиспользуется: он держит runner на self.cfg без override, и если
+        отдать его как есть — override сообщения молча проигнорируется.
         """
-        if self.cfg.cloud.warm_session_ttl_sec <= 0:
+        if self.cfg.cloud.warm_session_ttl_sec <= 0 or not override.is_empty():
             return None
         async with self._warm_lock:
             slot = self._warm.get(session_id)
@@ -371,16 +387,28 @@ class GatewayService:
             self._publish_error(holder, started, exc)
 
     async def _runner_for_run(self, run_id: str) -> TaskRunner:
-        """Runner, привязанный к workspace существующего run'а (для resume)."""
+        """Runner для resume: workspace и override читаются из строки run'а.
 
-        async def action(db: AsyncSession) -> str | None:
+        Без восстановления override дайджест конфига разойдётся со снимком
+        старта, и `_assert_config_unchanged` отклонит resume (ADR-0015 §0.4).
+        """
+
+        async def action(db: AsyncSession) -> tuple[str | None, dict[str, object]]:
             run = await find_run_by_prefix(db, run_id)
-            return run.workspace
+            return run.workspace, dict(run.meta or {})
 
-        workspace = await self._read(action)
+        workspace, meta = await self._read(action)
+        override = RunOverride.from_meta(meta)
         if not workspace:
-            return self._runner
-        return self._runner_for(Path(workspace))
+            return (
+                self._runner
+                if override.is_empty()
+                else self._runner_for(self.workspace, cfg=apply_override(self.cfg, override))
+            )
+        return self._runner_for(
+            Path(workspace),
+            cfg=apply_override(self.cfg, override) if not override.is_empty() else None,
+        )
 
     # --- события ----------------------------------------------------------
 
@@ -613,17 +641,28 @@ class GatewayService:
             session_id=session.id, title=session.title or "", workspace=meta["workspace"], runs=[]
         )
 
-    async def send_message(self, session_id: str, text: str, autonomy: AutonomyMode | None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        autonomy: AutonomyMode | None,
+        override: RunOverride = RunOverride(),
+    ) -> str:
         """Сообщение чата → отдельный run в workspace сессии с её историей.
 
         Контекст диалога — по типу executor'а (как в CLI-chat): нативному loop
         передаётся history из trace; внешний агент (ADR-0016) продолжает
         собственную сессию по agent_session_id, history ему не нужна —
         run_once сам резолвит agent_session по session_id.
+
+        `override` — выбор в поле ввода (задача 3), а не правка svarog.yaml:
+        производный конфиг строится до проверок занятости workspace, чтобы
+        негодный override отвечал 422 раньше, чем занятость — 409.
         """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
-        external = self.cfg.executor.type == "external"
+        cfg = apply_override(self.cfg, override)  # OverrideError → 422
+        external = cfg.executor.type == "external"
 
         async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:
             session = await find_session_by_prefix(db, session_id)
@@ -663,10 +702,17 @@ class GatewayService:
                 for m in raw
             ]
         )
-        mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
+        mode = autonomy if autonomy is not None else cfg.runtime.autonomy
         # Тёплый sandbox сессии (ADR-0017): env/infra/MCP переживают сообщение.
-        warm = await self._acquire_warm(session.id, workspace, mode)
-        runner = warm.runner if warm is not None else self._runner_for(workspace)
+        run_meta: dict[str, object] | None = (
+            {OVERRIDE_META_KEY: override.to_meta()} if not override.is_empty() else None
+        )
+        warm = await self._acquire_warm(session.id, workspace, mode, override)
+        runner = (
+            warm.runner
+            if warm is not None
+            else self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
+        )
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(
             self._run_bg(

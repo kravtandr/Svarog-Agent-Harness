@@ -5,10 +5,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import AutonomyMode
+from svarog_harness.gateway import GatewayService
+from svarog_harness.gateway.api import create_app
 from svarog_harness.gateway.overrides import (
     OVERRIDE_META_KEY,
     OverrideError,
@@ -16,9 +19,11 @@ from svarog_harness.gateway.overrides import (
     apply_override,
 )
 from svarog_harness.runtime import orchestrator
+from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.tools.child_tools import SpawnChildRunArgs
+from svarog_harness.trace.lookup import find_run_by_prefix
 from svarog_harness.trace.recorder import TraceRecorder
 
 
@@ -218,3 +223,77 @@ async def test_spawn_child_run_passes_run_meta(
 
     await runner.with_db(action)
     assert captured == [run_meta], "run_meta родителя не долетел до TaskRunner ребёнка"
+
+
+@pytest.fixture
+def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    router:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: router-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return GatewayService(load_config(project_dir=ws), ws)
+
+
+@pytest.mark.asyncio
+async def test_override_survives_resume_without_config_drift(
+    service: GatewayService,
+) -> None:
+    """Дайджест конфига при resume совпадает со снимком старта.
+
+    Это и есть гарантия, ради которой override кладётся в Run.meta:
+    `_assert_config_unchanged` сверяет хеши и fail-closed при расхождении
+    (ADR-0015 §0.4). Запуск падает на недоступном провайдере — неважно:
+    строка run'а со снимком создаётся до первого обращения к модели.
+    """
+    session = await service.create_session(title="с override")
+    run_id = await service.send_message(
+        session.session_id, "задача", None, RunOverride(provider="router")
+    )
+
+    async def read(db):
+        run = await find_run_by_prefix(db, run_id)
+        return dict(run.meta or {})
+
+    meta = await service._read(read)
+    assert meta[OVERRIDE_META_KEY] == {"provider": "router"}
+
+    runner = await service._runner_for_run(run_id)
+    assert runner.cfg.models.default == "router"
+    assert config_digest(runner.cfg, service.workspace) == meta[CONFIG_HASH_META_KEY]
+
+
+@pytest.mark.asyncio
+async def test_run_without_override_keeps_config_default(
+    service: GatewayService,
+) -> None:
+    session = await service.create_session(title="без override")
+    run_id = await service.send_message(session.session_id, "задача", None)
+
+    runner = await service._runner_for_run(run_id)
+    assert runner.cfg.models.default == "local"
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_returns_422(service: GatewayService) -> None:
+    session = await service.create_session(title="ошибка")
+    client = TestClient(create_app(service=service))
+    response = client.post(
+        f"/sessions/{session.session_id}/messages",
+        json={"text": "задача", "provider": "нет-такого"},
+    )
+    assert response.status_code == 422
+    assert "нет-такого" in response.json()["detail"]
