@@ -937,7 +937,11 @@ class TaskRunner:
         if mem_dir is None or not mem_dir.is_dir():
             return
         writer = MemoryWriter(
-            db, mem_dir, lock=self._lock, index_max_lines=self._cfg.memory.index_max_lines
+            db,
+            mem_dir,
+            lock=self._lock,
+            index_max_lines=self._cfg.memory.index_max_lines,
+            fts_enabled=self._cfg.memory.fts_enabled,
         )
         # known_values обязательны: без них secret scan не поймает реальные
         # значения секретов, пересказанные агентом в remember (ADR-0006).
@@ -983,7 +987,11 @@ class TaskRunner:
             # чтобы автозахват был откатываем и виден в git-истории (#1).
             run_id = await recorder.latest_run_id(session_id)
             writer = MemoryWriter(
-                db, mem_dir, lock=self._lock, index_max_lines=self._cfg.memory.index_max_lines
+                db,
+                mem_dir,
+                lock=self._lock,
+                index_max_lines=self._cfg.memory.index_max_lines,
+                fts_enabled=self._cfg.memory.fts_enabled,
             )
             for change in changes:
                 await writer.enqueue(replace(change, source_run_id=run_id))

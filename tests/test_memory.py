@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.memory import index as memory_index
 from svarog_harness.memory.apply import MemoryApplyError, apply_change
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
 from svarog_harness.memory.reader import read_memory
@@ -577,3 +578,59 @@ def test_read_memory_truncates_at_line_boundary_with_recipe(tmp_path: Path) -> N
     assert "WARNING" in text
     assert "превысил лимит" in text
     assert "Сокращай summary" in text
+
+
+# --- writer ↔ FTS (связка B) ---
+
+
+async def test_writer_reindex_populates_fts(db: AsyncSession, tmp_path: Path) -> None:
+    """После дренажа страница ищется по содержимому: writer синкает FTS."""
+    memory_dir = await _memory_repo(tmp_path)
+    writer = MemoryWriter(db, memory_dir, fts_enabled=True)
+    await writer.enqueue(
+        MemoryChangeRequest(
+            file="decisions/api.md",
+            operation=MemoryOperation.CREATE,
+            content="# API\nверсионируем через заголовок X-Api-Version\n",
+        )
+    )
+    await writer.drain()
+
+    hits = await memory_index.search(db, "версионируем", limit=5)
+    assert any(h.path == "decisions/api.md" for h in hits)
+
+
+async def test_writer_reindex_drops_deleted_page_from_fts(db: AsyncSession, tmp_path: Path) -> None:
+    """Удаление страницы вычищает её из индекса — поиск не возвращает мёртвых путей."""
+    memory_dir = await _memory_repo(tmp_path)
+    writer = MemoryWriter(db, memory_dir, fts_enabled=True)
+    await writer.enqueue(
+        MemoryChangeRequest(
+            file="decisions/api.md",
+            operation=MemoryOperation.CREATE,
+            content="# API\nверсионируем через заголовок X-Api-Version\n",
+        )
+    )
+    await writer.drain()
+    await writer.enqueue(
+        MemoryChangeRequest(file="decisions/api.md", operation=MemoryOperation.DELETE)
+    )
+    await writer.drain()
+
+    assert await memory_index.search(db, "версионируем", limit=5) == []
+
+
+async def test_writer_fts_disabled_skips_index(db: AsyncSession, tmp_path: Path) -> None:
+    """Тумблер fts_enabled=false убирает цену синка: индекс не наполняется."""
+    memory_dir = await _memory_repo(tmp_path)
+    writer = MemoryWriter(db, memory_dir, fts_enabled=False)
+    await writer.enqueue(
+        MemoryChangeRequest(
+            file="decisions/api.md",
+            operation=MemoryOperation.CREATE,
+            content="# API\nверсионируем через заголовок X-Api-Version\n",
+        )
+    )
+    await writer.drain()
+
+    assert await memory_index.search(db, "версионируем", limit=5) == []
