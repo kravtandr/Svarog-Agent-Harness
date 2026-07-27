@@ -15,6 +15,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       .fn()
       .mockResolvedValue({ session_id: "", title: "", items: [] }),
     createSession: vi.fn().mockResolvedValue({ session_id: "new" }),
+    deleteSession: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue({ run_id: "r1", state: "running" }),
     decideApproval: vi
       .fn()

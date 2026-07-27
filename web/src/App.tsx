@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { createClient, type Api } from "./api/client";
+import { ApiError, createClient, type Api } from "./api/client";
 import type { SessionSummary } from "./api/types";
-import { Nav, type Section } from "./components/Nav";
+import { busyLabel, Nav, type Section } from "./components/Nav";
 import { Shell } from "./components/Shell";
 import { ChatScreen } from "./screens/ChatScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
@@ -77,6 +77,47 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
     return created.session_id;
   }, [api, reload]);
 
+  const remove = useCallback(
+    async (sessionId: string) => {
+      const target = sessions.find((s) => s.session_id === sessionId);
+      // Удаление истории необратимо — спрашиваем прежде, чем делать.
+      if (
+        !window.confirm(
+          `Удалить чат «${target?.title ?? sessionId}»? Отменить нельзя.`,
+        )
+      )
+        return;
+      try {
+        await api.deleteSession(sessionId);
+      } catch (exc: unknown) {
+        setError(
+          exc instanceof ApiError ? exc.message : "Не удалось удалить чат.",
+        );
+        return;
+      }
+      // Если удалили открытый — переключаемся на первый оставшийся.
+      const rest = await api.listSessions();
+      setSessions(rest);
+      setActiveId((current) =>
+        current === sessionId ? (rest[0]?.session_id ?? null) : current,
+      );
+    },
+    [api, sessions],
+  );
+
+  // Пока хоть один чат занят, список обновляется сам: иначе индикатор
+  // «идёт» застынет и человек не увидит, что запуск кончился.
+  useEffect(() => {
+    if (!sessions.some((session) => busyLabel(session) !== null)) return;
+    const timer = window.setInterval(() => {
+      api
+        .listSessions()
+        .then(setSessions)
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [api, sessions]);
+
   /** Сессия для отправки: текущая, а если её нет — новая. */
   const ensureSession = useCallback(
     async () => activeId ?? (await startNew()),
@@ -96,6 +137,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
             setSection("chat");
           }}
           onNew={() => void startNew()}
+          onDelete={(id) => void remove(id)}
           section={section}
           onSection={setSection}
         />

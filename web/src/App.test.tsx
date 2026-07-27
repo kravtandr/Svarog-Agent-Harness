@@ -21,7 +21,7 @@ describe("оболочка приложения", () => {
     render(<App api={api()} />);
 
     expect(
-      await screen.findByRole("button", { name: /FTS-поиск/ }),
+      await screen.findByRole("button", { name: "FTS-поиск по памяти" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("textbox", { name: /написать/i }),
@@ -30,7 +30,7 @@ describe("оболочка приложения", () => {
 
   it("переключает разделы, у которых есть экран", async () => {
     render(<App api={api()} />);
-    await screen.findByRole("button", { name: /FTS-поиск/ });
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
     await userEvent.click(screen.getByRole("button", { name: "Настройки" }));
     expect(
@@ -45,7 +45,7 @@ describe("оболочка приложения", () => {
 
   it("все разделы навигатора открываются", async () => {
     render(<App api={api()} />);
-    await screen.findByRole("button", { name: /FTS-поиск/ });
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
     for (const [title, marker] of [
       ["Запуски", /поставьте первую задачу|загружаем запуски/i],
@@ -76,7 +76,7 @@ describe("оболочка приложения", () => {
   it("создаёт новый чат и возвращает в диалог", async () => {
     const client = api();
     render(<App api={client} />);
-    await screen.findByRole("button", { name: /FTS-поиск/ });
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
     await userEvent.click(screen.getByRole("button", { name: /Новый чат/ }));
 

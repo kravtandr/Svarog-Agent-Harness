@@ -14,6 +14,20 @@ function parseUtc(value: string): number {
   return Date.parse(withZone);
 }
 
+/** Незавершённые состояния run'а: чат занят, второй запуск получит отказ. */
+const BUSY: Record<string, string> = {
+  running: "идёт",
+  pending: "в очереди",
+  waiting_approval: "ждёт решения",
+  suspended: "приостановлен",
+};
+
+export function busyLabel(session: SessionSummary): string | null {
+  return session.last_state === null
+    ? null
+    : (BUSY[session.last_state] ?? null);
+}
+
 /** 0 — идёт сейчас, дальше остывает до 4 (архив). */
 export function heatLevel(
   session: SessionSummary,
@@ -49,6 +63,7 @@ export function Nav({
   activeId,
   onPick,
   onNew,
+  onDelete,
   section,
   onSection,
 }: {
@@ -56,6 +71,7 @@ export function Nav({
   activeId: string | null;
   onPick: (sessionId: string) => void;
   onNew: () => void;
+  onDelete: (sessionId: string) => void;
   section: Section;
   onSection: (section: Section) => void;
 }) {
@@ -76,21 +92,39 @@ export function Nav({
               <div className="nav__day">{label}</div>
             );
           lastLabel = label;
+          const busy = busyLabel(session);
           return (
             <div key={session.session_id}>
               {header}
-              <button
-                type="button"
-                className={`nav__item${session.session_id === activeId ? " nav__item--active" : ""}`}
-                onClick={() => onPick(session.session_id)}
+              <div
+                className={`nav__row${session.session_id === activeId ? " nav__row--active" : ""}`}
               >
-                <span
-                  className="heat"
-                  data-testid={`heat-${session.session_id}`}
-                  data-heat={heatLevel(session)}
-                />
-                <span className="nav__title">{session.title}</span>
-              </button>
+                <button
+                  type="button"
+                  className="nav__item"
+                  onClick={() => onPick(session.session_id)}
+                >
+                  <span
+                    className="heat"
+                    data-testid={`heat-${session.session_id}`}
+                    data-heat={heatLevel(session)}
+                  />
+                  <span className="nav__title">{session.title}</span>
+                  {busy !== null && (
+                    <span className="nav__busy" title={`Запуск ${busy}`}>
+                      {busy}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="nav__delete"
+                  aria-label={`Удалить чат «${session.title}»`}
+                  onClick={() => onDelete(session.session_id)}
+                >
+                  ×
+                </button>
+              </div>
             </div>
           );
         })}

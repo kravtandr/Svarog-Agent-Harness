@@ -104,6 +104,10 @@ class CancelNotAllowedError(Exception):
     """Run уже терминален — отменять нечего (ADR-0017 §2)."""
 
 
+class SessionBusyError(Exception):
+    """В сессии есть незавершённый run — удалять её нельзя."""
+
+
 class MemoryDisabledError(Exception):
     """Память не настроена в конфиге — экрана памяти быть не может."""
 
@@ -724,6 +728,32 @@ class GatewayService:
             return summaries
 
         return await self._read(action)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Удалить сессию вместе с её runs (каскад в схеме, ADR-0015).
+
+        Живую сессию не трогаем: удалить историю запуска, который прямо
+        сейчас правит рабочее дерево, — способ потерять след того, что
+        уже сделано.
+        """
+
+        async def action(db: AsyncSession) -> None:
+            session = await find_session_by_prefix(db, session_id)
+            live = (
+                await db.execute(
+                    select(Run)
+                    .where(Run.session_id == session.id, Run.state.in_(_LIVE_STATES))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if live is not None:
+                raise SessionBusyError(
+                    "в этом чате ещё идёт запуск — дождитесь конца или прервите его"
+                )
+            await db.delete(session)
+            await db.commit()
+
+        await self._read(action)
 
     async def session_thread(self, session_id: str) -> SessionThread:
         """История сессии как лента: задача, вызовы, финальный ответ по каждому run."""

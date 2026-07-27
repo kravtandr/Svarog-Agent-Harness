@@ -686,3 +686,101 @@ def test_send_message_maps_setup_errors_to_422(
         )
         assert response.status_code == 422, response.text
         assert response.json()["detail"] == str(error)
+
+
+@pytest.mark.asyncio
+async def test_delete_session_removes_it_with_runs(service: GatewayService) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState
+
+    session = await service.create_session(title="на удаление")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-del",
+                session_id=session.session_id,
+                task="что-то",
+                state=RunState.COMPLETED,
+                autonomy="supervised",
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    await service.delete_session(session.session_id)
+
+    assert [s.session_id for s in await service.list_sessions()] == []
+    # Каскад: run исчез вместе с сессией, осиротевших записей не осталось.
+    assert [r.run_id for r in await service.list_runs()] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_session_refuses_while_run_is_live(service: GatewayService) -> None:
+    """Удалять историю запуска, который прямо сейчас правит дерево, нельзя."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.gateway.service import SessionBusyError
+    from svarog_harness.storage.models import Run, RunState
+
+    session = await service.create_session(title="занятая")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-live",
+                session_id=session.session_id,
+                task="идёт",
+                state=RunState.RUNNING,
+                autonomy="supervised",
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    with pytest.raises(SessionBusyError, match="идёт запуск"):
+        await service.delete_session(session.session_id)
+
+    assert len(await service.list_sessions()) == 1
+
+
+def test_delete_session_endpoint(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+    created = client.post("/sessions", json={"title": "через API"}).json()
+
+    assert client.delete(f"/sessions/{created['session_id']}").status_code == 204
+    assert client.get("/sessions").json() == []
+    assert client.delete("/sessions/нет-такой").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_reports_live_state_for_indicator(
+    service: GatewayService,
+) -> None:
+    """Индикатор занятости строится на last_state — он обязан быть точным."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState
+
+    session = await service.create_session(title="занятая")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-x",
+                session_id=session.session_id,
+                task="идёт",
+                state=RunState.RUNNING,
+                autonomy="supervised",
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    listed = await service.list_sessions()
+    assert listed[0].last_state == "running"
+    assert listed[0].runs_count == 1

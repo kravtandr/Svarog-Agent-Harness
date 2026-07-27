@@ -35,9 +35,56 @@
   background: var(--raised);
   color: var(--text);
 }
-.nav__item--active {
+/* Строка = чат + кнопка удаления; подсветка на всю строку. */
+.nav__row {
+  display: flex;
+  align-items: center;
+  margin: 0 10px;
+  border-radius: 7px;
+}
+.nav__row--active,
+.nav__row:hover {
   background: var(--raised);
+}
+.nav__row .nav__item {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.nav__row--active .nav__item {
   color: var(--text);
+}
+
+/* Индикатор занятости: чат считается занятым, пока run не завершён. */
+.nav__busy {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ember);
+  white-space: nowrap;
+}
+
+.nav__delete {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  margin-right: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  /* Видна только при наведении на строку: иначе крестики шумят в списке. */
+  opacity: 0;
+}
+.nav__row:hover .nav__delete,
+.nav__delete:focus-visible {
+  opacity: 1;
+}
+.nav__delete:hover {
+  color: var(--bad);
 }
 .nav__section:disabled {
   color: var(--faint);
@@ -95,6 +142,12 @@
 }
 
 @media (max-width: 899px) {
+  /* На тач-экране наведения нет — крестик показываем всегда. */
+  .nav__delete {
+    opacity: 1;
+    width: 44px;
+    height: 44px;
+  }
   .nav__item,
   .nav__new,
   .nav__section {

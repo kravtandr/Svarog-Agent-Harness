@@ -37,6 +37,7 @@ export interface Api {
   listSessions(): Promise<SessionSummary[]>;
   sessionThread(sessionId: string): Promise<SessionThread>;
   createSession(title: string): Promise<{ session_id: string }>;
+  deleteSession(sessionId: string): Promise<void>;
   sendMessage(
     sessionId: string,
     text: string,
@@ -89,6 +90,26 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
         method: "POST",
         body: JSON.stringify({ title }),
       }),
+    deleteSession: async (sessionId) => {
+      // 204 без тела — request<T> ждёт JSON, поэтому отдельным вызовом.
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(
+        `${baseUrl}/sessions/${encodeURIComponent(sessionId)}`,
+        { method: "DELETE", headers },
+      );
+      if (!response.ok) {
+        const body: unknown = await response.json().catch(() => null);
+        const detail =
+          body !== null &&
+          typeof body === "object" &&
+          "detail" in body &&
+          typeof body.detail === "string"
+            ? body.detail
+            : response.statusText;
+        throw new ApiError(response.status, detail);
+      }
+    },
     sendMessage: (sessionId, text, autonomy) =>
       request<RunRef>(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: "POST",

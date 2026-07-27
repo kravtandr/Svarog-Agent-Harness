@@ -52,6 +52,7 @@ from svarog_harness.gateway.service import (
     GatewayService,
     MemoryDisabledError,
     MemoryPathError,
+    SessionBusyError,
 )
 from svarog_harness.gateway.settings import ConfigDiffView, ConfigUpdateRequest, ConfigView
 from svarog_harness.gateway.static import web_dist_dir
@@ -254,6 +255,15 @@ def create_app(
             return await service.get_session(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.delete("/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str, service: ServiceDep) -> None:
+        try:
+            await service.delete_session(session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @app.get("/sessions/{session_id}/messages", response_model=SessionThread)
     async def session_messages(session_id: str, service: ServiceDep) -> SessionThread:

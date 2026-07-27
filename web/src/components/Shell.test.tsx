@@ -24,6 +24,7 @@ describe("навигатор", () => {
         activeId="s1"
         onPick={() => {}}
         onNew={() => {}}
+        onDelete={() => {}}
         section="chat"
         onSection={() => {}}
       />,
@@ -42,11 +43,14 @@ describe("навигатор", () => {
         activeId={null}
         onPick={onPick}
         onNew={() => {}}
+        onDelete={() => {}}
         section="chat"
         onSection={() => {}}
       />,
     );
-    await userEvent.click(screen.getByRole("button", { name: /FTS-поиск/ }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "FTS-поиск по памяти" }),
+    );
     expect(onPick).toHaveBeenCalledWith("s1");
   });
 
@@ -66,6 +70,7 @@ describe("навигатор", () => {
         activeId={null}
         onPick={() => {}}
         onNew={() => {}}
+        onDelete={() => {}}
         section="chat"
         onSection={() => {}}
       />,
@@ -130,5 +135,74 @@ describe("шкала накала и время", () => {
       last_state: "completed",
     };
     expect(heatLevel(session, now)).toBe(1);
+  });
+});
+
+describe("занятость и удаление чата", () => {
+  const busy = (state: string): SessionSummary =>
+    session({ session_id: "b", title: "занятый", last_state: state });
+
+  it("показывает, что в чате идёт работа", () => {
+    render(
+      <Nav
+        sessions={[busy("running")]}
+        activeId={null}
+        onPick={() => {}}
+        onNew={() => {}}
+        onDelete={() => {}}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+    expect(screen.getByText("идёт")).toBeInTheDocument();
+  });
+
+  it("различает ожидание решения и завершённый чат", () => {
+    const { rerender } = render(
+      <Nav
+        sessions={[busy("waiting_approval")]}
+        activeId={null}
+        onPick={() => {}}
+        onNew={() => {}}
+        onDelete={() => {}}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+    expect(screen.getByText("ждёт решения")).toBeInTheDocument();
+
+    rerender(
+      <Nav
+        sessions={[busy("completed")]}
+        activeId={null}
+        onPick={() => {}}
+        onNew={() => {}}
+        onDelete={() => {}}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/идёт|ждёт решения/)).not.toBeInTheDocument();
+  });
+
+  it("сообщает об удалении, не трогая выбор чата", async () => {
+    const onDelete = vi.fn();
+    const onPick = vi.fn();
+    render(
+      <Nav
+        sessions={[session({})]}
+        activeId={null}
+        onPick={onPick}
+        onNew={() => {}}
+        onDelete={onDelete}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /удалить чат/i }));
+
+    expect(onDelete).toHaveBeenCalledWith("s1");
+    expect(onPick).not.toHaveBeenCalled();
   });
 });
