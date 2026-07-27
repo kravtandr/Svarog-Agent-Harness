@@ -201,8 +201,37 @@ describe("занятость и удаление чата", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: /удалить чат/i }));
+    // Спрашиваем в строке, а не нативным confirm: тот блокирует страницу.
+    expect(onDelete).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Удалить" }));
 
     expect(onDelete).toHaveBeenCalledWith("s1");
     expect(onPick).not.toHaveBeenCalled();
+  });
+});
+
+describe("отмена удаления", () => {
+  it("даёт передумать и ничего не удаляет", async () => {
+    const onDelete = vi.fn();
+    render(
+      <Nav
+        sessions={[session({})]}
+        activeId={null}
+        onPick={() => {}}
+        onNew={() => {}}
+        onDelete={onDelete}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /удалить чат/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Отмена" }));
+
+    expect(onDelete).not.toHaveBeenCalled();
+    // Строка вернулась в обычный вид.
+    expect(
+      screen.getByRole("button", { name: /удалить чат/i }),
+    ).toBeInTheDocument();
   });
 });

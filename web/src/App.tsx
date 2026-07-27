@@ -79,14 +79,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
 
   const remove = useCallback(
     async (sessionId: string) => {
-      const target = sessions.find((s) => s.session_id === sessionId);
-      // Удаление истории необратимо — спрашиваем прежде, чем делать.
-      if (
-        !window.confirm(
-          `Удалить чат «${target?.title ?? sessionId}»? Отменить нельзя.`,
-        )
-      )
-        return;
+      // Подтверждение спрашивает сам навигатор, прямо в строке.
       try {
         await api.deleteSession(sessionId);
       } catch (exc: unknown) {
@@ -102,7 +95,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
         current === sessionId ? (rest[0]?.session_id ?? null) : current,
       );
     },
-    [api, sessions],
+    [api],
   );
 
   // Пока хоть один чат занят, список обновляется сам: иначе индикатор

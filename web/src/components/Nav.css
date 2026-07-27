@@ -86,6 +86,26 @@
 .nav__delete:hover {
   color: var(--bad);
 }
+
+/* Подтверждение в строке: удаление истории необратимо. */
+.nav__confirm,
+.nav__cancel {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-family: var(--sans);
+  font-size: 12px;
+  cursor: pointer;
+}
+.nav__confirm {
+  color: var(--bad);
+}
+.nav__cancel {
+  margin-right: 4px;
+  color: var(--faint);
+}
 .nav__section:disabled {
   color: var(--faint);
   cursor: default;

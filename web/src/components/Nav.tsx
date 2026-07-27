@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { SessionSummary } from "../api/types";
 import "./Nav.css";
 
@@ -76,6 +78,9 @@ export function Nav({
   onSection: (section: Section) => void;
 }) {
   let lastLabel = "";
+  // Какой чат сейчас спрашивает подтверждение. Нативный confirm блокирует
+  // страницу и выбивается из интерфейса — спрашиваем в самой строке.
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   return (
     <nav className="nav">
@@ -116,14 +121,36 @@ export function Nav({
                     </span>
                   )}
                 </button>
-                <button
-                  type="button"
-                  className="nav__delete"
-                  aria-label={`Удалить чат «${session.title}»`}
-                  onClick={() => onDelete(session.session_id)}
-                >
-                  ×
-                </button>
+                {confirming === session.session_id ? (
+                  <>
+                    <button
+                      type="button"
+                      className="nav__confirm"
+                      onClick={() => {
+                        setConfirming(null);
+                        onDelete(session.session_id);
+                      }}
+                    >
+                      Удалить
+                    </button>
+                    <button
+                      type="button"
+                      className="nav__cancel"
+                      onClick={() => setConfirming(null)}
+                    >
+                      Отмена
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="nav__delete"
+                    aria-label={`Удалить чат «${session.title}»`}
+                    onClick={() => setConfirming(session.session_id)}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             </div>
           );
