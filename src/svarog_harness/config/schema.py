@@ -147,6 +147,11 @@ class MemoryConfig(StrictModel):
     # Потолок автогенного index.md в строках (ADR-0015 §1.5); обеспечивается
     # при генерации, хвост списка сворачивается в «…и ещё N страниц».
     index_max_lines: int = Field(default=200, gt=0)
+    # FTS5-retrieval (связка B): полнотекстовый индекс памяти в runtime-БД.
+    fts_enabled: bool = True
+    # Авто-инъекция при переполнении index.md: K страниц и байтовый бюджет блока.
+    fts_inject_pages: int = Field(default=5, gt=0)
+    fts_inject_bytes: int = Field(default=3000, gt=0)
 
 
 class SecretsConfig(StrictModel):
