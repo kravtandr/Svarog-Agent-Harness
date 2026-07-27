@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { Api } from "../api/client";
 import type { SkillCard } from "../api/types";
+import { counted } from "../model/plural";
 import "./SkillsScreen.css";
 
 const RISK_LABELS: Record<string, string> = {
@@ -39,7 +40,9 @@ export function SkillsScreen({ api }: { api: Api }) {
 
   return (
     <div className="skills">
-      <p className="skills__count">{skills.length} скиллов</p>
+      <p className="skills__count">
+        {counted(skills.length, "скилл", "скилла", "скиллов")}
+      </p>
       {skills.map((skill) => (
         <article key={skill.name} className="skill">
           <header className="skill__head">

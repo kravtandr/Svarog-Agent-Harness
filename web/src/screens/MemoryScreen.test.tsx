@@ -38,7 +38,7 @@ describe("экран памяти", () => {
   it("показывает дерево страниц и открывает первую", async () => {
     render(<MemoryScreen api={fakeApi()} />);
 
-    expect(await screen.findByText("Все записи (2)")).toBeInTheDocument();
+    expect(await screen.findByText("2 записи")).toBeInTheDocument();
     expect(screen.getByText("memory/профиль.md")).toBeInTheDocument();
     expect(screen.getByText(/Андрей, Svarog/)).toBeInTheDocument();
   });
@@ -46,7 +46,7 @@ describe("экран памяти", () => {
   it("ищет через search_memory и показывает фрагменты", async () => {
     const api = fakeApi();
     render(<MemoryScreen api={api} />);
-    await screen.findByText("Все записи (2)");
+    await screen.findByText("2 записи");
 
     await userEvent.type(
       screen.getByRole("searchbox", { name: /поиск/i }),
@@ -56,7 +56,7 @@ describe("экран памяти", () => {
     await waitFor(() =>
       expect(api.memorySearch).toHaveBeenCalledWith("префикс"),
     );
-    expect(await screen.findByText("Найдено в 1 записях")).toBeInTheDocument();
+    expect(await screen.findByText("Найдено в 1 записи")).toBeInTheDocument();
     expect(
       screen.getByText("точный проход раньше широкого"),
     ).toBeInTheDocument();
@@ -65,7 +65,7 @@ describe("экран памяти", () => {
   it("открывает страницу по нажатию", async () => {
     const api = fakeApi();
     render(<MemoryScreen api={api} />);
-    await screen.findByText("Все записи (2)");
+    await screen.findByText("2 записи");
 
     await userEvent.click(
       screen.getByRole("button", { name: /решения\/fts\.md/ }),

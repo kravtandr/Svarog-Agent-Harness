@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, type Api, type ConfigValues } from "../api/client";
+import { counted } from "../model/plural";
 import type {
   ConfigField,
   ConfigView,
@@ -125,7 +126,7 @@ function DiffPane({
         <span className="diffpane__count">
           {error !== null
             ? "изменения не пройдут проверку"
-            : `${changes} изменения`}
+            : counted(changes, "изменение", "изменения", "изменений")}
         </span>
       </div>
     </aside>
@@ -287,7 +288,7 @@ export function SettingsScreen({ api }: { api: Api }) {
               className="btn"
               onClick={() => setSheetOpen(true)}
             >
-              Показать изменения ({changes})
+              {`Показать изменения (${changes})`}
             </button>
           </div>
           <DiffPane

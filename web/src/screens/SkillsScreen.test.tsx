@@ -29,7 +29,7 @@ describe("экран скиллов", () => {
     expect(screen.getByText("1.2.0")).toBeInTheDocument();
     expect(screen.getByText("средний риск")).toBeInTheDocument();
     expect(screen.getByText("низкий риск")).toBeInTheDocument();
-    expect(screen.getByText("2 скиллов")).toBeInTheDocument();
+    expect(screen.getByText("2 скилла")).toBeInTheDocument();
   });
 
   it("на пустом списке приглашает положить скиллы, а не сообщает «нет данных»", async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, type Api } from "../api/client";
 import type { MemoryFile, MemoryHit, MemoryPage } from "../api/types";
+import { counted } from "../model/plural";
 import "./MemoryScreen.css";
 
 /**
@@ -76,7 +77,7 @@ export function MemoryScreen({ api }: { api: Api }) {
             <div className="memory__group">
               {hits.length === 0
                 ? "Ничего не найдено"
-                : `Найдено в ${hits.length} записях`}
+                : `Найдено в ${counted(hits.length, "записи", "записях", "записях")}`}
             </div>
             {hits.map((hit) => (
               <button
@@ -92,7 +93,9 @@ export function MemoryScreen({ api }: { api: Api }) {
           </>
         )}
 
-        <div className="memory__group">Все записи ({pages.length})</div>
+        <div className="memory__group">
+          {counted(pages.length, "запись", "записи", "записей")}
+        </div>
         {pages.map((page) => (
           <button
             key={page.path}
