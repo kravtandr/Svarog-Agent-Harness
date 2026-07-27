@@ -25,7 +25,8 @@ def _seed(memory_dir: Path) -> None:
     (memory_dir / "projects" / "billing").mkdir(parents=True)
     (memory_dir / "projects" / "billing" / "overview.md").write_text(
         "---\nname: Billing\nslug: billing\nsummary: счета\nstatus: active\n---\n"
-        "решили версионировать API через заголовок X-Api-Version\n",
+        "решили версионировать API через заголовок X-Api-Version;\n"
+        "интеграция с эквайрингом, сверка платежей\n",
         encoding="utf-8",
     )
     (memory_dir / "decisions").mkdir()
@@ -53,7 +54,21 @@ def test_sanitize_neutralizes_operators() -> None:
     assert mi.sanitize_query("   ") == ""
     assert '"api"' in mi.sanitize_query("api OR (drop)")
     # Кавычки в запросе не могут разорвать литерал.
-    assert mi.sanitize_query('он сказал "нет"') == '"он" "сказал" "нет"'
+    assert mi.sanitize_query('сказал "нет"') == '"сказал"* OR "нет"*'
+
+
+def test_sanitize_is_disjunctive_with_prefix() -> None:
+    """Токены соединяются OR и ищутся по префиксу — порядок держит bm25.
+
+    AND обнулял выдачу от любого служебного слова, а точная словоформа не
+    находила словоизменение («эквайринг» мимо «эквайрингом»).
+    """
+    assert mi.sanitize_query("версионирование API") == '"версионирование"* OR "API"*'
+
+
+def test_sanitize_keeps_short_tokens_exact() -> None:
+    """Префикс на 1-2 символах превратил бы предлог в маску по всему словарю."""
+    assert mi.sanitize_query("и в счетах") == '"и" OR "в" OR "счетах"*'
 
 
 # --- reindex + search ---
@@ -122,12 +137,20 @@ async def test_search_malformed_query_does_not_raise(db: AsyncSession, memory_di
     assert await mi.search(db, "версионировать API", limit=5)
 
 
-async def test_search_is_conjunctive_over_tokens(db: AsyncSession, memory_dir: Path) -> None:
-    """Санитизация даёт AND по всем токенам: лишнее слово в запросе сужает выдачу.
+async def test_noise_words_do_not_zero_the_result(db: AsyncSession, memory_dir: Path) -> None:
+    """Служебные слова модели не обнуляют выдачу: OR вместо AND."""
+    await mi.reindex(db, memory_dir)
+    hits = await mi.search(db, "где мы договаривались про версионирование API", limit=5)
+    assert hits, "естественная формулировка не должна давать пусто"
+    assert hits[0].path == "projects/billing/overview.md", "релевантная страница — первой"
 
-    Плата за нейтрализацию операторов — служебные слова модели («OR», «где»)
-    становятся обязательными термами. Отмечено как ограничение, не баг.
+
+async def test_search_finds_inflected_form(db: AsyncSession, memory_dir: Path) -> None:
+    """Запрос в начальной форме находит словоизменение: «эквайринг» → «эквайрингом».
+
+    Наращение окончания закрывает префиксный поиск. Смена основы
+    («счета» → «счетов») ему не поддаётся — это граница лексического подхода.
     """
     await mi.reindex(db, memory_dir)
-    assert await mi.search(db, "версионировать", limit=5)
-    assert await mi.search(db, "версионировать бэкофф", limit=5) == []
+    hits = await mi.search(db, "эквайринг", limit=5)
+    assert "projects/billing/overview.md" in [h.path for h in hits]
