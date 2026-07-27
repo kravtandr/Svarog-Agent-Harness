@@ -26,6 +26,7 @@ from svarog_harness.llm.openai_compatible import auxiliary_provider, default_pro
 from svarog_harness.llm.provider import ModelProvider
 from svarog_harness.mcp import MCPTool
 from svarog_harness.memory import MemoryProposalRequest, read_memory
+from svarog_harness.memory.inject import build_relevant_block
 from svarog_harness.memory.profile import load_profile, render_persona_directive
 from svarog_harness.policy import PolicyEngine, load_policy_rules
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
@@ -286,6 +287,24 @@ class RunAssembly:
             else ""
         )
         persona = render_persona_directive(load_profile(mem_dir)) if mem_dir is not None else ""
+        # Авто-инъекция релевантного (связка B): провайдер зовётся в loop.run,
+        # когда известна задача, и молчит, пока index.md не переполнен.
+        relevant_memory: Callable[[str], Awaitable[str]] | None = None
+        if mem_dir is not None and cfg.memory.fts_enabled:
+            sessions, pages_dir = self._read_session_factory(), mem_dir
+
+            async def provide_relevant_memory(task: str) -> str:
+                return await build_relevant_block(
+                    sessions,
+                    pages_dir,
+                    task,
+                    max_lines=cfg.memory.index_max_lines,
+                    pages=cfg.memory.fts_inject_pages,
+                    budget_bytes=cfg.memory.fts_inject_bytes,
+                )
+
+            relevant_memory = provide_relevant_memory
+
         skill_load_sink: list[tuple[str, str | None]] = []
         memory_sink: list[dict[str, object]] = []
         plan_update_sink: list[dict[str, object]] = []
@@ -315,6 +334,7 @@ class RunAssembly:
             skill_cards=skill_cards(active_skills),
             memory=memory_text,
             persona=persona,
+            relevant_memory=relevant_memory,
             skill_load_sink=skill_load_sink,
             memory_sink=memory_sink,
             plan_update_sink=plan_update_sink,
