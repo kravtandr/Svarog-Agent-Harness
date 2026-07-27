@@ -68,15 +68,19 @@ export function Nav({
       </div>
 
       <div className="nav__foot">
-        <button type="button" className="nav__section">
-          Скиллы
-        </button>
-        <button type="button" className="nav__section">
-          Память
-        </button>
-        <button type="button" className="nav__section">
-          Настройки
-        </button>
+        {/* Экраны разделов ещё не сделаны. Пока их нет, кнопки выключены:
+            интерфейс не должен обещать переход, которого не произойдёт. */}
+        {['Скиллы', 'Память', 'Настройки'].map((section) => (
+          <button
+            key={section}
+            type="button"
+            className="nav__section"
+            title="Появится в следующем шаге"
+            disabled
+          >
+            {section}
+          </button>
+        ))}
       </div>
     </nav>
   )

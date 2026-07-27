@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { Composer } from './Composer'
 
-const props = { autonomy: 'под надзором', executor: 'нативный цикл', model: 'qwen3-coder' }
+const props = {
+  autonomy: 'supervised' as const,
+  onAutonomyChange: () => {},
+  executor: 'нативный цикл',
+  model: 'qwen3-coder',
+}
 
 describe('поле ввода', () => {
   it('отправляет текст и очищает поле', async () => {
@@ -26,11 +31,25 @@ describe('поле ввода', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('показывает режимы под строкой', () => {
+  it('переключает автономию и сообщает выбор наверх', async () => {
+    const onAutonomyChange = vi.fn()
+    render(<Composer {...props} onAutonomyChange={onAutonomyChange} onSend={() => {}} />)
+
+    const select = screen.getByRole('combobox', { name: /автономия/i })
+    expect(select).toHaveValue('supervised')
+
+    await userEvent.selectOptions(select, 'yolo')
+    expect(onAutonomyChange).toHaveBeenCalledWith('yolo')
+  })
+
+  it('показывает исполнителя и модель, но не даёт их менять здесь', () => {
     render(<Composer {...props} onSend={() => {}} />)
-    expect(screen.getByText(/под надзором/)).toBeInTheDocument()
-    expect(screen.getByText(/нативный цикл/)).toBeInTheDocument()
-    expect(screen.getByText(/qwen3-coder/)).toBeInTheDocument()
+
+    const fixed = screen.getAllByTitle(/меняется в настройках/i)
+    expect(fixed.map((node) => node.textContent)).toEqual(['нативный цикл', 'qwen3-coder'])
+    // Не кнопка и не поле: менять исполнителя из ленты нельзя — это конфиг.
+    expect(screen.queryByRole('button', { name: /нативный цикл/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: /исполнитель/i })).not.toBeInTheDocument()
   })
 
   it('держит место под микрофон выключенной кнопкой', () => {

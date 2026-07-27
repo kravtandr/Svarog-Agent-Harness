@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { Api } from '../api/client'
 import { subscribeRun } from '../api/stream'
-import type { SessionSummary } from '../api/types'
+import type { Autonomy, SessionSummary } from '../api/types'
 import { Composer } from '../components/Composer'
 import { Gate } from '../components/Gate'
 import { Nav } from '../components/Nav'
@@ -46,6 +46,7 @@ export function ChatScreen({
   const [items, setItems] = useState<ThreadItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [autonomy, setAutonomy] = useState<Autonomy>('supervised')
   const unsubscribe = useRef<(() => void) | null>(null)
 
   useEffect(() => {
@@ -73,13 +74,13 @@ export function ChatScreen({
     async (text: string) => {
       if (activeId === null) return
       setItems((current) => [...current, { kind: 'user', id: `u-${current.length}`, text }])
-      const ref = await api.sendMessage(activeId, text)
+      const ref = await api.sendMessage(activeId, text, autonomy)
       unsubscribe.current?.()
       unsubscribe.current = subscribeRun(baseUrl, ref.run_id, token, (event) =>
         setItems((current) => applyEvent(current, event)),
       )
     },
-    [api, activeId, baseUrl, token],
+    [api, activeId, autonomy, baseUrl, token],
   )
 
   const decide = useCallback(
@@ -152,7 +153,8 @@ export function ChatScreen({
         </div>
         <Composer
           onSend={(text) => void send(text)}
-          autonomy="под надзором"
+          autonomy={autonomy}
+          onAutonomyChange={setAutonomy}
           executor="нативный цикл"
           model="qwen3-coder"
         />

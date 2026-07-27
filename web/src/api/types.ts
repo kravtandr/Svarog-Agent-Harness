@@ -29,3 +29,12 @@ export interface RunRef {
   run_id: string
   state: string
 }
+
+/** Значения AutonomyMode сервера (config/schema.py). */
+export type Autonomy = 'supervised' | 'auto' | 'yolo'
+
+export const AUTONOMY_LABELS: Record<Autonomy, string> = {
+  supervised: 'под надзором',
+  auto: 'авто',
+  yolo: 'без тормозов',
+}

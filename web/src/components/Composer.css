@@ -63,6 +63,23 @@
   display: none;
   color: var(--faint);
 }
+/* Автономия — единственный переключатель здесь, поэтому только она
+   выглядит нажимаемой. */
+.composer__select {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 4px;
+  background: var(--raised);
+  color: #c6bfb4;
+  font-family: var(--sans);
+  font-size: inherit;
+  cursor: pointer;
+}
+/* Исполнитель и модель — конфиг, не свойство сообщения: обычный текст. */
+.composer__fixed {
+  color: var(--faint);
+  cursor: default;
+}
 .composer__spacer {
   flex: 1;
 }

@@ -1,15 +1,18 @@
 import { useState } from 'react'
 
+import { AUTONOMY_LABELS, type Autonomy } from '../api/types'
 import './Composer.css'
 
 export function Composer({
   onSend,
   autonomy,
+  onAutonomyChange,
   executor,
   model,
 }: {
   onSend: (text: string) => void
-  autonomy: string
+  autonomy: Autonomy
+  onAutonomyChange: (autonomy: Autonomy) => void
   executor: string
   model: string
 }) {
@@ -35,18 +38,33 @@ export function Composer({
             onChange={(event) => setText(event.target.value)}
           />
           <div className="composer__foot">
-            {/* Режимы стоят там, где на них смотрят перед отправкой.
-                На узком экране сворачиваются в одну строку через разделитель. */}
+            {/* Автономия — свойство сообщения, её принимает POST /sessions/{id}/messages.
+                Исполнитель и модель живут в svarog.yaml и меняются в настройках. */}
             <span className="composer__modes">
-              <span>{autonomy}</span>
+              <select
+                className="composer__select"
+                aria-label="Автономия"
+                value={autonomy}
+                onChange={(event) => onAutonomyChange(event.target.value as Autonomy)}
+              >
+                {(Object.keys(AUTONOMY_LABELS) as Autonomy[]).map((mode) => (
+                  <option key={mode} value={mode}>
+                    {AUTONOMY_LABELS[mode]}
+                  </option>
+                ))}
+              </select>
               <span className="composer__dot" aria-hidden="true">
                 ·
               </span>
-              <span>{executor}</span>
+              <span className="composer__fixed" title="Меняется в настройках">
+                {executor}
+              </span>
               <span className="composer__dot" aria-hidden="true">
                 ·
               </span>
-              <span>{model}</span>
+              <span className="composer__fixed" title="Меняется в настройках">
+                {model}
+              </span>
             </span>
             <span className="composer__spacer" />
             {/* Место под голос занято сразу: включение не потребует переверстки. */}

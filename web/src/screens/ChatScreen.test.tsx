@@ -65,8 +65,20 @@ describe('экран диалога', () => {
     await userEvent.type(screen.getByRole('textbox', { name: /написать/i }), 'прогони тесты')
     await userEvent.click(screen.getByRole('button', { name: 'Отправить' }))
 
-    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'прогони тесты')
+    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'прогони тесты', 'supervised')
     await waitFor(() => expect(screen.getByText('прогони тесты')).toBeInTheDocument())
+  })
+
+  it('отправляет выбранную автономию, а не значение по умолчанию', async () => {
+    const api = fakeApi()
+    render(<ChatScreen api={api} />)
+    await waitFor(() => expect(screen.getByText('Добавь FTS-поиск')).toBeInTheDocument())
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /автономия/i }), 'yolo')
+    await userEvent.type(screen.getByRole('textbox', { name: /написать/i }), 'жги')
+    await userEvent.click(screen.getByRole('button', { name: 'Отправить' }))
+
+    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'жги', 'yolo')
   })
 
   it('показывает ошибку загрузки, а не пустой экран', async () => {

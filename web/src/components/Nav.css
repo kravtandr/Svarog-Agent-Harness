@@ -39,6 +39,10 @@
   background: var(--raised);
   color: var(--text);
 }
+.nav__section:disabled {
+  color: var(--faint);
+  cursor: default;
+}
 .nav__list {
   flex: 1;
   overflow-y: auto;

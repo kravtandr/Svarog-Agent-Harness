@@ -1,4 +1,4 @@
-import type { RunRef, SessionSummary, SessionThread } from './types'
+import type { Autonomy, RunRef, SessionSummary, SessionThread } from './types'
 
 export class ApiError extends Error {
   readonly status: number
@@ -19,7 +19,7 @@ export interface Api {
   listSessions(): Promise<SessionSummary[]>
   sessionThread(sessionId: string): Promise<SessionThread>
   createSession(title: string): Promise<{ session_id: string }>
-  sendMessage(sessionId: string, text: string): Promise<RunRef>
+  sendMessage(sessionId: string, text: string, autonomy?: Autonomy): Promise<RunRef>
   decideApproval(approvalId: string, approved: boolean): Promise<RunRef>
 }
 
@@ -52,10 +52,11 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
         method: 'POST',
         body: JSON.stringify({ title }),
       }),
-    sendMessage: (sessionId, text) =>
+    sendMessage: (sessionId, text, autonomy) =>
       request<RunRef>(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ text }),
+        // autonomy опционален: сервер подставит значение из конфига, если не задан.
+        body: JSON.stringify(autonomy === undefined ? { text } : { text, autonomy }),
       }),
     decideApproval: (approvalId, approved) =>
       request<RunRef>(`/approvals/${encodeURIComponent(approvalId)}`, {
