@@ -13,7 +13,9 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
@@ -40,6 +42,7 @@ from svarog_harness.gateway.models import (
     WorkspaceView,
 )
 from svarog_harness.gateway.service import CancelNotAllowedError, GatewayService
+from svarog_harness.gateway.static import web_dist_dir
 from svarog_harness.gitflow.provision import (
     CloneError,
     RepoUrlError,
@@ -101,6 +104,18 @@ def create_app(
                 await resolver.shutdown()
 
     app = FastAPI(title="Svarog Gateway", version="0.1.0", lifespan=lifespan)
+
+    # CORS нужен только режиму раздельной разработки: в бою статика едет
+    # с того же origin, что и API, и заголовки не требуются.
+    origins = [o for o in os.environ.get("SVAROG_GATEWAY__CORS_ORIGINS", "").split(",") if o]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     def _require_service(
         authorization: Annotated[str | None, Header()] = None,
@@ -356,5 +371,29 @@ def create_app(
         # Ответ на ask_user записан — возобновляем run (§6.5, ADR-0005).
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
+
+    # --- собранный клиент (план 2026-07-27) --------------------------------
+    # Монтируется последним: маршруты API уже объявлены и в тень не уходят.
+    dist = web_dist_dir()
+    if dist is not None:
+        assets = dist / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> FileResponse:
+            return FileResponse(dist / "index.html")
+
+    else:
+
+        @app.get("/", include_in_schema=False)
+        async def index_missing() -> FileResponse:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Клиент не собран. Соберите его: "
+                    "npm --prefix web ci && npm --prefix web run build"
+                ),
+            )
 
     return app

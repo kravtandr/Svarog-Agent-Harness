@@ -205,6 +205,49 @@ def test_session_thread_endpoint_404(service: GatewayService) -> None:
     assert client.get("/sessions/нет-такой/messages").status_code == 404
 
 
+def test_root_explains_when_bundle_missing(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Пустой каталог: ни упакованного бандла, ни сборки в чекауте.
+    monkeypatch.setenv("SVAROG_WEB_DIST", str(tmp_path / "нет-сборки"))
+    client = TestClient(create_app(service=service))
+
+    response = client.get("/")
+
+    assert response.status_code == 404
+    assert "npm --prefix web run build" in response.json()["detail"]
+
+
+def test_root_serves_bundle_when_present(
+    service: GatewayService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>Сварог</title>", encoding="utf-8")
+    monkeypatch.setenv("SVAROG_WEB_DIST", str(dist))
+
+    client = TestClient(create_app(service=service))
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Сварог" in response.text
+
+
+def test_cors_disabled_by_default(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+    response = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_enabled_by_env(service: GatewayService, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SVAROG_GATEWAY__CORS_ORIGINS", "http://localhost:5173")
+    client = TestClient(create_app(service=service))
+
+    response = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
 @pytest.mark.asyncio
 async def test_approval_event_published(service: GatewayService) -> None:
     from svarog_harness.storage.models import Approval

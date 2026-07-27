@@ -53,6 +53,16 @@
   background: var(--ember);
   color: #1a1210;
 }
+.composer__modes {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.composer__dot {
+  display: none;
+  color: var(--faint);
+}
 .composer__spacer {
   flex: 1;
 }
@@ -71,5 +81,16 @@
   .composer__foot {
     gap: 8px;
     font-size: 12px;
+  }
+  /* Одна строка через разделитель: перенос режимов в столбик съедает
+     высоту, которая нужна ленте. */
+  .composer__modes {
+    gap: 5px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .composer__dot {
+    display: inline;
   }
 }

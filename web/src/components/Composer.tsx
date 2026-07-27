@@ -35,10 +35,19 @@ export function Composer({
             onChange={(event) => setText(event.target.value)}
           />
           <div className="composer__foot">
-            {/* Режимы стоят там, где на них смотрят перед отправкой. */}
-            <span>{autonomy}</span>
-            <span>{executor}</span>
-            <span>{model}</span>
+            {/* Режимы стоят там, где на них смотрят перед отправкой.
+                На узком экране сворачиваются в одну строку через разделитель. */}
+            <span className="composer__modes">
+              <span>{autonomy}</span>
+              <span className="composer__dot" aria-hidden="true">
+                ·
+              </span>
+              <span>{executor}</span>
+              <span className="composer__dot" aria-hidden="true">
+                ·
+              </span>
+              <span>{model}</span>
+            </span>
             <span className="composer__spacer" />
             {/* Место под голос занято сразу: включение не потребует переверстки. */}
             <button

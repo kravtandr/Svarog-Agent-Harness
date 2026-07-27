@@ -75,6 +75,12 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/svarog_harness"]
 
+# Бандл клиента собирается до сборки пакета (шаг CI) и едет внутри колеса,
+# чтобы запуск Сварога не требовал Node. Каталога может не быть — сборка
+# пакета без клиента остаётся возможной.
+[tool.hatch.build.targets.wheel.force-include]
+"web/dist" = "svarog_harness/gateway/web"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
