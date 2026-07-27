@@ -1,7 +1,7 @@
 """Pydantic-схемы REST/WebSocket API (§10.4, cloud-режим — ADR-0017)."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -157,6 +157,28 @@ class SessionView(BaseModel):
     title: str
     workspace: str | None = None
     runs: list[RunSummary]
+
+
+class ThreadItemView(BaseModel):
+    """Элемент ленты в той же форме, в какой его собирает живой поток.
+
+    Один тип на реплику, речь агента и вызов инструмента: клиент рисует
+    историю и живые события одним компонентом, иначе они разойдутся.
+    """
+
+    kind: Literal["user", "say", "call"]
+    text: str = ""
+    server: str | None = None  # имя MCP-сервера; None — свой инструмент
+    name: str = ""
+    arg: str = ""
+    result: str = ""
+    status: str = ""
+
+
+class SessionThread(BaseModel):
+    session_id: str
+    title: str
+    items: list[ThreadItemView]
 
 
 class SessionSummary(BaseModel):

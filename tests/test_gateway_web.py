@@ -118,6 +118,94 @@ async def test_tool_events_carry_arg_and_result(service: GatewayService) -> None
 
 
 @pytest.mark.asyncio
+async def test_session_thread_replays_user_calls_and_answer(service: GatewayService) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState, ToolCall, ToolCallStatus
+
+    session = await service.create_session(title="лента")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-1",
+                session_id=session.session_id,
+                task="Добавь FTS-поиск",
+                state=RunState.COMPLETED,
+                autonomy="supervised",
+            )
+        )
+        db.add(
+            ToolCall(
+                id="tc-1",
+                run_id="run-1",
+                tool_name="write_file",
+                arguments={"path": "memory/index.py"},
+                result={"output": "записано 1234 символов в memory/index.py"},
+                status=ToolCallStatus.SUCCEEDED,
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    thread = await service.session_thread(session.session_id)
+
+    assert thread.items[0].kind == "user"
+    assert thread.items[0].text == "Добавь FTS-поиск"
+    call = next(item for item in thread.items if item.kind == "call")
+    assert call.name == "write_file"
+    assert call.server is None
+    assert call.arg == "memory/index.py"
+    assert call.result == "записано 1234 символов в memory/index.py"
+    assert call.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_session_thread_splits_mcp_server_from_tool_name(service: GatewayService) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState, ToolCall, ToolCallStatus
+
+    session = await service.create_session(title="mcp")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-2",
+                session_id=session.session_id,
+                task="Посмотри задачи",
+                state=RunState.COMPLETED,
+                autonomy="supervised",
+            )
+        )
+        db.add(
+            ToolCall(
+                id="tc-2",
+                run_id="run-2",
+                tool_name="github/list_issues",
+                arguments={"query": "label: memory"},
+                result={"output": "2 задачи"},
+                status=ToolCallStatus.SUCCEEDED,
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    thread = await service.session_thread(session.session_id)
+
+    call = next(item for item in thread.items if item.kind == "call")
+    assert call.server == "github"
+    assert call.name == "list_issues"
+
+
+def test_session_thread_endpoint_404(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+    assert client.get("/sessions/нет-такой/messages").status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_approval_event_published(service: GatewayService) -> None:
     from svarog_harness.storage.models import Approval
 

@@ -33,6 +33,7 @@ from svarog_harness.gateway.models import (
     RunSummary,
     SendMessageRequest,
     SessionSummary,
+    SessionThread,
     SessionView,
     SkillCard,
     WhoamiView,
@@ -215,6 +216,13 @@ def create_app(
     async def get_session(session_id: str, service: ServiceDep) -> SessionView:
         try:
             return await service.get_session(session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.get("/sessions/{session_id}/messages", response_model=SessionThread)
+    async def session_messages(session_id: str, service: ServiceDep) -> SessionThread:
+        try:
+            return await service.session_thread(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 

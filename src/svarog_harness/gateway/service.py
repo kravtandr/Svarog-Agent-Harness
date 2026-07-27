@@ -32,8 +32,10 @@ from svarog_harness.gateway.models import (
     RunDiffView,
     RunSummary,
     SessionSummary,
+    SessionThread,
     SessionView,
     SkillCard,
+    ThreadItemView,
     ToolCallView,
     WhoamiView,
     WorkspaceView,
@@ -55,10 +57,10 @@ from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
-from svarog_harness.runtime.summaries import short_arg
+from svarog_harness.runtime.summaries import short_arg, short_result
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
-from svarog_harness.storage.models import Run, RunState, Session
+from svarog_harness.storage.models import Run, RunState, Session, ToolCall, ToolCallStatus
 from svarog_harness.tenant.quota import QuotaUsage
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
@@ -675,6 +677,58 @@ class GatewayService:
                     )
                 )
             return summaries
+
+        return await self._read(action)
+
+    async def session_thread(self, session_id: str) -> SessionThread:
+        """История сессии как лента: задача, вызовы, финальный ответ по каждому run."""
+
+        async def action(db: AsyncSession) -> SessionThread:
+            session = await find_session_by_prefix(db, session_id)
+            runs = (
+                (
+                    await db.execute(
+                        select(Run).where(Run.session_id == session.id).order_by(Run.created_at)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            recorder = TraceRecorder(db)
+            items: list[ThreadItemView] = []
+            for run in runs:
+                items.append(ThreadItemView(kind="user", text=run.task))
+                calls = (
+                    (
+                        await db.execute(
+                            select(ToolCall)
+                            .where(ToolCall.run_id == run.id)
+                            .order_by(ToolCall.started_at)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for call in calls:
+                    server, _, bare = call.tool_name.rpartition("/")
+                    items.append(
+                        ThreadItemView(
+                            kind="call",
+                            server=server or None,
+                            name=bare,
+                            arg=short_arg(call.arguments or {}),
+                            result=short_result(
+                                ok=call.status is ToolCallStatus.SUCCEEDED,
+                                output=str((call.result or {}).get("output", "")),
+                                error=call.error,
+                            ),
+                            status=call.status.value,
+                        )
+                    )
+                answer = await recorder.last_assistant_text(run)
+                if answer:
+                    items.append(ThreadItemView(kind="say", text=answer))
+            return SessionThread(session_id=session.id, title=session.title or "", items=items)
 
         return await self._read(action)
 
