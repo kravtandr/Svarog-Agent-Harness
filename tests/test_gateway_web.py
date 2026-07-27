@@ -316,6 +316,73 @@ async def test_config_preview_shows_diff_without_writing(service: GatewayService
     assert service.config_path.read_text(encoding="utf-8") == before
 
 
+def test_patch_yaml_keeps_comments_and_layout() -> None:
+    """Правка одного ключа не должна переписывать файл, который ведут руками."""
+    from svarog_harness.gateway.settings import patch_yaml_text
+
+    before = (
+        "# Конфигурация Svarog (§13).\n"
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: https://openrouter.ai/api   # vLLM, llama.cpp…\n"
+        "\n"
+        "runtime:\n"
+        "  autonomy: yolo\n"
+        "\n"
+        "sandbox:\n"
+        "  type: docker   # изоляция\n"
+    )
+
+    after = patch_yaml_text(before, {"runtime.autonomy": "supervised"})
+
+    assert "# Конфигурация Svarog (§13)." in after
+    assert "# vLLM, llama.cpp…" in after
+    assert "  type: docker   # изоляция" in after
+    assert "  autonomy: supervised" in after
+    # Ровно одна строка отличается — всё остальное байт в байт.
+    changed = [
+        (a, b) for a, b in zip(before.splitlines(), after.splitlines(), strict=True) if a != b
+    ]
+    assert changed == [("  autonomy: yolo", "  autonomy: supervised")]
+
+
+def test_patch_yaml_preserves_trailing_comment_of_edited_line() -> None:
+    from svarog_harness.gateway.settings import patch_yaml_text
+
+    after = patch_yaml_text(
+        "sandbox:\n  type: docker   # изоляция\n", {"sandbox.type": "local-trusted"}
+    )
+
+    assert after == "sandbox:\n  type: local-trusted   # изоляция\n"
+
+
+def test_patch_yaml_adds_missing_key_and_section() -> None:
+    from svarog_harness.gateway.settings import patch_yaml_text
+
+    after = patch_yaml_text("runtime:\n  autonomy: yolo\n", {"runtime.max_iterations": 7})
+    assert "  max_iterations: 7" in after
+    assert "  autonomy: yolo" in after
+
+    fresh = patch_yaml_text("models:\n  default: local\n", {"git.auto_commit": False})
+    assert fresh.endswith("git:\n  auto_commit: false\n")
+
+
+@pytest.mark.asyncio
+async def test_config_write_keeps_file_readable_by_human(service: GatewayService) -> None:
+    """Сохранение из интерфейса не стирает комментарии реального файла."""
+    service.config_path.write_text(
+        service.config_path.read_text(encoding="utf-8") + "\n# хвостовой комментарий\n",
+        encoding="utf-8",
+    )
+
+    service.write_config({"runtime.autonomy": "supervised"})
+
+    text = service.config_path.read_text(encoding="utf-8")
+    assert "# хвостовой комментарий" in text
+
+
 @pytest.mark.asyncio
 async def test_config_write_persists_and_reloads(service: GatewayService) -> None:
     service.write_config({"runtime.autonomy": "supervised", "runtime.max_iterations": 7})

@@ -53,6 +53,7 @@ from svarog_harness.gateway.settings import (
     apply_values,
     describe_config,
     diff_lines,
+    patch_yaml_text,
 )
 from svarog_harness.gitflow.provision import (
     DEFAULT_GIT_CREDENTIALS_REF,
@@ -833,17 +834,22 @@ class GatewayService:
     def describe_config(self) -> ConfigView:
         return describe_config(self.cfg, str(self.config_path))
 
-    def preview_config(self, values: dict[str, Any]) -> ConfigDiffView:
-        """Что будет записано — без записи. Валидация та же, что при чтении."""
+    def _updated_config_text(self, values: dict[str, Any]) -> tuple[str, str]:
+        """Текст файла до и после правки; заодно проверяет результат схемой."""
         raw, before = self._config_yaml()
-        updated = apply_values(raw, values)
-        # Проверяем результат целиком: форма не должна уметь записать конфиг,
-        # который Сварог потом откажется читать.
+        # apply_values проверяет, что путь вообще разрешён форме.
+        merged = apply_values(raw, values)
         try:
-            SvarogConfig(**updated)
+            SvarogConfig(**merged)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
-        after = yaml.safe_dump(updated, allow_unicode=True, sort_keys=False)
+        # Правим текст построчно, а не пересобираем: иначе из файла пропадут
+        # комментарии и пустые строки, которые человек ведёт руками.
+        return before, patch_yaml_text(before, values)
+
+    def preview_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Что будет записано — без записи. Валидация та же, что при чтении."""
+        before, after = self._updated_config_text(values)
         lines = diff_lines(before, after)
         return ConfigDiffView(
             path=str(self.config_path),
@@ -854,12 +860,9 @@ class GatewayService:
     def write_config(self, values: dict[str, Any]) -> ConfigDiffView:
         """Записать изменения в svarog.yaml после той же проверки, что и preview."""
         view = self.preview_config(values)
-        raw, _ = self._config_yaml()
-        updated = apply_values(raw, values)
+        _, after = self._updated_config_text(values)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(
-            yaml.safe_dump(updated, allow_unicode=True, sort_keys=False), encoding="utf-8"
-        )
+        self.config_path.write_text(after, encoding="utf-8")
         return view
 
     def list_secrets(self) -> list[SecretView]:
