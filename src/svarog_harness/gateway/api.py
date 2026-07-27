@@ -62,6 +62,7 @@ from svarog_harness.gitflow.provision import (
     WorkspaceLimitError,
     WorkspaceNameError,
 )
+from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.tenant.quota import QuotaExceededError
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
@@ -272,6 +273,11 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except QuotaExceededError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from None
+        except SandboxError as exc:
+            # Например, автономия, которую настроенный исполнитель не умеет
+            # (ADR-0016 §6). Это выбор пользователя, а не сбой сервера —
+            # 422 с текстом, а не 500 с трейсбеком в лог.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------

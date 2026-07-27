@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { Api } from "../api/client";
+import { ApiError, type Api } from "../api/client";
 import { subscribeRun } from "../api/stream";
 import type { Autonomy } from "../api/types";
 import { Composer } from "../components/Composer";
@@ -49,7 +49,9 @@ export function ChatScreen({
   const [threadError, setThreadError] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<Autonomy>("supervised");
   const [, setRunId] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
+  const sendSeq = useRef(0);
 
   const watch = useCallback(
     (runId: string) => {
@@ -69,6 +71,7 @@ export function ChatScreen({
     unsubscribe.current = null;
     setItems([]);
     setThreadError(null);
+    setSendError(null);
     api
       .sessionThread(sessionId)
       .then((thread) => setItems(fromHistory(thread.items)))
@@ -80,13 +83,30 @@ export function ChatScreen({
   const send = useCallback(
     async (text: string) => {
       if (sessionId === null) return;
+      // Уникальный id, а не длина списка: после удаления гейта длина
+      // уменьшается, и следующая реплика получала бы занятый ключ.
+      const optimisticId = `u-${sendSeq.current++}`;
       setItems((current) => [
         ...current,
-        { kind: "user", id: `u-${current.length}`, text },
+        { kind: "user", id: optimisticId, text },
       ]);
-      const ref = await api.sendMessage(sessionId, text, autonomy);
-      setRunId(ref.run_id);
-      watch(ref.run_id);
+      setSendError(null);
+      try {
+        const ref = await api.sendMessage(sessionId, text, autonomy);
+        setRunId(ref.run_id);
+        watch(ref.run_id);
+      } catch (exc: unknown) {
+        // Молчаливый провал — худший исход: реплика висит в ленте, а агент
+        // не запущен. Например, автономия, которую исполнитель не умеет.
+        setSendError(
+          exc instanceof ApiError
+            ? exc.message
+            : "Не удалось отправить сообщение. Проверьте, что svarog serve запущен.",
+        );
+        setItems((current) =>
+          current.filter((item) => item.id !== optimisticId),
+        );
+      }
     },
     [api, sessionId, autonomy, watch],
   );
@@ -108,7 +128,7 @@ export function ChatScreen({
     [api, watch],
   );
 
-  const shown = error ?? threadError;
+  const shown = error ?? threadError ?? sendError;
 
   return (
     <div className="chat">

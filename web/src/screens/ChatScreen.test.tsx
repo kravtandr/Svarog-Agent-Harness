@@ -202,3 +202,33 @@ describe("подписка на поток", () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe("ошибки отправки", () => {
+  it("показывает отказ сервера, а не молчит", async () => {
+    const { ApiError } = await import("../api/client");
+    const client = api({
+      sendMessage: vi
+        .fn()
+        .mockRejectedValue(
+          new ApiError(
+            422,
+            "режим 'supervised' с внешним агентом не поддерживается",
+          ),
+        ),
+    });
+    render(<ChatScreen api={client} sessionId="s1" />);
+    await waitFor(() =>
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "поехали",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByText(/не поддерживается/i)).toBeInTheDocument();
+    // Реплика не должна остаться висеть, будто она отправлена.
+    expect(screen.queryByText("поехали")).not.toBeInTheDocument();
+  });
+});
