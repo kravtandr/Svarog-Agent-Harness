@@ -5,7 +5,13 @@ from pathlib import Path
 
 from svarog_harness.memory.apply import apply_change, preview_content
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
-from svarog_harness.memory.wiki import append_log, log_entry, regenerate_index, render_index
+from svarog_harness.memory.wiki import (
+    append_log,
+    index_overflowed,
+    log_entry,
+    regenerate_index,
+    render_index,
+)
 
 _PAGE = """\
 ---
@@ -158,3 +164,22 @@ def test_render_index_caps_total_lines(tmp_path: Path) -> None:
 def test_render_index_no_tail_when_under_limit(tmp_path: Path) -> None:
     _create_project(tmp_path, "single", today=date(2026, 7, 10))
     assert "и ещё" not in render_index(tmp_path)
+
+
+def test_index_overflowed_false_when_small(tmp_path: Path) -> None:
+    (tmp_path / "projects" / "a").mkdir(parents=True)
+    (tmp_path / "projects" / "a" / "overview.md").write_text(
+        "---\nname: A\nslug: a\nsummary: s\nstatus: active\n---\n", encoding="utf-8"
+    )
+    assert index_overflowed(tmp_path, max_lines=200) is False
+
+
+def test_index_overflowed_true_when_many(tmp_path: Path) -> None:
+    for i in range(60):
+        d = tmp_path / "projects" / f"p{i}"
+        d.mkdir(parents=True)
+        (d / "overview.md").write_text(
+            f"---\nname: P{i}\nslug: p{i}\nsummary: s\nstatus: active\n---\n",
+            encoding="utf-8",
+        )
+    assert index_overflowed(tmp_path, max_lines=20) is True
