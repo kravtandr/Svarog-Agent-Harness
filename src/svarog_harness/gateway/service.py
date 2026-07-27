@@ -31,6 +31,7 @@ from svarog_harness.gateway.models import (
     RunDetail,
     RunDiffView,
     RunSummary,
+    SessionSummary,
     SessionView,
     SkillCard,
     ToolCallView,
@@ -627,6 +628,38 @@ class GatewayService:
                 workspace=(session.meta or {}).get("workspace"),
                 runs=runs,
             )
+
+        return await self._read(action)
+
+    async def list_sessions(self, limit: int = 50) -> list[SessionSummary]:
+        """Сессии для навигатора: свежие сверху, без полного трейса."""
+
+        async def action(db: AsyncSession) -> list[SessionSummary]:
+            found = await db.execute(
+                select(Session).order_by(Session.updated_at.desc()).limit(limit)
+            )
+            summaries: list[SessionSummary] = []
+            for session in found.scalars():
+                runs = (
+                    (
+                        await db.execute(
+                            select(Run).where(Run.session_id == session.id).order_by(Run.created_at)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                summaries.append(
+                    SessionSummary(
+                        session_id=session.id,
+                        title=session.title or "",
+                        workspace=(session.meta or {}).get("workspace"),
+                        updated_at=session.updated_at,
+                        runs_count=len(runs),
+                        last_state=runs[-1].state.value if runs else None,
+                    )
+                )
+            return summaries
 
         return await self._read(action)
 

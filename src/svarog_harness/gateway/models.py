@@ -157,3 +157,18 @@ class SessionView(BaseModel):
     title: str
     workspace: str | None = None
     runs: list[RunSummary]
+
+
+class SessionSummary(BaseModel):
+    """Строка списка сессий для навигатора веб-клиента.
+
+    Отдельно от SessionView: там полный список runs, здесь только то, что
+    нужно левому столбцу, — иначе навигатор тянет весь трейс всех сессий.
+    """
+
+    session_id: str
+    title: str
+    workspace: str | None = None
+    updated_at: datetime
+    runs_count: int
+    last_state: str | None = None

@@ -32,6 +32,7 @@ from svarog_harness.gateway.models import (
     RunRef,
     RunSummary,
     SendMessageRequest,
+    SessionSummary,
     SessionView,
     SkillCard,
     WhoamiView,
@@ -204,6 +205,11 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         except CloneError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    # Раньше маршрута с параметром: иначе "/sessions" уедет в {session_id}.
+    @app.get("/sessions", response_model=list[SessionSummary])
+    async def list_sessions(service: ServiceDep, limit: int = 50) -> list[SessionSummary]:
+        return await service.list_sessions(limit=limit)
 
     @app.get("/sessions/{session_id}", response_model=SessionView)
     async def get_session(session_id: str, service: ServiceDep) -> SessionView:
