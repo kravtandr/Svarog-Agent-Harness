@@ -1,5 +1,6 @@
 """Override исполнителя/провайдера/модели в сообщении чата (план 2026-07-28)."""
 
+import asyncio
 import re
 import subprocess
 from pathlib import Path
@@ -297,3 +298,60 @@ async def test_unknown_provider_returns_422(service: GatewayService) -> None:
     )
     assert response.status_code == 422
     assert "нет-такого" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_reuses_shared_runner_without_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без override и без тёплого sandbox'а (ttl=0) сообщение обязано взять
+    общий self._runner, а не построить новый TaskRunner.
+
+    `_runner_for` реиспользует self._runner только когда `cfg is None and
+    run_meta is None` (см. его docstring). Если send_message передаёт cfg
+    безусловно (даже когда override пуст и cfg — тот же объект self.cfg по
+    identity), эта ветка никогда не сработает: на каждое сообщение будет
+    строиться свежий TaskRunner. С warm-сессиями (ttl>0, конфиг по
+    умолчанию) это маскируется тёплым слотом, поэтому ttl=0 обязателен,
+    чтобы тест дошёл до вызова _runner_for.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        "cloud:\n  warm_session_ttl_sec: 0\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    service = GatewayService(load_config(project_dir=ws), ws)
+
+    captured: list[object] = []
+
+    async def spy_run_bg(
+        self: GatewayService,
+        task: str,
+        autonomy: object,
+        started: asyncio.Future[str],
+        *,
+        runner: object = None,
+        session_id: str | None = None,
+        history: object = None,
+        warm: object = None,
+    ) -> None:
+        captured.append(runner)
+        started.set_result("stub-run-id")
+
+    monkeypatch.setattr(GatewayService, "_run_bg", spy_run_bg)
+
+    session = await service.create_session(title="без warm")
+    await service.send_message(session.session_id, "задача", None)
+
+    assert captured == [service._runner], "общий runner не переиспользован"

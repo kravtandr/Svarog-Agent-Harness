@@ -711,7 +711,11 @@ class GatewayService:
         runner = (
             warm.runner
             if warm is not None
-            else self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
+            else self._runner_for(
+                workspace,
+                cfg=cfg if not override.is_empty() else None,
+                run_meta=run_meta,
+            )
         )
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(
