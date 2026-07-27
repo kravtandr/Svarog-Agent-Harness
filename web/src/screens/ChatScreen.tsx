@@ -33,6 +33,7 @@ function groupItems(items: ThreadItem[]): Entry[] {
 export function ChatScreen({
   api,
   sessionId,
+  ensureSession,
   loading = false,
   error = null,
   baseUrl = "",
@@ -40,6 +41,8 @@ export function ChatScreen({
 }: {
   api: Api;
   sessionId: string | null;
+  /** Создаёт сессию, если её ещё нет, и возвращает её id. */
+  ensureSession: () => Promise<string>;
   loading?: boolean;
   error?: string | null;
   baseUrl?: string;
@@ -82,7 +85,6 @@ export function ChatScreen({
 
   const send = useCallback(
     async (text: string) => {
-      if (sessionId === null) return;
       // Уникальный id, а не длина списка: после удаления гейта длина
       // уменьшается, и следующая реплика получала бы занятый ключ.
       const optimisticId = `u-${sendSeq.current++}`;
@@ -92,7 +94,10 @@ export function ChatScreen({
       ]);
       setSendError(null);
       try {
-        const ref = await api.sendMessage(sessionId, text, autonomy);
+        // На чистой установке сессий нет. Молча ничего не делать — худший
+        // вариант: первое действие нового пользователя уходит в тишину.
+        const target = sessionId ?? (await ensureSession());
+        const ref = await api.sendMessage(target, text, autonomy);
         setRunId(ref.run_id);
         watch(ref.run_id);
       } catch (exc: unknown) {
@@ -108,7 +113,7 @@ export function ChatScreen({
         );
       }
     },
-    [api, sessionId, autonomy, watch],
+    [api, sessionId, ensureSession, autonomy, watch],
   );
 
   const decide = useCallback(
@@ -158,6 +163,15 @@ export function ChatScreen({
                 <div key={entry.id} className="chat__say">
                   {entry.text}
                 </div>
+              );
+            if (entry.kind === "status")
+              return (
+                <p
+                  key={entry.id}
+                  className={entry.failed ? "chat__error" : "chat__hint"}
+                >
+                  {entry.text}
+                </p>
               );
             if (entry.kind === "gate")
               return (

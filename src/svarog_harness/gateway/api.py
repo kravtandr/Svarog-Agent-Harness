@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from svarog_harness.config.loader import ConfigError
+from svarog_harness.config.paths import WorkspaceLayoutError
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
@@ -273,9 +274,10 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except QuotaExceededError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from None
-        except SandboxError as exc:
-            # Например, автономия, которую настроенный исполнитель не умеет
-            # (ADR-0016 §6). Это выбор пользователя, а не сбой сервера —
+        except (SandboxError, WorkspaceLayoutError) as exc:
+            # Автономия, которую исполнитель не умеет (ADR-0016 §6), или
+            # workspace, пересекающийся с control-plane (ADR-0015 §0.3).
+            # И то и другое — конфигурация запуска, а не сбой сервера:
             # 422 с текстом, а не 500 с трейсбеком в лог.
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")

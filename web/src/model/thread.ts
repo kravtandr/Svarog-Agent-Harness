@@ -20,7 +20,9 @@ export type ThreadItem =
       approvalId: string;
       actionType: string;
       command: string;
-    };
+    }
+  /** Итог запуска: провал или ожидание. Без него упавший run — тишина. */
+  | { kind: "status"; id: string; text: string; failed: boolean };
 
 export type StreamEvent =
   | { type: "text"; delta: string }
@@ -121,6 +123,35 @@ export function applyEvent(
       }
     }
     return items;
+  }
+
+  if (event.type === "run_finished") {
+    const { state, error, final_answer } = event as {
+      state?: string;
+      error?: string | null;
+      final_answer?: string | null;
+    };
+    if (state === "completed") {
+      // Финальный ответ уже мог прийти дельтами text — не дублируем.
+      const last = items[items.length - 1];
+      if (last?.kind === "say" || !final_answer) return items;
+      return [...items, { kind: "say", id: nextId(), text: final_answer }];
+    }
+    // Всё, кроме completed, человек обязан увидеть: упавший или
+    // приостановленный запуск иначе выглядит как зависшая тишина.
+    const label =
+      state === "waiting_approval"
+        ? "Запуск ждёт вашего решения."
+        : `Запуск ${state ?? "остановлен"}${error ? `: ${error}` : "."}`;
+    return [
+      ...items,
+      {
+        kind: "status",
+        id: nextId(),
+        text: label,
+        failed: state !== "waiting_approval",
+      },
+    ];
   }
 
   if (event.type === "approval_required") {

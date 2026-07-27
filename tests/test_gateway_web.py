@@ -655,3 +655,34 @@ async def test_session_activity_bumps_updated_at(service: GatewayService) -> Non
     listed = await service.list_sessions()
     titles = [s.title for s in listed]
     assert titles[:1] == ["старая"], f"ожидалась старая сверху: {titles}; свежая — {fresh.title}"
+
+
+def test_send_message_maps_setup_errors_to_422(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ошибки настройки запуска — 422 с текстом, а не 500 с трейсбеком.
+
+    Найдено реальным проходом: workspace, совпавший с agent-home, и режим
+    автономии, которого не умеет исполнитель, оба валились пятисоткой, а
+    интерфейсу нечего было показать.
+    """
+    from svarog_harness.config.paths import WorkspaceLayoutError
+    from svarog_harness.sandbox.base import SandboxError
+
+    client = TestClient(create_app(service=service))
+    session = client.post("/sessions", json={"title": "проба"}).json()
+
+    for error in (
+        SandboxError("режим 'supervised' не поддерживается исполнителем"),
+        WorkspaceLayoutError("control-plane пересекается с workspace"),
+    ):
+
+        async def boom(*args: object, error: Exception = error, **kwargs: object) -> str:
+            raise error
+
+        monkeypatch.setattr(service, "send_message", boom)
+        response = client.post(
+            f"/sessions/{session['session_id']}/messages", json={"text": "привет"}
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == str(error)

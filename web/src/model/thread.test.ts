@@ -149,3 +149,42 @@ describe("нормализация ленты", () => {
     expect(items).toEqual([]);
   });
 });
+
+describe("итог запуска", () => {
+  it("показывает провал, а не оставляет ленту в тишине", () => {
+    const items = feed([
+      { type: "run_finished", state: "failed", error: "NotFoundError: 404" },
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "status",
+      failed: true,
+    });
+    expect((items[0] as { text: string }).text).toContain("NotFoundError");
+  });
+
+  it("говорит про ожидание решения без пометки провала", () => {
+    const items = feed([{ type: "run_finished", state: "waiting_approval" }]);
+    expect(items[0]).toMatchObject({ kind: "status", failed: false });
+  });
+
+  it("не дублирует финальный ответ, если он пришёл дельтами", () => {
+    const items = feed([
+      { type: "text", delta: "Готово." },
+      { type: "run_finished", state: "completed", final_answer: "Готово." },
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "say", text: "Готово." });
+  });
+
+  it("показывает финальный ответ, если текста в потоке не было", () => {
+    const items = feed([
+      {
+        type: "run_finished",
+        state: "completed",
+        final_answer: "Файл создан.",
+      },
+    ]);
+    expect(items[0]).toMatchObject({ kind: "say", text: "Файл создан." });
+  });
+});

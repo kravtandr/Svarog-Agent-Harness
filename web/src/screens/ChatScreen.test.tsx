@@ -36,7 +36,13 @@ const api = (over: Partial<Api> = {}): Api =>
 
 describe("экран диалога", () => {
   it("рисует историю выбранной сессии", async () => {
-    render(<ChatScreen api={api()} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={api()}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
 
     await waitFor(() =>
       expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
@@ -47,7 +53,13 @@ describe("экран диалога", () => {
 
   it("отправляет сообщение в текущую сессию", async () => {
     const client = api();
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
     await waitFor(() =>
       expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
     );
@@ -70,7 +82,13 @@ describe("экран диалога", () => {
 
   it("отправляет выбранную автономию, а не значение по умолчанию", async () => {
     const client = api();
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
     await waitFor(() =>
       expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
     );
@@ -92,6 +110,7 @@ describe("экран диалога", () => {
     render(
       <ChatScreen
         api={api()}
+        ensureSession={async () => "s1"}
         sessionId={null}
         error="Не удалось загрузить сессии."
       />,
@@ -105,7 +124,13 @@ describe("экран диалога", () => {
     const client = api({
       sessionThread: () => Promise.reject(new Error("нет связи")),
     });
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
 
     expect(
       await screen.findByText(/не удалось загрузить историю/i),
@@ -113,7 +138,14 @@ describe("экран диалога", () => {
   });
 
   it("пока грузится — говорит об этом, а не показывает пустоту", () => {
-    render(<ChatScreen api={api()} sessionId={null} loading />);
+    render(
+      <ChatScreen
+        api={api()}
+        ensureSession={async () => "s1"}
+        sessionId={null}
+        loading
+      />,
+    );
     expect(screen.getByText(/загружаем/i)).toBeInTheDocument();
   });
 
@@ -122,7 +154,13 @@ describe("экран диалога", () => {
       sessionThread: () =>
         Promise.resolve({ session_id: "s1", title: "Новый чат", items: [] }),
     });
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
 
     await waitFor(() =>
       expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
@@ -144,7 +182,13 @@ describe("подписка на поток", () => {
     vi.stubGlobal("WebSocket", FakeSocket);
 
     const client = api();
-    const { rerender } = render(<ChatScreen api={client} sessionId="s1" />);
+    const { rerender } = render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
     await waitFor(() =>
       expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
     );
@@ -156,7 +200,13 @@ describe("подписка на поток", () => {
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
     await waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
 
-    rerender(<ChatScreen api={client} sessionId="s2" />);
+    rerender(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s2"
+      />,
+    );
 
     await waitFor(() => expect(closed).toHaveLength(1));
     vi.unstubAllGlobals();
@@ -184,7 +234,13 @@ describe("подписка на поток", () => {
         .fn()
         .mockResolvedValue({ run_id: "r-after", state: "running" }),
     });
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
     await waitFor(() =>
       expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
     );
@@ -216,7 +272,13 @@ describe("ошибки отправки", () => {
           ),
         ),
     });
-    render(<ChatScreen api={client} sessionId="s1" />);
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
     await waitFor(() =>
       expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
     );
@@ -230,5 +292,32 @@ describe("ошибки отправки", () => {
     expect(await screen.findByText(/не поддерживается/i)).toBeInTheDocument();
     // Реплика не должна остаться висеть, будто она отправлена.
     expect(screen.queryByText("поехали")).not.toBeInTheDocument();
+  });
+});
+
+describe("чистая установка", () => {
+  it("создаёт сессию сама при первой отправке, а не молчит", async () => {
+    const client = api();
+    const ensureSession = vi.fn().mockResolvedValue("s-new");
+    render(
+      <ChatScreen
+        api={client}
+        sessionId={null}
+        ensureSession={ensureSession}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "первая задача",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => expect(ensureSession).toHaveBeenCalled());
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      "s-new",
+      "первая задача",
+      "supervised",
+    );
   });
 });

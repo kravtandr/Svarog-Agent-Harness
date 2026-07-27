@@ -74,7 +74,14 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
     setActiveId(created.session_id);
     setSection("chat");
     await reload();
+    return created.session_id;
   }, [api, reload]);
+
+  /** Сессия для отправки: текущая, а если её нет — новая. */
+  const ensureSession = useCallback(
+    async () => activeId ?? (await startNew()),
+    [activeId, startNew],
+  );
 
   const active = sessions.find((session) => session.session_id === activeId);
 
@@ -109,6 +116,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
         <ChatScreen
           api={api}
           sessionId={activeId}
+          ensureSession={ensureSession}
           loading={loading}
           error={error}
           token={token}
