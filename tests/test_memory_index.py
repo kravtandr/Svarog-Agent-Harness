@@ -66,6 +66,13 @@ async def test_reindex_and_search_finds_by_content(db: AsyncSession, memory_dir:
     assert hits[0].snippet
 
 
+async def test_snippet_is_single_line(db: AsyncSession, memory_dir: Path) -> None:
+    """Сниппет многострочной страницы схлопнут: построчный формат выдачи цел."""
+    await mi.reindex(db, memory_dir)
+    hits = await mi.search(db, "версионировать", limit=5)
+    assert "\n" not in hits[0].snippet
+
+
 async def test_search_is_case_insensitive_cyrillic(db: AsyncSession, memory_dir: Path) -> None:
     """unicode61 приводит регистр — кириллица ищется без учёта регистра."""
     await mi.reindex(db, memory_dir)

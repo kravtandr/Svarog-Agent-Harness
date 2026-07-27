@@ -40,6 +40,16 @@ def sanitize_query(raw: str) -> str:
     return " ".join(f'"{t}"' for t in tokens)
 
 
+def _one_line(snippet: str) -> str:
+    """Схлопнуть сниппет в одну строку.
+
+    snippet() режет исходный текст как есть, а страницы памяти многострочные —
+    перевод строки внутри фрагмента разорвал бы построчный формат выдачи
+    («- путь — фрагмент») и у tool'а, и у блока авто-инъекции.
+    """
+    return " ".join(snippet.split())
+
+
 def _indexed_files(memory_dir: Path) -> list[tuple[str, str]]:
     """Пары (относительный путь, содержимое) для индексируемых страниц памяти."""
     out: list[tuple[str, str]] = []
@@ -89,4 +99,4 @@ async def search(session: AsyncSession, query: str, *, limit: int) -> list[Searc
     except OperationalError:
         # Нет таблицы / нет FTS5-расширения — retrieval недоступен, деградируем.
         return []
-    return [SearchHit(path=r[0], snippet=r[1]) for r in rows]
+    return [SearchHit(path=r[0], snippet=_one_line(r[1])) for r in rows]

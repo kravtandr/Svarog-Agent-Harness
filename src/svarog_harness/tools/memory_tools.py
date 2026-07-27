@@ -12,7 +12,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from svarog_harness.memory import index as memory_index
 from svarog_harness.memory.apply import MemoryApplyError, resolve_memory_path
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
 from svarog_harness.memory.proposal import MemoryProposalRequest, validate_proposal
@@ -163,6 +165,49 @@ class ReadMemoryTool(Tool[ReadMemoryArgs]):
         except OSError as exc:
             return ToolResult.failure(f"не удалось прочитать '{args.path}': {exc}")
         return ToolResult.success(truncate_text(content, _MAX_READ_CHARS))
+
+
+class SearchMemoryArgs(BaseModel):
+    query: str = Field(description="Ключевые слова для поиска по содержимому памяти")
+    limit: int = Field(default=5, ge=1, le=20, description="Сколько результатов вернуть")
+
+
+class SearchMemoryTool(Tool[SearchMemoryArgs]):
+    """Полнотекстовый поиск по памяти (связка B): найти страницы по содержимому.
+
+    Read-only, LOW — как read_memory (чтение памяти без ограничений, ADR-0004).
+    Возвращает пути и сниппеты: search находит *где*, полную страницу агент
+    подтягивает через read_memory. Дополняет index.md, где поиск идёт только по
+    заголовкам.
+    """
+
+    name = "search_memory"
+    action_type = "memory.read"
+    description = (
+        "Полнотекстовый поиск по долговременной памяти (страницы проектов, "
+        "решения, источники) по содержимому. Возвращает пути и фрагменты; "
+        "полную страницу читай через read_memory. Ищи, когда по заголовку в "
+        "index.md нужную страницу не найти."
+    )
+    risk_level = RiskLevel.LOW
+    args_model = SearchMemoryArgs
+
+    def is_read_only(self, args: SearchMemoryArgs) -> bool:
+        return True
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = session_factory
+
+    async def execute(self, args: SearchMemoryArgs) -> ToolResult:
+        # Пустой после санитизации запрос (одни спецсимволы) до MATCH не доводим:
+        # модели полезнее просьба уточнить, чем пустая выдача.
+        if not memory_index.sanitize_query(args.query):
+            return ToolResult.success("уточни запрос: нужны ключевые слова для поиска")
+        async with self._sessions() as session:
+            hits = await memory_index.search(session, args.query, limit=args.limit)
+        if not hits:
+            return ToolResult.success("ничего не найдено по запросу")
+        return ToolResult.success("\n".join(f"- {h.path} — {h.snippet}" for h in hits))
 
 
 # Приёмник proposal'ов: orchestrator материализует их после run'а.
