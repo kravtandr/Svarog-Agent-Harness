@@ -93,6 +93,10 @@ class RunHooks:
     on_run_started: Callable[[Run], None] | None = None
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
+    # Результат вызова: (tool_name, status, короткая сводка). Нужен интерфейсам,
+    # которые показывают исход рядом с вызовом, — в БД он есть (ToolCall.result),
+    # но по ходу прогона наблюдателю недоступен.
+    on_tool_result: Callable[[str, str, str], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
     on_progress: Callable[[int, int, float, float, int], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
@@ -342,6 +346,7 @@ class RunAssembly:
             secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
+            on_tool_result=hooks.on_tool_result,
             on_notify=hooks.on_notify,
             on_run_started=hooks.on_run_started,
             on_progress=hooks.on_progress,

@@ -262,7 +262,17 @@ git commit -m "feat(gateway): GET /sessions — список сессий для
 
 **Interfaces:**
 - Consumes: существующий `run_assembly.RunHooks`.
-- Produces: `runtime/summaries.py` с `short_arg(arguments: dict[str, Any]) -> str` и `short_result(result: dict[str, Any]) -> str`; новый хук `RunHooks.on_tool_result: Callable[[str, str, str], None] | None` с аргументами `(tool_name, status, summary)`; события потока `{"type":"tool_call","tool":str,"arg":str}` и `{"type":"tool_result","tool":str,"status":str,"result":str}`.
+- Produces: `runtime/summaries.py` с `short_arg(arguments: dict[str, Any]) -> str` и `short_result(*, ok: bool, output: str, error: str | None = None) -> str`; новый хук `RunHooks.on_tool_result: Callable[[str, str, str], None] | None` с аргументами `(tool_name, status, summary)`; события потока `{"type":"tool_call","tool":str,"arg":str}` и `{"type":"tool_result","tool":str,"status":str,"result":str}`.
+
+> **Поправка, внесённая при выполнении.** Черновик плана считал, что результат
+> вызова — словарь вида `{"added": 58, "removed": 4}`, и обещал справа `+58 −4`.
+> На деле `ToolResult.output` — строка (`tools/base.py:64`), а в БД всегда
+> ложится `{"output": <текст>}` (`trace/recorder.py:158`): инструменты
+> возвращают прозу — «записано 1234 символов в memory/index.py», «заменено
+> вхождений: 3», сырой stdout. Числа взять неоткуда. Принято решение показывать
+> **первую непустую строку вывода**, обрезанную до 60 символов, а для упавшего
+> вызова — текст ошибки. Структурированный итог инструментов — отдельный план,
+> см. «Что этот план не закрывает».
 
 **Где живут сокращатели:** в `runtime/`, а не в `gateway/`. Хук зовёт runtime, и сводку считает вызывающая сторона — если положить функции в gateway, runtime не сможет их импортировать, не развернув зависимость наизнанку. Telegram-интерфейс и CLI получают их даром.
 
@@ -729,7 +739,11 @@ class SessionThread(BaseModel):
                             server=server or None,
                             name=bare,
                             arg=short_arg(call.arguments or {}),
-                            result=short_result(call.result or {}),
+                            result=short_result(
+                                ok=call.status is ToolCallStatus.SUCCEEDED,
+                                output=str((call.result or {}).get("output", "")),
+                                error=call.error,
+                            ),
                             status=call.status.value,
                         )
                     )
@@ -743,7 +757,7 @@ class SessionThread(BaseModel):
         return await self._read(action)
 ```
 
-Добавить в импорты: `ToolCall` из `svarog_harness.storage.models`, `ThreadItemView` и `SessionThread` из моделей gateway, `short_result` из `svarog_harness.runtime.summaries` (`short_arg` импортирован в задаче 2). `TraceRecorder` и `find_session_by_prefix` в файле уже используются.
+Добавить в импорты: `ToolCall` и `ToolCallStatus` из `svarog_harness.storage.models`, `ThreadItemView` и `SessionThread` из моделей gateway, `short_result` из `svarog_harness.runtime.summaries` (`short_arg` импортирован в задаче 2). `TraceRecorder` и `find_session_by_prefix` в файле уже используются.
 
 - [ ] **Step 5: Добавить эндпоинт**
 
@@ -3206,4 +3220,5 @@ git commit -m "feat(gateway): раздача собранного клиента
 - **Экраны «Настройки» и «Память»** — планы 2 и 3, пишутся после выполнения этого.
 - **Скиллы, трейсы, очередь approvals, тенанты** — за скоупом спека.
 - **Голосовой ввод и ответ** — здесь только место в разметке и выключенная кнопка; четыре решения записаны в спеке.
+- **Структурированный итог инструментов.** Чтобы справа от вызова стояло `+58 −4`, `3 записи`, `код 1`, как нарисовано в макете, инструменты должны сообщать измеримый результат, а не прозу. Это поле `meta` в `ToolResult` и его заполнение в `write_file`, `edit_file`, `search_memory`, `run_shell` — работа в `tools/` и `runtime/`, трогающая контракт инструментов и их тесты. Отдельный план; форма строки вызова при этом не меняется, меняется только содержимое правого поля, поэтому переверстки не потребуется.
 - **Переключение режимов из поля ввода** — значения показываются, но пока не редактируются: смена автономии требует передачи `autonomy` в `POST /sessions/{id}/messages`, что делается вместе с экраном настроек в плане 2.

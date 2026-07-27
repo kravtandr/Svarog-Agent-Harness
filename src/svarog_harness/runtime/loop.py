@@ -40,6 +40,7 @@ from svarog_harness.runtime.refuel import (
     segment_progress,
     task_state_path,
 )
+from svarog_harness.runtime.summaries import short_result
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
@@ -195,6 +196,7 @@ class AgentLoop:
         plan_update_sink: list[dict[str, object]] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
+        on_tool_result: Callable[[str, str, str], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
         on_progress: Callable[[int, int, float, float, int], None] | None = None,
@@ -225,6 +227,7 @@ class AgentLoop:
         self._plan_update_sink = plan_update_sink if plan_update_sink is not None else []
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
+        self._on_tool_result = on_tool_result
         self._on_notify = on_notify
         # Cost/context-индикатор (ADR-0015 фаза 5): (итерация, токены за run,
         # стоимость, доля контекста 0..1) после каждого ответа провайдера.
@@ -595,6 +598,12 @@ class AgentLoop:
             await self._recorder.finish_tool_call(
                 record, ok=result.ok, output=result.output, error=result.error
             )
+            if self._on_tool_result is not None:
+                self._on_tool_result(
+                    prepared.call.name,
+                    record.status.value,
+                    short_result(ok=result.ok, output=result.output, error=result.error),
+                )
             rendered = self._render_tool_result(run, prepared.call, result)
             state.messages.append(
                 ChatMessage(role="tool", content=rendered, tool_call_id=prepared.call.id)
@@ -1119,6 +1128,12 @@ class AgentLoop:
         await self._recorder.finish_tool_call(
             record, ok=result.ok, output=result.output, error=result.error
         )
+        if self._on_tool_result is not None:
+            self._on_tool_result(
+                call.name,
+                record.status.value,
+                short_result(ok=result.ok, output=result.output, error=result.error),
+            )
         return result
 
     def _render_tool_result(self, run: Run, call: ToolCallRequest, result: ToolResult) -> str:

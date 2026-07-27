@@ -55,6 +55,7 @@ from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
+from svarog_harness.runtime.summaries import short_arg
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
 from svarog_harness.storage.models import Run, RunState, Session
@@ -372,7 +373,12 @@ class GatewayService:
         return RunHooks(
             on_run_started=on_started,
             on_text_delta=lambda delta: emit({"type": "text", "delta": delta}),
-            on_tool_call=lambda name, args: emit({"type": "tool_call", "tool": name}),
+            on_tool_call=lambda name, args: emit(
+                {"type": "tool_call", "tool": name, "arg": short_arg(args)}
+            ),
+            on_tool_result=lambda name, status, summary: emit(
+                {"type": "tool_result", "tool": name, "status": status, "result": summary}
+            ),
             on_notify=lambda name, reason: emit({"type": "notify", "tool": name, "reason": reason}),
             on_check=on_check,
             on_commit=lambda sha, branch, push: emit(
