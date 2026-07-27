@@ -205,6 +205,85 @@ def test_session_thread_endpoint_404(service: GatewayService) -> None:
     assert client.get("/sessions/нет-такой/messages").status_code == 404
 
 
+@pytest.fixture
+def service_with_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
+    """Сервис с настроенной памятью: пара страниц на диске."""
+    ws = tmp_path / "ws-mem"
+    ws.mkdir()
+    memory = tmp_path / "memory"
+    (memory / "решения").mkdir(parents=True)
+    (memory / "решения" / "fts.md").write_text(
+        "# Retrieval\n\nТочный проход раньше широкого.\n", encoding="utf-8"
+    )
+    (memory / "профиль.md").write_text("# Профиль\n", encoding="utf-8")
+
+    db_path = tmp_path / "state-mem" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {db_path}\n"
+        f"memory:\n  path: {memory}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return GatewayService(load_config(project_dir=ws), ws)
+
+
+def test_memory_tree_lists_markdown_pages(service_with_memory: GatewayService) -> None:
+    pages = service_with_memory.memory_tree()
+
+    assert [page.path for page in pages] == ["профиль.md", "решения/fts.md"]
+    assert all(page.size_bytes > 0 for page in pages)
+
+
+def test_memory_file_returns_text(service_with_memory: GatewayService) -> None:
+    view = service_with_memory.memory_file("решения/fts.md")
+    assert "Точный проход раньше широкого" in view.text
+
+
+def test_memory_file_refuses_escape_and_non_markdown(
+    service_with_memory: GatewayService,
+) -> None:
+    from svarog_harness.gateway.service import MemoryPathError
+
+    with pytest.raises(MemoryPathError):
+        service_with_memory.memory_file("../../etc/passwd")
+    with pytest.raises(MemoryPathError):
+        service_with_memory.memory_file("../svarog.yaml")
+    with pytest.raises(MemoryPathError):
+        service_with_memory.memory_file("решения/секрет.json")
+
+
+def test_memory_endpoints_report_disabled_memory(service: GatewayService) -> None:
+    # У базовой фикстуры memory.path не задан — раздела просто нет.
+    client = TestClient(create_app(service=service))
+
+    response = client.get("/memory/tree")
+
+    assert response.status_code == 404
+    assert "память не настроена" in response.json()["detail"]
+
+
+def test_memory_endpoints(service_with_memory: GatewayService) -> None:
+    client = TestClient(create_app(service=service_with_memory))
+
+    tree = client.get("/memory/tree")
+    assert tree.status_code == 200
+    assert len(tree.json()) == 2
+
+    file = client.get("/memory/file", params={"path": "решения/fts.md"})
+    assert file.status_code == 200
+    assert "Retrieval" in file.json()["text"]
+
+    escape = client.get("/memory/file", params={"path": "../svarog.yaml"})
+    assert escape.status_code == 422
+
+
 @pytest.mark.asyncio
 async def test_config_form_built_from_schema(service: GatewayService) -> None:
     view = service.describe_config()

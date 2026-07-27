@@ -1,9 +1,94 @@
-import { createClient } from './api/client'
-import { ChatScreen } from './screens/ChatScreen'
+import { useCallback, useEffect, useState } from "react";
+
+import { createClient, type Api } from "./api/client";
+import type { SessionSummary } from "./api/types";
+import { Nav, type Section } from "./components/Nav";
+import { Shell } from "./components/Shell";
+import { ChatScreen } from "./screens/ChatScreen";
+import { MemoryScreen } from "./screens/MemoryScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 
 // Статика раздаётся тем же svarog serve, поэтому базовый URL пустой.
-const api = createClient({ baseUrl: '' })
+const defaultApi = createClient({ baseUrl: "" });
 
-export function App() {
-  return <ChatScreen api={api} />
+const TITLES: Record<Section, string> = {
+  chat: "Сварог",
+  skills: "Скиллы",
+  memory: "Память",
+  settings: "Настройки",
+};
+
+/**
+ * Оболочка приложения: навигатор и переключение разделов.
+ *
+ * Сессии живут здесь, а не в экране диалога: их показывает навигатор,
+ * который виден на всех разделах.
+ */
+export function App({ api = defaultApi }: { api?: Api } = {}) {
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [section, setSection] = useState<Section>("chat");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    const listed = await api.listSessions();
+    setSessions(listed);
+    setActiveId((current) => current ?? listed[0]?.session_id ?? null);
+  }, [api]);
+
+  useEffect(() => {
+    reload()
+      .catch(() =>
+        setError(
+          "Не удалось загрузить сессии. Проверьте, что svarog serve запущен.",
+        ),
+      )
+      .finally(() => setLoading(false));
+  }, [reload]);
+
+  const startNew = useCallback(async () => {
+    const created = await api.createSession("Новый чат");
+    setActiveId(created.session_id);
+    setSection("chat");
+    await reload();
+  }, [api, reload]);
+
+  const active = sessions.find((session) => session.session_id === activeId);
+
+  return (
+    <Shell
+      nav={
+        <Nav
+          sessions={sessions}
+          activeId={activeId}
+          onPick={(id) => {
+            setActiveId(id);
+            setSection("chat");
+          }}
+          onNew={() => void startNew()}
+          section={section}
+          onSection={setSection}
+        />
+      }
+      bar={
+        <span>
+          {section === "chat"
+            ? (active?.title ?? TITLES.chat)
+            : TITLES[section]}
+        </span>
+      }
+    >
+      {section === "settings" && <SettingsScreen api={api} />}
+      {section === "memory" && <MemoryScreen api={api} />}
+      {section !== "settings" && section !== "memory" && (
+        <ChatScreen
+          api={api}
+          sessionId={activeId}
+          loading={loading}
+          error={error}
+        />
+      )}
+    </Shell>
+  );
 }

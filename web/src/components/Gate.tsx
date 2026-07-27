@@ -1,14 +1,14 @@
-import type { ThreadItem } from '../model/thread'
-import './Gate.css'
+import type { ThreadItem } from "../model/thread";
+import "./Gate.css";
 
-type GateItem = Extract<ThreadItem, { kind: 'gate' }>
+type GateItem = Extract<ThreadItem, { kind: "gate" }>;
 
 export function Gate({
   gate,
   onDecide,
 }: {
-  gate: GateItem
-  onDecide: (approved: boolean) => void
+  gate: GateItem;
+  onDecide: (approved: boolean) => void;
 }) {
   return (
     <div className="gate">
@@ -22,12 +22,16 @@ export function Gate({
         >
           Разрешить
         </button>
-        <button type="button" className="gate__btn gate__btn--ghost" onClick={() => onDecide(false)}>
+        <button
+          type="button"
+          className="gate__btn gate__btn--ghost"
+          onClick={() => onDecide(false)}
+        >
           Отклонить
         </button>
         {/* Правило, по которому агент остановился: решение принимается со знанием причины. */}
         <span className="gate__rule">{gate.actionType}</span>
       </div>
     </div>
-  )
+  );
 }

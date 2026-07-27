@@ -47,10 +47,10 @@
     transition: transform 180ms ease;
     box-shadow: 14px 0 40px rgba(0, 0, 0, 0.5);
   }
-  .shell__nav[data-open='true'] {
+  .shell__nav[data-open="true"] {
     transform: translateX(0);
   }
-  .shell__nav[data-open='true'] ~ .shell__scrim {
+  .shell__nav[data-open="true"] ~ .shell__scrim {
     display: block;
     position: fixed;
     z-index: 4;

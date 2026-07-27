@@ -77,20 +77,20 @@
   height: 15px;
   border-radius: 1px;
 }
-.heat[data-heat='0'] {
+.heat[data-heat="0"] {
   background: #ffe7be;
   box-shadow: 0 0 7px rgba(255, 210, 140, 0.6);
 }
-.heat[data-heat='1'] {
+.heat[data-heat="1"] {
   background: var(--ember);
 }
-.heat[data-heat='2'] {
+.heat[data-heat="2"] {
   background: #a24b21;
 }
-.heat[data-heat='3'] {
+.heat[data-heat="3"] {
   background: #6b3a22;
 }
-.heat[data-heat='4'] {
+.heat[data-heat="4"] {
   background: #423a34;
 }
 

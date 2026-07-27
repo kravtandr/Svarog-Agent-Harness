@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "tsc --noEmit && vitest run",
-    "lint": "tsc --noEmit"
+    "test": "tsc --noEmit && prettier --check src && vitest run",
+    "lint": "tsc --noEmit",
+    "format": "prettier --write src"
   },
   "dependencies": {
     "react": "^19.0.0",
@@ -24,6 +25,7 @@
     "jsdom": "^25.0.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "prettier": "^3.4.2"
   }
 }

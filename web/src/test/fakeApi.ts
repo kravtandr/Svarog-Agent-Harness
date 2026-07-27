@@ -1,0 +1,38 @@
+import { vi } from "vitest";
+
+import type { Api } from "../api/client";
+
+/**
+ * Полный стенд Api для тестов.
+ *
+ * Один на все файлы: иначе добавление метода в Api ломает каждый тест по
+ * отдельности, и правка превращается в двенадцать одинаковых заплаток.
+ */
+export function fakeApi(over: Partial<Api> = {}): Api {
+  return {
+    listSessions: vi.fn().mockResolvedValue([]),
+    sessionThread: vi
+      .fn()
+      .mockResolvedValue({ session_id: "", title: "", items: [] }),
+    createSession: vi.fn().mockResolvedValue({ session_id: "new" }),
+    sendMessage: vi.fn().mockResolvedValue({ run_id: "r1", state: "running" }),
+    decideApproval: vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" }),
+    config: vi.fn().mockResolvedValue({ path: "", sections: [] }),
+    previewConfig: vi
+      .fn()
+      .mockResolvedValue({ path: "", lines: [], changes: 0 }),
+    saveConfig: vi.fn().mockResolvedValue({ path: "", lines: [], changes: 0 }),
+    secrets: vi.fn().mockResolvedValue([]),
+    memoryTree: vi.fn().mockResolvedValue([]),
+    memoryFile: vi.fn().mockResolvedValue({
+      path: "",
+      text: "",
+      size_bytes: 0,
+      modified_at: "2026-07-27T10:00:00Z",
+    }),
+    memorySearch: vi.fn().mockResolvedValue([]),
+    ...over,
+  };
+}

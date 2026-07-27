@@ -1,113 +1,132 @@
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
 
-import type { Api } from '../api/client'
-import { ChatScreen } from './ChatScreen'
+import type { Api } from "../api/client";
+import { fakeApi } from "../test/fakeApi";
+import { ChatScreen } from "./ChatScreen";
 
-function fakeApi(over: Partial<Api> = {}): Api {
-  return {
-    listSessions: vi.fn().mockResolvedValue([
-      {
-        session_id: 's1',
-        title: 'FTS-поиск по памяти',
-        workspace: null,
-        updated_at: new Date().toISOString(),
-        runs_count: 1,
-        last_state: 'completed',
-      },
-    ]),
-    sessionThread: vi.fn().mockResolvedValue({
-      session_id: 's1',
-      title: 'FTS-поиск по памяти',
-      items: [
-        {
-          kind: 'user',
-          text: 'Добавь FTS-поиск',
-          server: null,
-          name: '',
-          arg: '',
-          result: '',
-          status: '',
-        },
-        {
-          kind: 'call',
-          text: '',
-          server: null,
-          name: 'write_file',
-          arg: 'memory/index.py',
-          result: 'записано 1234 символов',
-          status: 'succeeded',
-        },
-      ],
-    }),
-    createSession: vi.fn().mockResolvedValue({ session_id: 's2' }),
-    sendMessage: vi.fn().mockResolvedValue({ run_id: 'r1', state: 'running' }),
-    decideApproval: vi.fn().mockResolvedValue({ run_id: 'r1', state: 'running' }),
-    ...over,
-  }
-}
+const thread = {
+  session_id: "s1",
+  title: "FTS-поиск по памяти",
+  items: [
+    {
+      kind: "user" as const,
+      text: "Добавь FTS-поиск",
+      server: null,
+      name: "",
+      arg: "",
+      result: "",
+      status: "",
+    },
+    {
+      kind: "call" as const,
+      text: "",
+      server: null,
+      name: "write_file",
+      arg: "memory/index.py",
+      result: "записано 1234 символов",
+      status: "succeeded",
+    },
+  ],
+};
 
-describe('экран диалога', () => {
-  it('рисует историю выбранной сессии', async () => {
-    render(<ChatScreen api={fakeApi()} />)
+const api = (over: Partial<Api> = {}): Api =>
+  fakeApi({ sessionThread: () => Promise.resolve(thread), ...over });
 
-    await waitFor(() => expect(screen.getByText('Добавь FTS-поиск')).toBeInTheDocument())
-    expect(screen.getByText('write_file')).toBeInTheDocument()
-    expect(screen.getByText('записано 1234 символов')).toBeInTheDocument()
-  })
+describe("экран диалога", () => {
+  it("рисует историю выбранной сессии", async () => {
+    render(<ChatScreen api={api()} sessionId="s1" />);
 
-  it('отправляет сообщение в текущую сессию', async () => {
-    const api = fakeApi()
-    render(<ChatScreen api={api} />)
-    await waitFor(() => expect(screen.getByText('Добавь FTS-поиск')).toBeInTheDocument())
-
-    await userEvent.type(screen.getByRole('textbox', { name: /написать/i }), 'прогони тесты')
-    await userEvent.click(screen.getByRole('button', { name: 'Отправить' }))
-
-    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'прогони тесты', 'supervised')
-    await waitFor(() => expect(screen.getByText('прогони тесты')).toBeInTheDocument())
-  })
-
-  it('отправляет выбранную автономию, а не значение по умолчанию', async () => {
-    const api = fakeApi()
-    render(<ChatScreen api={api} />)
-    await waitFor(() => expect(screen.getByText('Добавь FTS-поиск')).toBeInTheDocument())
-
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: /автономия/i }), 'yolo')
-    await userEvent.type(screen.getByRole('textbox', { name: /написать/i }), 'жги')
-    await userEvent.click(screen.getByRole('button', { name: 'Отправить' }))
-
-    expect(api.sendMessage).toHaveBeenCalledWith('s1', 'жги', 'yolo')
-  })
-
-  it('показывает ошибку загрузки, а не пустой экран', async () => {
-    const api = fakeApi({ listSessions: vi.fn().mockRejectedValue(new Error('нет связи')) })
-    render(<ChatScreen api={api} />)
     await waitFor(() =>
-      expect(screen.getByText(/не удалось загрузить сессии/i)).toBeInTheDocument(),
-    )
-  })
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("write_file")).toBeInTheDocument();
+    expect(screen.getByText("записано 1234 символов")).toBeInTheDocument();
+  });
 
-  it('пока грузится — говорит об этом, а не показывает пустоту', async () => {
-    render(<ChatScreen api={fakeApi()} />)
+  it("отправляет сообщение в текущую сессию", async () => {
+    const client = api();
+    render(<ChatScreen api={client} sessionId="s1" />);
+    await waitFor(() =>
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
 
-    expect(screen.getByText(/загружаем/i)).toBeInTheDocument()
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "прогони тесты",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    // Дожидаемся конца загрузки: иначе состояние обновится после теста и
-    // React пожалуется на изменение вне act(...).
-    await waitFor(() => expect(screen.queryByText(/загружаем/i)).not.toBeInTheDocument())
-  })
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "прогони тесты",
+      "supervised",
+    );
+    await waitFor(() =>
+      expect(screen.getByText("прогони тесты")).toBeInTheDocument(),
+    );
+  });
 
-  it('пустая сессия приглашает к действию, а не сообщает «нет данных»', async () => {
-    const api = fakeApi({
-      sessionThread: vi
-        .fn()
-        .mockResolvedValue({ session_id: 's1', title: 'Новый чат', items: [] }),
-    })
-    render(<ChatScreen api={api} />)
+  it("отправляет выбранную автономию, а не значение по умолчанию", async () => {
+    const client = api();
+    render(<ChatScreen api={client} sessionId="s1" />);
+    await waitFor(() =>
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
 
-    await waitFor(() => expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument())
-    expect(screen.queryByText(/нет данных/i)).not.toBeInTheDocument()
-  })
-})
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /автономия/i }),
+      "yolo",
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "жги",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(client.sendMessage).toHaveBeenCalledWith("s1", "жги", "yolo");
+  });
+
+  it("показывает ошибку загрузки сессий, пришедшую сверху", () => {
+    render(
+      <ChatScreen
+        api={api()}
+        sessionId={null}
+        error="Не удалось загрузить сессии."
+      />,
+    );
+    expect(
+      screen.getByText("Не удалось загрузить сессии."),
+    ).toBeInTheDocument();
+  });
+
+  it("сообщает о неудачной загрузке истории самой сессии", async () => {
+    const client = api({
+      sessionThread: () => Promise.reject(new Error("нет связи")),
+    });
+    render(<ChatScreen api={client} sessionId="s1" />);
+
+    expect(
+      await screen.findByText(/не удалось загрузить историю/i),
+    ).toBeInTheDocument();
+  });
+
+  it("пока грузится — говорит об этом, а не показывает пустоту", () => {
+    render(<ChatScreen api={api()} sessionId={null} loading />);
+    expect(screen.getByText(/загружаем/i)).toBeInTheDocument();
+  });
+
+  it("пустая сессия приглашает к действию, а не сообщает «нет данных»", async () => {
+    const client = api({
+      sessionThread: () =>
+        Promise.resolve({ session_id: "s1", title: "Новый чат", items: [] }),
+    });
+    render(<ChatScreen api={client} sessionId="s1" />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/нет данных/i)).not.toBeInTheDocument();
+  });
+});

@@ -1,15 +1,15 @@
-import { useState } from 'react'
+import { useState } from "react";
 
-import type { ThreadItem } from '../model/thread'
-import './ToolCalls.css'
+import type { ThreadItem } from "../model/thread";
+import "./ToolCalls.css";
 
-type Call = Extract<ThreadItem, { kind: 'call' }>
+type Call = Extract<ThreadItem, { kind: "call" }>;
 
-const MARK: Record<Call['status'], string> = { ok: '✓', run: '▸', error: '✕' }
+const MARK: Record<Call["status"], string> = { ok: "✓", run: "▸", error: "✕" };
 
 function CallRow({ call }: { call: Call }) {
   // Упавший вызов раскрыт изначально: прятать причину остановки бессмысленно.
-  const [open, setOpen] = useState(call.status === 'error')
+  const [open, setOpen] = useState(call.status === "error");
 
   return (
     <>
@@ -37,22 +37,22 @@ function CallRow({ call }: { call: Call }) {
       {open && (
         <div className="call-detail" data-testid="call-detail">
           <p className="call-detail__label">запрос</p>
-          <pre>{call.arg || '—'}</pre>
+          <pre>{call.arg || "—"}</pre>
           <p className="call-detail__label">ответ</p>
-          <pre>{call.result || '—'}</pre>
+          <pre>{call.result || "—"}</pre>
         </div>
       )}
     </>
-  )
+  );
 }
 
 export function ToolCalls({ calls }: { calls: Call[] }) {
-  if (calls.length === 0) return null
+  if (calls.length === 0) return null;
   return (
     <div className="calls">
       {calls.map((call) => (
         <CallRow key={call.id} call={call} />
       ))}
     </div>
-  )
+  );
 }

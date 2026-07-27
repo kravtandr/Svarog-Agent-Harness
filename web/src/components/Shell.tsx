@@ -1,17 +1,17 @@
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useState } from "react";
 
-import './Shell.css'
+import "./Shell.css";
 
 export function Shell({
   nav,
   bar,
   children,
 }: {
-  nav: ReactNode
-  bar: ReactNode
-  children: ReactNode
+  nav: ReactNode;
+  bar: ReactNode;
+  children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(false);
 
   return (
     <div className="shell">
@@ -40,5 +40,5 @@ export function Shell({
         {children}
       </div>
     </div>
-  )
+  );
 }

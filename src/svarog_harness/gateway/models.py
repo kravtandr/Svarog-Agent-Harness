@@ -159,6 +159,26 @@ class SessionView(BaseModel):
     runs: list[RunSummary]
 
 
+class MemoryPageView(BaseModel):
+    """Страница памяти в дереве: путь относительно memory/ и размер."""
+
+    path: str
+    size_bytes: int
+    modified_at: datetime
+
+
+class MemoryHitView(BaseModel):
+    path: str
+    snippet: str
+
+
+class MemoryFileView(BaseModel):
+    path: str
+    text: str
+    size_bytes: int
+    modified_at: datetime
+
+
 class SecretView(BaseModel):
     """Секрет для экрана настроек: имя и факт наличия, без значения (ADR-0006)."""
 

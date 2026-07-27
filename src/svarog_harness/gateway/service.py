@@ -25,11 +25,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError
-from svarog_harness.config.paths import skills_dirs
+from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
+    MemoryFileView,
+    MemoryHitView,
+    MemoryPageView,
     RepoSpec,
     RunDetail,
     RunDiffView,
@@ -66,6 +69,7 @@ from svarog_harness.gitflow.provision import (
 )
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.provider import ChatMessage
+from svarog_harness.memory.index import search as memory_search
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
 from svarog_harness.runtime.summaries import short_arg, short_result
@@ -97,6 +101,14 @@ _SESSION_HISTORY_LIMIT = 24
 
 class CancelNotAllowedError(Exception):
     """Run уже терминален — отменять нечего (ADR-0017 §2)."""
+
+
+class MemoryDisabledError(Exception):
+    """Память не настроена в конфиге — экрана памяти быть не может."""
+
+
+class MemoryPathError(Exception):
+    """Путь страницы вне memory/ или не markdown."""
 
 
 @dataclass
@@ -740,6 +752,63 @@ class GatewayService:
                 if answer:
                     items.append(ThreadItemView(kind="say", text=answer))
             return SessionThread(session_id=session.id, title=session.title or "", items=items)
+
+        return await self._read(action)
+
+    # --- память (план 2026-07-27) ------------------------------------------
+
+    def _memory_root(self) -> Path:
+        root = memory_dir(self.cfg)
+        if root is None or not root.is_dir():
+            raise MemoryDisabledError("память не настроена: в конфиге нет memory.path")
+        return root
+
+    def _memory_file(self, rel_path: str) -> Path:
+        """Абсолютный путь страницы; выход за пределы memory/ — отказ.
+
+        Путь приходит от клиента, поэтому проверяется, а не склеивается:
+        `../../.ssh/id_rsa` не должен читаться через веб (ADR-0012).
+        """
+        root = self._memory_root()
+        target = (root / rel_path).resolve()
+        if not target.is_relative_to(root) or target.suffix != ".md":
+            raise MemoryPathError(f"недопустимый путь страницы памяти: {rel_path}")
+        return target
+
+    def memory_tree(self) -> list[MemoryPageView]:
+        """Страницы памяти как они лежат в Git — markdown, отсортированные по пути."""
+        root = self._memory_root()
+        pages: list[MemoryPageView] = []
+        for path in sorted(root.rglob("*.md")):
+            stat = path.stat()
+            pages.append(
+                MemoryPageView(
+                    path=str(path.relative_to(root)),
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                )
+            )
+        return pages
+
+    def memory_file(self, rel_path: str) -> MemoryFileView:
+        target = self._memory_file(rel_path)
+        if not target.is_file():
+            raise MemoryPathError(f"страницы памяти нет: {rel_path}")
+        stat = target.stat()
+        return MemoryFileView(
+            path=rel_path,
+            text=target.read_text(encoding="utf-8"),
+            size_bytes=stat.st_size,
+            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+        )
+
+    async def memory_search(self, query: str, limit: int = 10) -> list[MemoryHitView]:
+        """Поиск тем же механизмом, что у агента: search_memory поверх FTS5."""
+        self._memory_root()  # проверка, что память вообще настроена
+
+        async def action(db: AsyncSession) -> list[MemoryHitView]:
+            hits = await memory_search(db, query, limit=limit)
+            return [MemoryHitView(path=hit.path, snippet=hit.snippet) for hit in hits]
 
         return await self._read(action)
 

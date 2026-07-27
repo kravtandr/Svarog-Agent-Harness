@@ -30,6 +30,9 @@ from svarog_harness.gateway.models import (
     CreateWorkspaceRequest,
     DirListing,
     FileEntry,
+    MemoryFileView,
+    MemoryHitView,
+    MemoryPageView,
     RunDetail,
     RunDiffView,
     RunRef,
@@ -43,7 +46,12 @@ from svarog_harness.gateway.models import (
     WhoamiView,
     WorkspaceView,
 )
-from svarog_harness.gateway.service import CancelNotAllowedError, GatewayService
+from svarog_harness.gateway.service import (
+    CancelNotAllowedError,
+    GatewayService,
+    MemoryDisabledError,
+    MemoryPathError,
+)
 from svarog_harness.gateway.settings import ConfigDiffView, ConfigUpdateRequest, ConfigView
 from svarog_harness.gateway.static import web_dist_dir
 from svarog_harness.gitflow.provision import (
@@ -374,6 +382,34 @@ def create_app(
         # Ответ на ask_user записан — возобновляем run (§6.5, ADR-0005).
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
+
+    # --- память (план 2026-07-27) ------------------------------------------
+
+    def _memory_error(exc: Exception) -> HTTPException:
+        # Память не настроена — 404 раздела, а не 500: это конфигурация, не сбой.
+        status_code = 404 if isinstance(exc, MemoryDisabledError) else 422
+        return HTTPException(status_code=status_code, detail=str(exc))
+
+    @app.get("/memory/tree", response_model=list[MemoryPageView])
+    async def memory_tree(service: ServiceDep) -> list[MemoryPageView]:
+        try:
+            return service.memory_tree()
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
+
+    @app.get("/memory/file", response_model=MemoryFileView)
+    async def memory_file(path: str, service: ServiceDep) -> MemoryFileView:
+        try:
+            return service.memory_file(path)
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
+
+    @app.get("/memory/search", response_model=list[MemoryHitView])
+    async def memory_search(q: str, service: ServiceDep, limit: int = 10) -> list[MemoryHitView]:
+        try:
+            return await service.memory_search(q, limit=limit)
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
 
     # --- конфигурация и секреты (план 2026-07-27) --------------------------
 

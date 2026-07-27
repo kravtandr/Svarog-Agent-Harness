@@ -1,0 +1,222 @@
+.settings {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings__nav {
+  flex: 0 0 208px;
+  padding: 18px 10px;
+  border-right: 1px solid var(--line-soft);
+}
+.settings__nav-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: #c6bfb4;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.settings__nav-item--active {
+  background: var(--raised);
+  color: var(--text);
+}
+
+.settings__body {
+  flex: 1;
+  min-width: 0;
+  padding: 26px 32px;
+  overflow-y: auto;
+}
+.settings__title {
+  margin: 0 0 6px;
+  font-size: 19px;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+.settings__path {
+  margin: 0 0 24px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.field {
+  max-width: 620px;
+  margin-bottom: 22px;
+}
+.field__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13.5px;
+}
+.field__help {
+  margin: 0 0 8px;
+  max-width: 58ch;
+  font-size: 12.8px;
+  color: var(--faint);
+}
+.field__control {
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: #e2dcd2;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.field__control--check {
+  width: auto;
+  margin-right: 9px;
+}
+.field__path {
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.field__error {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--bad);
+}
+
+/* Панель «будет записано» — тот же дифф, что и в шторке на мобильном. */
+.diffpane {
+  display: flex;
+  flex: 0 0 344px;
+  width: 344px;
+  flex-direction: column;
+  border-left: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+.diffpane__head {
+  padding: 14px 16px 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.diffpane__file {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--git);
+}
+.diffpane__body {
+  flex: 1;
+  margin: 0;
+  padding: 0 16px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--muted);
+  white-space: pre;
+}
+.diffpane__line--add {
+  display: block;
+  background: rgba(110, 155, 114, 0.11);
+  color: #9dcba1;
+}
+.diffpane__line--del {
+  display: block;
+  background: rgba(196, 99, 92, 0.1);
+  color: #dfa09b;
+}
+.diffpane__line--same {
+  display: block;
+}
+.diffpane__foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.diffpane__count {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.btn {
+  padding: 8px 15px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.btn--primary {
+  background: var(--ember);
+  color: #1a1210;
+  font-weight: 600;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.secret {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 620px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.secret__state {
+  margin-left: auto;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--ok);
+}
+.secret__state--missing {
+  color: var(--faint);
+}
+
+/* Мобильный: одна колонка, дифф — нижней шторкой по кнопке с числом. */
+.settings__sheet-button {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .settings__nav {
+    display: none;
+  }
+  .settings__body {
+    padding: 18px 14px 0;
+  }
+  .diffpane {
+    position: fixed;
+    z-index: 6;
+    inset: auto 0 0 0;
+    width: auto;
+    max-height: 66%;
+    border-left: 0;
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -14px 40px rgba(0, 0, 0, 0.5);
+  }
+  .diffpane[data-open="false"] {
+    display: none;
+  }
+  .settings__sheet-button {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 10px 14px 14px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .settings__sheet-button .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+}

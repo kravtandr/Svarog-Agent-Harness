@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState } from "react";
 
-import { AUTONOMY_LABELS, type Autonomy } from '../api/types'
-import './Composer.css'
+import { AUTONOMY_LABELS, type Autonomy } from "../api/types";
+import "./Composer.css";
 
 export function Composer({
   onSend,
@@ -10,19 +10,19 @@ export function Composer({
   executor,
   model,
 }: {
-  onSend: (text: string) => void
-  autonomy: Autonomy
-  onAutonomyChange: (autonomy: Autonomy) => void
-  executor: string
-  model: string
+  onSend: (text: string) => void;
+  autonomy: Autonomy;
+  onAutonomyChange: (autonomy: Autonomy) => void;
+  executor: string;
+  model: string;
 }) {
-  const [text, setText] = useState('')
+  const [text, setText] = useState("");
 
   function send() {
-    const trimmed = text.trim()
-    if (!trimmed) return
-    onSend(trimmed)
-    setText('')
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    onSend(trimmed);
+    setText("");
   }
 
   return (
@@ -45,7 +45,9 @@ export function Composer({
                 className="composer__select"
                 aria-label="Автономия"
                 value={autonomy}
-                onChange={(event) => onAutonomyChange(event.target.value as Autonomy)}
+                onChange={(event) =>
+                  onAutonomyChange(event.target.value as Autonomy)
+                }
               >
                 {(Object.keys(AUTONOMY_LABELS) as Autonomy[]).map((mode) => (
                   <option key={mode} value={mode}>
@@ -92,5 +94,5 @@ export function Composer({
         </div>
       </div>
     </div>
-  )
+  );
 }
