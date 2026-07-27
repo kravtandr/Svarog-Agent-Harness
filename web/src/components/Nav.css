@@ -1,0 +1,99 @@
+.nav {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--surface);
+}
+.nav__top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 10px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.nav__new,
+.nav__item,
+.nav__section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% - 20px);
+  margin: 0 10px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: #c6bfb4;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.nav__new {
+  margin-bottom: 10px;
+  background: var(--raised);
+  color: var(--text);
+}
+.nav__item--active {
+  background: var(--raised);
+  color: var(--text);
+}
+.nav__list {
+  flex: 1;
+  overflow-y: auto;
+}
+.nav__day {
+  padding: 12px 22px 5px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.nav__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav__foot {
+  padding: 8px 0 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.nav__count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+/* Шкала накала: свежесть и состояние одним каналом. */
+.heat {
+  flex: 0 0 2px;
+  width: 2px;
+  height: 15px;
+  border-radius: 1px;
+}
+.heat[data-heat='0'] {
+  background: #ffe7be;
+  box-shadow: 0 0 7px rgba(255, 210, 140, 0.6);
+}
+.heat[data-heat='1'] {
+  background: var(--ember);
+}
+.heat[data-heat='2'] {
+  background: #a24b21;
+}
+.heat[data-heat='3'] {
+  background: #6b3a22;
+}
+.heat[data-heat='4'] {
+  background: #423a34;
+}
+
+@media (max-width: 899px) {
+  .nav__item,
+  .nav__new,
+  .nav__section {
+    min-height: 44px;
+  }
+}
