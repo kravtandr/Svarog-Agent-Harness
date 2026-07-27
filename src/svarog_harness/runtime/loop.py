@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -187,6 +187,7 @@ class AgentLoop:
         skill_cards: str = "",
         memory: str = "",
         persona: str = "",
+        relevant_memory: Callable[[str], Awaitable[str]] | None = None,
         skill_load_sink: list[tuple[str, str | None]] | None = None,
         memory_sink: list[dict[str, object]] | None = None,
         workspace_flow: WorkspaceFlow | None = None,
@@ -210,6 +211,9 @@ class AgentLoop:
         self._skill_cards = skill_cards
         self._memory = memory
         self._persona = persona
+        # Блок релевантной памяти под задачу (связка B): считается в run(), когда
+        # задача известна, и только при переполнении index.md. None — выключено.
+        self._relevant_memory = relevant_memory
         self._workspace_flow = workspace_flow
         # Значения секретов для redaction в tool outputs и trace (ADR-0006, §12).
         self._secret_values = secret_values
@@ -239,6 +243,19 @@ class AgentLoop:
         # экземпляра AgentLoop). resume() поверх этого восстанавливает
         # накопленное из Run.meta["phases"] через restore() — там это осмысленно.
         self._phases = PhaseTimer()
+
+    async def _memory_for(self, task: str) -> str:
+        """Память для промпта: базовая плюс блок, релевантный этой задаче.
+
+        Базовая часть (profile + index) читается в build_loop, до того как
+        задача известна; task-зависимый блок можно посчитать только здесь.
+        """
+        if self._relevant_memory is None:
+            return self._memory
+        block = await self._relevant_memory(task)
+        if not block:
+            return self._memory
+        return f"{self._memory}\n\n{block}" if self._memory else block
 
     async def run(
         self,
@@ -271,7 +288,7 @@ class AgentLoop:
             task,
             self._workspace,
             skill_cards=self._skill_cards,
-            memory=self._memory,
+            memory=await self._memory_for(task),
             persona=self._persona,
             history=history,
         )

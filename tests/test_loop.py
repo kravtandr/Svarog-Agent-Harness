@@ -1204,3 +1204,62 @@ async def test_reasoning_is_recorded_in_trace(db: AsyncSession, tmp_path: Path) 
     messages = (await db.scalars(select(Message).where(Message.run_id == outcome.run_id))).all()
     reasoning_notes = [m.content.get("reasoning") for m in messages if m.role == "assistant"]
     assert any(note and "думаю про файлы" in note for note in reasoning_notes)
+
+
+# --- авто-инъекция релевантной памяти (связка B) ---
+
+
+async def test_relevant_memory_block_appended_to_system_prompt(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Провайдер зовётся с текстом задачи, блок дописывается к memory-секции."""
+    seen: list[str] = []
+
+    async def provider_block(task: str) -> str:
+        seen.append(task)
+        return "# Релевантно задаче\n- decisions/api.md — [версионируем]"
+
+    loop = AgentLoop(
+        ScriptedProvider([_final("готово")]),
+        ToolRegistry(),
+        TraceRecorder(db),
+        RuntimeConfig(),
+        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+        tmp_path,
+        model_name="test-model",
+        memory="# Индекс памяти",
+        relevant_memory=provider_block,
+    )
+    await loop.run("где договаривались про версионирование", AutonomyMode.YOLO)
+
+    assert seen == ["где договаривались про версионирование"]
+    system = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().first()
+    assert system is not None
+    assert "# Индекс памяти" in system.content["content"]
+    assert "decisions/api.md" in system.content["content"]
+
+
+async def test_relevant_memory_empty_block_leaves_prompt_unchanged(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Нет переполнения/совпадений — промпт ровно такой, каким был без связки B."""
+
+    async def no_block(task: str) -> str:
+        return ""
+
+    loop = AgentLoop(
+        ScriptedProvider([_final("готово")]),
+        ToolRegistry(),
+        TraceRecorder(db),
+        RuntimeConfig(),
+        PolicyEngine(autonomy=AutonomyMode.YOLO, policies=PoliciesConfig(), workspace=tmp_path),
+        tmp_path,
+        model_name="test-model",
+        memory="# Индекс памяти",
+        relevant_memory=no_block,
+    )
+    await loop.run("задача", AutonomyMode.YOLO)
+
+    system = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().first()
+    assert system is not None
+    assert "Релевантно задаче" not in system.content["content"]

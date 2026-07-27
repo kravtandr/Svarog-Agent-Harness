@@ -173,3 +173,12 @@ def test_dream_task_mentions_profile() -> None:
 
     task = build_dream_task(MemoryAuditReport(findings=[]))
     assert "профил" in task.lower()
+
+
+def test_dream_registry_has_search_memory(dream_registry_names: list[str]) -> None:
+    """Dream ищет дубли и противоречия по содержимому — FTS ему нужен (связка B)."""
+    assert "search_memory" in dream_registry_names
+
+
+def test_default_registry_has_search_memory(default_registry_names: list[str]) -> None:
+    assert "search_memory" in default_registry_names

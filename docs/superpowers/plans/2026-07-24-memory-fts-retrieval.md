@@ -41,7 +41,7 @@ SQLAlchemy async (`text()` для FTS SQL), pytest + pytest-asyncio.
   `MemoryConfig.fts_inject_pages: int = 5` (gt=0),
   `MemoryConfig.fts_inject_bytes: int = 3000` (gt=0).
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_config.py — добавить
@@ -54,12 +54,12 @@ def test_memory_fts_defaults() -> None:
     assert cfg.fts_inject_bytes == 3000
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_config.py -k memory_fts -v`
 Expected: FAIL — `AttributeError: ... has no attribute 'fts_enabled'`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 В `MemoryConfig` (после `index_max_lines`) добавить:
 
@@ -71,12 +71,12 @@ Expected: FAIL — `AttributeError: ... has no attribute 'fts_enabled'`.
     fts_inject_bytes: int = Field(default=3000, gt=0)
 ```
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_config.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/config/schema.py tests/test_config.py
@@ -98,7 +98,7 @@ git commit -m "feat(config): FTS-поля MemoryConfig (связка B)"
 - Produces: `index_overflowed(memory_dir: Path, *, max_lines: int) -> bool` —
   `True`, если полный (несвёрнутый) индекс превышает `max_lines` строк.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_memory_wiki.py — добавить
@@ -123,12 +123,12 @@ def test_index_overflowed_true_when_many(tmp_path: Path) -> None:
     assert index_overflowed(tmp_path, max_lines=20) is True
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_memory_wiki.py -k overflow -v`
 Expected: FAIL — `ImportError: cannot import name 'index_overflowed'`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 В `wiki.py` вынести построение строк из `render_index` в `_index_lines` и
 добавить `index_overflowed`. Заменить начало `render_index`:
@@ -183,12 +183,12 @@ def render_index(memory_dir: Path, *, max_lines: int = _DEFAULT_MAX_LINES) -> st
     return "\n".join(lines).rstrip("\n") + "\n"
 ```
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_memory_wiki.py -q`
 Expected: PASS (новые + старые про render_index).
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/memory/wiki.py tests/test_memory_wiki.py
@@ -215,7 +215,7 @@ git commit -m "feat(memory): index_overflowed + вынос _index_lines (свя�
   - `async search(session, query: str, *, limit: int) -> list[SearchHit]` —
     `""`/нет таблицы/пустой запрос → `[]`.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_memory_index.py
@@ -290,12 +290,12 @@ async def test_search_empty_query_and_no_table(tmp_path: Path) -> None:
         assert await mi.search(s, "нечто", limit=5) == []
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_memory_index.py -q`
 Expected: FAIL — `ModuleNotFoundError: ...memory.index`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 ```python
 # src/svarog_harness/memory/index.py
@@ -390,12 +390,12 @@ async def search(session: AsyncSession, query: str, *, limit: int) -> list[Searc
     return [SearchHit(path=r[0], snippet=r[1]) for r in rows]
 ```
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_memory_index.py -q`
 Expected: PASS (все).
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/memory/index.py tests/test_memory_index.py
@@ -417,7 +417,7 @@ git commit -m "feat(memory): ядро MemoryIndex — FTS5 schema/reindex/search
 - Produces: `MemoryWriter(..., fts_enabled: bool = True)` — при `True` после
   автогена index.md вызывает `await index.reindex(self._db, self._memory_dir)`.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_memory.py — добавить (writer синкает FTS, search находит)
@@ -452,12 +452,12 @@ async def test_writer_reindex_populates_fts(tmp_path: Path) -> None:
         assert any(h.path == "decisions/api.md" for h in hits)
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_memory.py -k reindex_populates_fts -v`
 Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'fts_enabled'`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 В `writer.py` — импорт и параметр:
 
@@ -510,12 +510,12 @@ from svarog_harness.memory import index as memory_index
             )
 ```
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_memory.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/memory/writer.py src/svarog_harness/runtime/orchestrator.py tests/test_memory.py
@@ -536,7 +536,7 @@ git commit -m "feat(memory): writer синкает FTS-индекс в _reindex 
 - Produces: `SearchMemoryTool(session_factory, *, limit_default: int = 5)` —
   read-only, LOW; `execute(SearchMemoryArgs)` возвращает пути+сниппеты.
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_memory_search_tool.py
@@ -591,12 +591,12 @@ async def test_search_tool_malformed_query_is_friendly(tmp_path: Path) -> None:
     assert "уточни запрос" in res.output.lower()
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_memory_search_tool.py -q`
 Expected: FAIL — `ImportError: cannot import name 'SearchMemoryTool'`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 В `tools/memory_tools.py` добавить импорты и класс:
 
@@ -648,12 +648,12 @@ class SearchMemoryTool(Tool[SearchMemoryArgs]):
         return ToolResult.success("\n".join(lines))
 ```
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_memory_search_tool.py -q`
 Expected: PASS (все).
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/tools/memory_tools.py tests/test_memory_search_tool.py
@@ -676,7 +676,7 @@ git commit -m "feat(tools): search_memory — FTS-поиск по памяти (
 - Produces: `RunAssembly._read_session_factory() -> async_sessionmaker`
   (ленивая, кэш).
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_dream_profile.py — добавить
@@ -685,12 +685,12 @@ def test_dream_registry_has_search_memory(tmp_path: Path) -> None:
     assert "search_memory" in names
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_dream_profile.py -k search_memory -v`
 Expected: FAIL — `search_memory` не в реестре.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 В `run_assembly.py` — импорт и ленивая фабрика (в `__init__` добавить
 `self._read_sessions_cache = None`):
@@ -738,12 +738,12 @@ from svarog_harness.tools.memory_tools import SearchMemoryTool
 > Проверь, что `BridgeControl` держит `self._cfg` и `self._memory_dir`; если
 > имя конфига иное — используй фактическое (не выдумывай).
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_dream_profile.py tests/test_bridge_control.py -q`
 Expected: PASS (search_memory в реестре; бридж-тесты не сломаны).
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/runtime/run_assembly.py src/svarog_harness/runtime/bridge_control.py tests/test_dream_profile.py
@@ -772,7 +772,7 @@ git commit -m "feat(runtime): регистрация search_memory в реест
   max_lines, pages, budget_bytes) -> str` — блок «# Релевантно задаче» или `""`
   (нет переполнения / нет совпадений / ошибка).
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 ```python
 # tests/test_memory_inject.py
@@ -830,12 +830,12 @@ async def test_block_on_overflow_contains_relevant(tmp_path: Path) -> None:
     assert len(block.encode("utf-8")) <= 3000
 ```
 
-- [ ] **Step 2: Запустить — убедиться, что падает**
+- [x] **Step 2: Запустить — убедиться, что падает**
 
 Run: `uv run pytest tests/test_memory_inject.py -q`
 Expected: FAIL — `ModuleNotFoundError: ...memory.inject`.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 ```python
 # src/svarog_harness/memory/inject.py
@@ -936,12 +936,12 @@ from svarog_harness.memory.inject import build_relevant_block
 и в конструкторе `AgentLoop(...)` добавить `relevant_memory=relevant_memory,`
 рядом с `persona=persona,`.
 
-- [ ] **Step 4: Запустить тесты**
+- [x] **Step 4: Запустить тесты**
 
 Run: `uv run pytest tests/test_memory_inject.py tests/test_loop.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Коммит**
+- [x] **Step 5: Коммит**
 
 ```bash
 git add src/svarog_harness/memory/inject.py src/svarog_harness/runtime/loop.py src/svarog_harness/runtime/run_assembly.py tests/test_memory_inject.py
@@ -957,16 +957,16 @@ git commit -m "feat(runtime): авто-инъекция релевантной �
   (статус → реализовано; отметить: авто-инъекция native-only, внешние — через
   tool в бридже)
 
-- [ ] **Step 1: Обновить статус спека** на `реализовано (связка B)` и добавить
+- [x] **Step 1: Обновить статус спека** на `реализовано (связка B)` и добавить
       строку в «Явно вне скоупа»: «авто-инъекция — native-only; внешние
       executor'ы получают retrieval через `search_memory` в бридже».
 
-- [ ] **Step 2: Полный прогон и линтеры**
+- [x] **Step 2: Полный прогон и линтеры**
 
 Run: `uv run pytest -q && uv run ruff check && uv run ruff format --check && uv run mypy`
 Expected: всё зелёное.
 
-- [ ] **Step 3: Коммит**
+- [x] **Step 3: Коммит**
 
 ```bash
 git add docs/superpowers/specs/2026-07-24-memory-fts-retrieval-design.md

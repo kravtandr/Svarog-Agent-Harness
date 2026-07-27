@@ -363,6 +363,7 @@ def _control(
     memory_dir: Path | None = None,
     workspace_dir: Path | None = None,
     on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
+    search_sessions: object | None = None,
 ) -> BridgeControl:
     policy = PolicyEngine(
         autonomy=autonomy,
@@ -379,6 +380,7 @@ def _control(
         proposal_sink=[],
         approval_grace_sec=grace_sec,
         on_approval_prompt=on_approval_prompt,
+        search_sessions=search_sessions,  # type: ignore[arg-type]
     )
 
 
@@ -404,6 +406,24 @@ async def test_mcp_initialize_and_tools_list(tmp_path: Path) -> None:
         "ask_user",
         "request_approval",
     } <= names
+
+
+async def test_mcp_search_memory_registered_with_factory(tmp_path: Path) -> None:
+    """Связка B: внешний агент получает FTS-поиск тем же tool'ом, что и native."""
+    factory = create_session_factory(create_engine(tmp_path / "svarog.sqlite3"))
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", search_sessions=factory)
+    listed = await control.handle_mcp({"jsonrpc": "2.0", "id": 20, "method": "tools/list"})
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "search_memory" in names
+
+
+async def test_mcp_search_memory_absent_when_fts_off(tmp_path: Path) -> None:
+    """fts_enabled=false — RunAssembly не передаёт фабрику, tool не появляется."""
+    control = _control(tmp_path, memory_dir=tmp_path / "memory")
+    listed = await control.handle_mcp({"jsonrpc": "2.0", "id": 21, "method": "tools/list"})
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "read_memory" in names
+    assert "search_memory" not in names
 
 
 async def test_mcp_document_tools_registered(tmp_path: Path) -> None:

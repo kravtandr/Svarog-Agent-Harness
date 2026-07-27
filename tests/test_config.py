@@ -151,3 +151,12 @@ def test_dream_rejects_unknown_key() -> None:
 
     with pytest.raises(ValidationError):
         DreamConfig.model_validate({"enabled": True, "enabeld": True})
+
+
+def test_memory_fts_defaults() -> None:
+    from svarog_harness.config.schema import MemoryConfig
+
+    cfg = MemoryConfig()
+    assert cfg.fts_enabled is True
+    assert cfg.fts_inject_pages == 5
+    assert cfg.fts_inject_bytes == 3000

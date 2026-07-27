@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.gitflow.commit_gate import SecretScanBlockedError, commit_guarded
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.memory import index as memory_index
 from svarog_harness.memory.apply import MemoryApplyError, apply_change
 from svarog_harness.memory.change import MemoryChangeRequest
 from svarog_harness.memory.wiki import append_log, log_entry, regenerate_index
@@ -42,6 +43,7 @@ class MemoryWriter:
         *,
         lock: LockBackend | None = None,
         index_max_lines: int = 200,
+        fts_enabled: bool = True,
     ) -> None:
         self._db = db
         self._memory_dir = memory_dir
@@ -49,6 +51,8 @@ class MemoryWriter:
         self._lock = lock
         # Потолок автогенного index.md (ADR-0015 §1.5, memory.index_max_lines).
         self._index_max_lines = index_max_lines
+        # FTS-индекс памяти (связка B, memory.fts_enabled): синк после дренажа.
+        self._fts_enabled = fts_enabled
 
     async def enqueue(self, request: MemoryChangeRequest) -> MemoryChange:
         row = MemoryChange(
@@ -109,13 +113,19 @@ class MemoryWriter:
         append_log(self._memory_dir, entries)
         regenerate_index(self._memory_dir, max_lines=self._index_max_lines)
         await self._repo.add_all()
-        if not await self._repo.has_staged_changes():
-            return
-        # Автоген собран из уже проверенного контента, поэтому secret-блок здесь
-        # крайне маловероятен; но даже он не должен ронять весь drain — оставляем
-        # как есть, следующий drain повторит reindex-коммит.
-        with contextlib.suppress(SecretScanBlockedError):
-            await commit_guarded(self._repo, "memory: reindex", known_values=known_values)
+        if await self._repo.has_staged_changes():
+            # Автоген собран из уже проверенного контента, поэтому secret-блок здесь
+            # крайне маловероятен; но даже он не должен ронять весь drain — оставляем
+            # как есть, следующий drain повторит reindex-коммит.
+            with contextlib.suppress(SecretScanBlockedError):
+                await commit_guarded(self._repo, "memory: reindex", known_values=known_values)
+        # FTS-индекс (связка B): производное состояние в runtime-БД, не в git.
+        # Полный ребилд под той же writer-сессией — консистентно, без гонок.
+        # Синк намеренно вне ветки staged-изменений: индекс отражает файлы
+        # памяти, а не то, изменился ли автоген index.md/log.md.
+        if self._fts_enabled:
+            with contextlib.suppress(Exception):
+                await memory_index.reindex(self._db, self._memory_dir)
 
     async def _apply_one(self, row: MemoryChange, *, known_values: frozenset[str]) -> str | None:
         """Применить заявку; вернуть строку журнала (или None, если не применено)."""

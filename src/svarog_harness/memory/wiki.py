@@ -93,8 +93,8 @@ def _project_line(page: dict[str, str]) -> str:
     return f"- [{page['name']}]({page['path']}){tail}{suffix}"
 
 
-def render_index(memory_dir: Path, *, max_lines: int = _DEFAULT_MAX_LINES) -> str:
-    """Собрать текст index.md из текущего состояния памяти."""
+def _index_lines(memory_dir: Path) -> list[str]:
+    """Полный список строк индекса (без потолка) — общий для render/overflow."""
     pages = _project_pages(memory_dir)
     active = sorted(
         (p for p in pages if p["status"] in _ACTIVE_STATUSES),
@@ -122,7 +122,17 @@ def render_index(memory_dir: Path, *, max_lines: int = _DEFAULT_MAX_LINES) -> st
     if (memory_dir / "user" / "profile.md").exists():
         lines += ["", "## Пользователь", "- [Профиль](user/profile.md)"]
     # Элементы могут содержать '\n' (шапка) — потолок считаем по фактическим строкам.
-    lines = [_clip_line(line) for line in "\n".join(lines).split("\n")]
+    return [_clip_line(line) for line in "\n".join(lines).split("\n")]
+
+
+def index_overflowed(memory_dir: Path, *, max_lines: int = _DEFAULT_MAX_LINES) -> bool:
+    """Превышает ли полный индекс потолок строк (сигнал для авто-инъекции)."""
+    return len(_index_lines(memory_dir)) > max_lines
+
+
+def render_index(memory_dir: Path, *, max_lines: int = _DEFAULT_MAX_LINES) -> str:
+    """Собрать текст index.md из текущего состояния памяти."""
+    lines = _index_lines(memory_dir)
     if len(lines) > max_lines:
         dropped = lines[max_lines - 1 :]
         dropped_pages = sum(1 for line in dropped if line.startswith("- "))
