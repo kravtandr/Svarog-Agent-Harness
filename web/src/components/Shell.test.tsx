@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SessionSummary } from "../api/types";
-import { Nav } from "./Nav";
+import { heatLevel, Nav } from "./Nav";
 import { Shell } from "./Shell";
 
 const session = (over: Partial<SessionSummary>): SessionSummary => ({
@@ -100,5 +100,35 @@ describe("оболочка", () => {
       "data-open",
       "false",
     );
+  });
+});
+
+describe("шкала накала и время", () => {
+  it("трактует наивное время сервера как UTC, а не как локальное", () => {
+    // Сервер отдаёт «2026-07-27T12:00:00» без зоны. Час назад по UTC — это
+    // уровень 1, независимо от часового пояса зрителя.
+    const now = Date.parse("2026-07-27T13:00:00Z");
+    const session: SessionSummary = {
+      session_id: "s",
+      title: "t",
+      workspace: null,
+      updated_at: "2026-07-27T12:30:00",
+      runs_count: 1,
+      last_state: "completed",
+    };
+    expect(heatLevel(session, now)).toBe(1);
+  });
+
+  it("не путается, когда зона всё-таки указана", () => {
+    const now = Date.parse("2026-07-27T13:00:00Z");
+    const session: SessionSummary = {
+      session_id: "s",
+      title: "t",
+      workspace: null,
+      updated_at: "2026-07-27T12:30:00Z",
+      runs_count: 1,
+      last_state: "completed",
+    };
+    expect(heatLevel(session, now)).toBe(1);
   });
 });

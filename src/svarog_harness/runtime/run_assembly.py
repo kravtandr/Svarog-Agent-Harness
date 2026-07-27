@@ -111,6 +111,11 @@ class RunHooks:
     # в БД — poll-цикл гейта подхватит его без suspend. None — только notify,
     # решение асинхронно через `svarog approvals` или suspend→resume.
     on_approval_requested: Callable[[Approval], None] | None = None
+    # Уведомление «approval записан» — в отличие от on_approval_requested не
+    # блокирует и не решает: нативный цикл зовёт его сразу после записи, чтобы
+    # интерфейсы (веб) показали гейт, не опрашивая /approvals. CLI его не
+    # подключает: там решение принимает блокирующий промпт выше.
+    on_approval_created: Callable[[Approval], None] | None = None
 
 
 def _approval_prompt_async(
@@ -347,6 +352,7 @@ class RunAssembly:
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
             on_tool_result=hooks.on_tool_result,
+            on_approval_created=hooks.on_approval_created,
             on_notify=hooks.on_notify,
             on_run_started=hooks.on_run_started,
             on_progress=hooks.on_progress,

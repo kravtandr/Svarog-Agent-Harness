@@ -3054,7 +3054,7 @@ git commit -m "feat(web): экран диалога — история, отпр
 
 **Interfaces:**
 - Consumes: `create_app` из `api.py`.
-- Produces: `web_dist_dir() -> Path | None`; `GET /` отдаёт `index.html`, если бандл собран, и 404 с внятным текстом, если нет; CORS включён только когда задан `SVAROG_GATEWAY__CORS_ORIGINS`.
+- Produces: `web_dist_dir() -> Path | None`; `GET /` отдаёт `index.html`, если бандл собран, и 404 с внятным текстом, если нет; CORS включён только когда задан `GORN_CORS_ORIGINS`.
 
 - [ ] **Step 1: Написать падающий тест**
 
@@ -3131,7 +3131,7 @@ def web_dist_dir() -> Path | None:
 ```python
     # CORS нужен только режиму раздельной разработки: в бою статика едет
     # с того же origin, что и API.
-    origins = [o for o in os.environ.get("SVAROG_GATEWAY__CORS_ORIGINS", "").split(",") if o]
+    origins = [o for o in os.environ.get("GORN_CORS_ORIGINS", "").split(",") if o]
     if origins:
         app.add_middleware(
             CORSMiddleware,

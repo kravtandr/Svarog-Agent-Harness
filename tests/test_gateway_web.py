@@ -1,6 +1,7 @@
 """Тесты веб-доработок gateway: список сессий, лента, статика (план 2026-07-27)."""
 
 import asyncio
+import contextlib
 from datetime import datetime
 from pathlib import Path
 
@@ -257,6 +258,12 @@ def test_memory_file_refuses_escape_and_non_markdown(
         service_with_memory.memory_file("../svarog.yaml")
     with pytest.raises(MemoryPathError):
         service_with_memory.memory_file("решения/секрет.json")
+    # Ключевой кейс: .md за пределами memory/. Без него тест проходил бы
+    # даже при полностью снятой защите от обхода — отсекал бы суффикс.
+    outside = service_with_memory.workspace.parent / "чужое.md"
+    outside.write_text("не наше", encoding="utf-8")
+    with pytest.raises(MemoryPathError):
+        service_with_memory.memory_file("../../чужое.md")
 
 
 def test_memory_endpoints_report_disabled_memory(service: GatewayService) -> None:
@@ -423,12 +430,22 @@ def test_config_endpoints(service: GatewayService) -> None:
 def test_secrets_never_return_values(
     service: GatewayService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PROVIDER_API_KEY", "sk-очень-секретно")
-    client = TestClient(create_app(service=service))
+    """Проверка бессмысленна на пустом store — секрет должен реально существовать."""
+    import json
+
+    secrets_file = tmp_path / ".svarog" / "secrets.json"
+    secrets_file.parent.mkdir(parents=True, exist_ok=True)
+    secrets_file.write_text(json.dumps({"PROVIDER_API_KEY": "sk-очень-секретно"}), encoding="utf-8")
+    # FileSecretStore читает файл в конструкторе — сервис нужен созданный после.
+    fresh = GatewayService(service.cfg, service.workspace)
+    client = TestClient(create_app(service=fresh))
 
     response = client.get("/secrets")
 
     assert response.status_code == 200
+    body = response.json()
+    assert [s["name"] for s in body] == ["PROVIDER_API_KEY"], body
+    assert body[0]["present"] is True
     assert "sk-очень-секретно" not in response.text
 
 
@@ -466,8 +483,33 @@ def test_cors_disabled_by_default(service: GatewayService) -> None:
     assert "access-control-allow-origin" not in response.headers
 
 
+def test_cors_env_name_does_not_break_config_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Имя переменной CORS не должно попадать в namespace SVAROG_*.
+
+    pydantic-settings разбирает SVAROG_GATEWAY__* как поле секции gateway,
+    а GatewayConfig — StrictModel: такая переменная роняла `svarog serve`
+    ещё до старта, по документированному же рецепту включения CORS.
+    """
+    ws = tmp_path / "ws-cors"
+    ws.mkdir()
+    _write_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GORN_CORS_ORIGINS", "http://localhost:5173")
+
+    # Не бросает — это и есть проверка.
+    load_config(project_dir=ws)
+
+
+def test_cors_rejects_wildcard(service: GatewayService, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GORN_CORS_ORIGINS", "*")
+    with pytest.raises(ValueError, match="не поддерживается"):
+        create_app(service=service)
+
+
 def test_cors_enabled_by_env(service: GatewayService, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SVAROG_GATEWAY__CORS_ORIGINS", "http://localhost:5173")
+    monkeypatch.setenv("GORN_CORS_ORIGINS", "http://localhost:5173")
     client = TestClient(create_app(service=service))
 
     response = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
@@ -504,3 +546,112 @@ async def test_approval_event_published(service: GatewayService) -> None:
             "payload": {"command": "uv run pytest -q"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_config_form_shows_file_not_startup_snapshot(service: GatewayService) -> None:
+    """После сохранения форма обязана показать новое значение, а не старое.
+
+    `GatewayService.cfg` — снимок при старте; если рисовать форму из него,
+    значение откатывается на глазах у человека.
+    """
+    service.write_config({"runtime.autonomy": "supervised"})
+
+    view = service.describe_config()
+
+    field = next(
+        f for section in view.sections for f in section.fields if f.path == "runtime.autonomy"
+    )
+    assert field.value == "supervised"
+
+
+@pytest.mark.asyncio
+async def test_config_refuses_when_patch_would_break_file(service: GatewayService) -> None:
+    """Flow-style секцию построчный патчер корректно не осилит — отказ, не порча."""
+    from svarog_harness.config.loader import ConfigError
+
+    service.config_path.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox: {type: local-trusted}\n",
+        encoding="utf-8",
+    )
+    before = service.config_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"сломала бы|вручную"):
+        service.write_config({"sandbox.timeout_sec": 300})
+
+    assert service.config_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_native_loop_notifies_about_approval(service: GatewayService) -> None:
+    """Нативный цикл — исполнитель по умолчанию; без этого гейт в вебе мёртв.
+
+    Хук on_approval_requested потребляет только внешний агент, поэтому у
+    нативного цикла есть отдельное уведомление on_approval_created.
+    """
+    from svarog_harness.storage.models import Approval
+
+    published: list[dict[str, object]] = []
+    service.events.publish = lambda run_id, event: published.append(event)  # type: ignore[method-assign]
+
+    started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    holder = _RunHolder()
+    holder.run_id = "run-1"
+    hooks = service._event_hooks(holder, started)
+
+    assert hooks.on_approval_created is not None, "нативный цикл остался без уведомления"
+    hooks.on_approval_created(
+        Approval(
+            id="ap-2",
+            run_id="run-1",
+            action_type="run_shell",
+            payload={"command": "uv run pytest -q"},
+        )
+    )
+
+    assert published == [
+        {
+            "type": "approval_required",
+            "approval_id": "ap-2",
+            "action_type": "run_shell",
+            "payload": {"command": "uv run pytest -q"},
+        }
+    ]
+
+
+def test_agent_loop_accepts_approval_notification_hook() -> None:
+    """Хук должен доезжать до самого цикла, а не только до RunHooks."""
+    import inspect
+
+    from svarog_harness.runtime.loop import AgentLoop
+    from svarog_harness.runtime.run_assembly import RunHooks
+
+    assert "on_approval_created" in inspect.signature(AgentLoop.__init__).parameters
+    assert "on_approval_created" in RunHooks.__dataclass_fields__
+
+
+@pytest.mark.asyncio
+async def test_session_activity_bumps_updated_at(service: GatewayService) -> None:
+    """Навигатор сортирует по свежести — значит активность должна её двигать.
+
+    `updated_at` меняется только при UPDATE строки Session, а run'ы её не
+    трогают: без явного касания вчерашняя сессия с сообщением минуту назад
+    оказывалась бы в «Ранее» с холодной шкалой накала.
+    """
+    old = await service.create_session(title="старая")
+    fresh = await service.create_session(title="свежая")
+
+    # Сообщение в старую сессию должно поднять её наверх списка.
+    with contextlib.suppress(Exception):
+        # Реального LLM нет: важно, что касание произошло до запуска run'а.
+        await service.send_message(old.session_id, "привет", None)
+
+    listed = await service.list_sessions()
+    titles = [s.title for s in listed]
+    assert titles[:1] == ["старая"], f"ожидалась старая сверху: {titles}; свежая — {fresh.title}"

@@ -28,7 +28,23 @@ describe("токены", () => {
   });
 
   it("не содержит второго акцентного оранжевого", () => {
-    const oranges = css.match(/#[dD][0-9a-fA-F]{5}/g) ?? [];
+    // Ищем по тону, а не по первой цифре: прежняя регулярка /#[dD]…/
+    // пропустила бы #e2762c. Оранжевый — это hue примерно 15–45°.
+    const hexes = css.match(/#[0-9a-fA-F]{6}/g) ?? [];
+    const oranges = hexes.filter((hex) => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      if (max === min) return false;
+      const chroma = (max - min) / max;
+      if (chroma < 0.35) return false; // блёклый — не акцент
+      let hue = 0;
+      if (max === r) hue = (60 * (g - b)) / (max - min);
+      else if (max === g) hue = 60 * (2 + (b - r) / (max - min));
+      else hue = 60 * (4 + (r - g) / (max - min));
+      if (hue < 0) hue += 360;
+      return hue >= 15 && hue <= 45;
+    });
     expect(oranges).toEqual(["#d2622c"]);
   });
 });

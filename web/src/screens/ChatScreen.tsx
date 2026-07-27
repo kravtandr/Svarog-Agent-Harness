@@ -48,10 +48,27 @@ export function ChatScreen({
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<Autonomy>("supervised");
+  const [, setRunId] = useState<string | null>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
+
+  const watch = useCallback(
+    (runId: string) => {
+      unsubscribe.current?.();
+      unsubscribe.current = subscribeRun(baseUrl, runId, token, (event) =>
+        setItems((current) => applyEvent(current, event)),
+      );
+    },
+    [baseUrl, token],
+  );
 
   useEffect(() => {
     if (sessionId === null) return;
+    // Сокет прошлой сессии закрываем здесь, а не только перед отправкой:
+    // иначе её события подмешиваются в ленту новой.
+    unsubscribe.current?.();
+    unsubscribe.current = null;
+    setItems([]);
+    setThreadError(null);
     api
       .sessionThread(sessionId)
       .then((thread) => setItems(fromHistory(thread.items)))
@@ -68,24 +85,27 @@ export function ChatScreen({
         { kind: "user", id: `u-${current.length}`, text },
       ]);
       const ref = await api.sendMessage(sessionId, text, autonomy);
-      unsubscribe.current?.();
-      unsubscribe.current = subscribeRun(baseUrl, ref.run_id, token, (event) =>
-        setItems((current) => applyEvent(current, event)),
-      );
+      setRunId(ref.run_id);
+      watch(ref.run_id);
     },
-    [api, sessionId, autonomy, baseUrl, token],
+    [api, sessionId, autonomy, watch],
   );
 
   const decide = useCallback(
     async (approvalId: string, approved: boolean) => {
-      await api.decideApproval(approvalId, approved);
+      const ref = await api.decideApproval(approvalId, approved);
       setItems((current) =>
         current.filter(
           (item) => !(item.kind === "gate" && item.approvalId === approvalId),
         ),
       );
+      // При уходе в waiting_approval сервер закрывает сокет, а resume
+      // начинает новую «ногу» потока: без переподписки остаток run'а
+      // не попадёт в ленту до перезагрузки истории.
+      setRunId(ref.run_id);
+      watch(ref.run_id);
     },
-    [api],
+    [api, watch],
   );
 
   const shown = error ?? threadError;

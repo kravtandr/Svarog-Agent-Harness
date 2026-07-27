@@ -10,8 +10,27 @@ import { RunsScreen } from "./screens/RunsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SkillsScreen } from "./screens/SkillsScreen";
 
+/**
+ * Токен берётся из `?token=` и запоминается в sessionStorage.
+ *
+ * `gateway.token_ref` обязателен для любого не-loopback bind, и без него
+ * весь интерфейс получал бы 401. Ссылку с токеном печатает `svarog serve`.
+ * sessionStorage, а не localStorage: токен не переживает закрытие вкладки.
+ */
+function readToken(): string | undefined {
+  const fromUrl = new URLSearchParams(window.location.search).get("token");
+  if (fromUrl) {
+    sessionStorage.setItem("svarog-token", fromUrl);
+    // Убираем токен из адресной строки: он не должен оседать в истории.
+    window.history.replaceState({}, "", window.location.pathname);
+    return fromUrl;
+  }
+  return sessionStorage.getItem("svarog-token") ?? undefined;
+}
+
 // Статика раздаётся тем же svarog serve, поэтому базовый URL пустой.
-const defaultApi = createClient({ baseUrl: "" });
+const token = typeof window === "undefined" ? undefined : readToken();
+const defaultApi = createClient({ baseUrl: "", token });
 
 const TITLES: Record<Section, string> = {
   chat: "Сварог",
@@ -92,6 +111,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           sessionId={activeId}
           loading={loading}
           error={error}
+          token={token}
         />
       )}
     </Shell>

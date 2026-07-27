@@ -42,7 +42,7 @@ from svarog_harness.runtime.refuel import (
 )
 from svarog_harness.runtime.summaries import short_result
 from svarog_harness.secrets import redact
-from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
+from svarog_harness.storage.models import Approval, ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
 from svarog_harness.tools.guidance import BoundaryKind, note_for
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
@@ -197,6 +197,7 @@ class AgentLoop:
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
         on_tool_result: Callable[[str, str, str], None] | None = None,
+        on_approval_created: Callable[[Approval], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
         on_progress: Callable[[int, int, float, float, int], None] | None = None,
@@ -228,6 +229,7 @@ class AgentLoop:
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
         self._on_tool_result = on_tool_result
+        self._on_approval_created = on_approval_created
         self._on_notify = on_notify
         # Cost/context-индикатор (ADR-0015 фаза 5): (итерация, токены за run,
         # стоимость, доля контекста 0..1) после каждого ответа провайдера.
@@ -599,10 +601,15 @@ class AgentLoop:
                 record, ok=result.ok, output=result.output, error=result.error
             )
             if self._on_tool_result is not None:
+                # Сводка уходит в поток событий и в веб-ленту, поэтому секреты
+                # вырезаются здесь: redact применяется позже, при рендере для
+                # модели, — до потока он бы не дошёл.
                 self._on_tool_result(
                     prepared.call.name,
                     record.status.value,
-                    short_result(ok=result.ok, output=result.output, error=result.error),
+                    self._redact_text(
+                        short_result(ok=result.ok, output=result.output, error=result.error)
+                    ),
                 )
             rendered = self._render_tool_result(run, prepared.call, result)
             state.messages.append(
@@ -936,11 +943,15 @@ class AgentLoop:
                     options = question_options(approval.arguments)
                     if options:
                         payload["options"] = options
-                await self._recorder.create_approval(
+                created = await self._recorder.create_approval(
                     run,
                     action_type=approval.decision.action_type,
                     payload=payload,
                 )
+                # Интерфейс показывает гейт сразу: без этого веб-клиент узнал
+                # бы о нём только опросом /approvals.
+                if self._on_approval_created is not None:
+                    self._on_approval_created(created)
             await self._save_checkpoint(run, state)
             await self._recorder.set_run_state(
                 run, RunState.WAITING_APPROVAL, error=approval.decision.reason
@@ -1132,7 +1143,9 @@ class AgentLoop:
             self._on_tool_result(
                 call.name,
                 record.status.value,
-                short_result(ok=result.ok, output=result.output, error=result.error),
+                self._redact_text(
+                    short_result(ok=result.ok, output=result.output, error=result.error)
+                ),
             )
         return result
 

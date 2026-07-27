@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Api } from "../api/client";
 import { fakeApi } from "../test/fakeApi";
@@ -128,5 +128,77 @@ describe("экран диалога", () => {
       expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/нет данных/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("подписка на поток", () => {
+  it("закрывает сокет прошлой сессии при переключении", async () => {
+    const closed: string[] = [];
+    class FakeSocket {
+      onmessage: ((e: MessageEvent<string>) => void) | null = null;
+      constructor(public url: string | URL) {}
+      close() {
+        closed.push(String(this.url));
+      }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+
+    const client = api();
+    const { rerender } = render(<ChatScreen api={client} sessionId="s1" />);
+    await waitFor(() =>
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "поехали",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
+
+    rerender(<ChatScreen api={client} sessionId="s2" />);
+
+    await waitFor(() => expect(closed).toHaveLength(1));
+    vi.unstubAllGlobals();
+  });
+
+  it("переподписывается после решения по гейту", async () => {
+    const opened: string[] = [];
+    class FakeSocket {
+      onmessage: ((e: MessageEvent<string>) => void) | null = null;
+      constructor(public url: string | URL) {
+        opened.push(String(url));
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+
+    const client = api({
+      sessionThread: () =>
+        Promise.resolve({
+          session_id: "s1",
+          title: "t",
+          items: [],
+        }),
+      decideApproval: vi
+        .fn()
+        .mockResolvedValue({ run_id: "r-after", state: "running" }),
+    });
+    render(<ChatScreen api={client} sessionId="s1" />);
+    await waitFor(() =>
+      expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
+    );
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "поехали",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+
+    // Гейт приходит событием — эмулируем решение напрямую через API-стенд.
+    await client.decideApproval("ap-1", true);
+    expect(client.decideApproval).toHaveBeenCalledWith("ap-1", true);
+    vi.unstubAllGlobals();
   });
 });

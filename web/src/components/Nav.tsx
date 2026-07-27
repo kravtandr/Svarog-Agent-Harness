@@ -4,13 +4,23 @@ import "./Nav.css";
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
+/**
+ * Сервер отдаёт наивное UTC-время (`Session.updated_at` без зоны), а
+ * `Date.parse` без зоны трактует строку как локальную: в Москве возраст
+ * сессии уезжал на три часа и «шкала накала» врала.
+ */
+function parseUtc(value: string): number {
+  const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`;
+  return Date.parse(withZone);
+}
+
 /** 0 — идёт сейчас, дальше остывает до 4 (архив). */
 export function heatLevel(
   session: SessionSummary,
   now: number = Date.now(),
 ): number {
   if (session.last_state === "running") return 0;
-  const age = now - Date.parse(session.updated_at);
+  const age = now - parseUtc(session.updated_at);
   if (age < HOUR) return 1;
   if (age < DAY) return 2;
   if (age < 7 * DAY) return 3;
@@ -18,7 +28,7 @@ export function heatLevel(
 }
 
 function dayLabel(session: SessionSummary, now: number = Date.now()): string {
-  const age = now - Date.parse(session.updated_at);
+  const age = now - parseUtc(session.updated_at);
   if (age < DAY) return "Сегодня";
   if (age < 2 * DAY) return "Вчера";
   if (age < 7 * DAY) return "Прошлая неделя";

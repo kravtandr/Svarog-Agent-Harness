@@ -118,7 +118,15 @@ def create_app(
 
     # CORS нужен только режиму раздельной разработки: в бою статика едет
     # с того же origin, что и API, и заголовки не требуются.
-    origins = [o for o in os.environ.get("SVAROG_GATEWAY__CORS_ORIGINS", "").split(",") if o]
+    #
+    # Имя переменной намеренно без префикса SVAROG_: pydantic-settings
+    # разбирает SVAROG_GATEWAY__* как поле секции gateway, а GatewayConfig —
+    # StrictModel, поэтому такая переменная роняла загрузку конфига целиком.
+    origins = [o for o in os.environ.get("GORN_CORS_ORIGINS", "").split(",") if o]
+    if "*" in origins:
+        # Звёздочка вместе с allow_credentials — заряженный footgun; лучше
+        # отказать явно, чем открыть API всему миру по опечатке.
+        raise ValueError("GORN_CORS_ORIGINS='*' не поддерживается: перечислите origin'ы явно")
     if origins:
         app.add_middleware(
             CORSMiddleware,

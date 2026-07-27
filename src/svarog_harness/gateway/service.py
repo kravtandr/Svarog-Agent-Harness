@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError
+from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.models import (
@@ -411,6 +411,16 @@ class GatewayService:
                 {"type": "commit", "sha": sha, "branch": branch}
             ),
             # Гейт появляется в ленте сразу, а не по опросу /approvals.
+            # Нативный цикл зовёт on_approval_created, внешний агент —
+            # on_approval_requested: подключены оба, событие одно.
+            on_approval_created=lambda approval: emit(
+                {
+                    "type": "approval_required",
+                    "approval_id": approval.id,
+                    "action_type": approval.action_type,
+                    "payload": approval.payload or {},
+                }
+            ),
             on_approval_requested=lambda approval: emit(
                 {
                     "type": "approval_required",
@@ -621,6 +631,17 @@ class GatewayService:
             return session, raw
 
         session, raw = await self._read(action)
+
+        async def touch(db: AsyncSession) -> None:
+            # updated_at меняется только при UPDATE строки Session, а run'ы её
+            # не трогают: без этого навигатор сортировал бы по времени
+            # создания, и вчерашняя сессия с сообщением минуту назад падала
+            # бы в «Ранее» с холодной шкалой накала.
+            found = await find_session_by_prefix(db, session.id)
+            found.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            await db.commit()
+
+        await self._read(touch)
         workspace = Path((session.meta or {}).get("workspace") or self.workspace)
         if not workspace.is_dir():
             raise UnknownWorkspaceError(
@@ -832,7 +853,18 @@ class GatewayService:
         return raw, text
 
     def describe_config(self) -> ConfigView:
-        return describe_config(self.cfg, str(self.config_path))
+        """Форма показывает то, что лежит в файле, а не снимок при старте.
+
+        `self.cfg` зафиксирован в конструкторе и не перечитывается: если
+        показывать его, после «Сохранить» форма откатит значение на глазах
+        у человека, хотя на диске уже новое.
+        """
+        try:
+            current = load_config(project_dir=self.workspace)
+        except ConfigError:
+            # Файл поломан снаружи — показываем снимок, с которым идут run'ы.
+            current = self.cfg
+        return describe_config(current, str(self.config_path))
 
     def _updated_config_text(self, values: dict[str, Any]) -> tuple[str, str]:
         """Текст файла до и после правки; заодно проверяет результат схемой."""
@@ -845,7 +877,21 @@ class GatewayService:
             raise ConfigError(str(exc)) from exc
         # Правим текст построчно, а не пересобираем: иначе из файла пропадут
         # комментарии и пустые строки, которые человек ведёт руками.
-        return before, patch_yaml_text(before, values)
+        after = patch_yaml_text(before, values)
+        # Патчер работает по строкам и не понимает flow-style (`{a: b}`) и
+        # прочую экзотику. Проверять надо именно результат записи, а не
+        # merged-словарь: иначе на диск ляжет файл, который больше не читается.
+        try:
+            written = yaml.safe_load(after) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"правка сломала бы {self.config_path}: {exc}") from exc
+        if written != merged:
+            raise ConfigError(
+                f"не удалось безопасно отредактировать {self.config_path}: "
+                "файл написан в форме, которую построчная правка не поддерживает. "
+                "Отредактируйте его вручную."
+            )
+        return before, after
 
     def preview_config(self, values: dict[str, Any]) -> ConfigDiffView:
         """Что будет записано — без записи. Валидация та же, что при чтении."""
