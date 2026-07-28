@@ -121,3 +121,43 @@ def test_without_workspace_images_degrade_to_text() -> None:
     )
     parts = _to_openai_messages([message], None)[0]["content"]
     assert all(p["type"] == "text" for p in parts)
+    assert "недоступно" in parts[1]["text"]
+
+
+def test_absolute_image_path_degrades_to_text_instead_of_escaping_workspace(
+    tmp_path: Path,
+) -> None:
+    """`workspace / '/etc/passwd'` в Python побеждает абсолютный путь — не должно читаться.
+
+    Контейнеризованный агент может записать в ImageRef абсолютный путь вида
+    `/workspace/shot.png` (см. resolve_workspace_path в document_tools.py); такой
+    путь обязан вырождаться в текст, а не резолвиться в хост-путь вне workspace.
+    """
+    outside = tmp_path.parent / "outside_shot.png"
+    outside.write_bytes(b"\x89PNG")
+    message = ChatMessage(
+        role="user", content="смотри:", images=(ImageRef(path=str(outside), mime="image/png"),)
+    )
+
+    parts = _to_openai_messages([message], tmp_path)[0]["content"]
+
+    assert all(p["type"] == "text" for p in parts)
+    assert "недоступно" in parts[1]["text"]
+
+
+def test_path_traversal_degrades_to_text_instead_of_escaping_workspace(tmp_path: Path) -> None:
+    """`../` в ImageRef.path не должен выводить чтение за пределы workspace."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside_shot.png"
+    outside.write_bytes(b"\x89PNG")
+    message = ChatMessage(
+        role="user",
+        content="смотри:",
+        images=(ImageRef(path="../outside_shot.png", mime="image/png"),),
+    )
+
+    parts = _to_openai_messages([message], workspace)[0]["content"]
+
+    assert all(p["type"] == "text" for p in parts)
+    assert "недоступно" in parts[1]["text"]

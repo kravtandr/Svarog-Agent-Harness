@@ -86,12 +86,26 @@ MAX_IMAGES_IN_CONTEXT = 2
 
 
 def _image_part(workspace: Path | None, ref: ImageRef) -> dict[str, Any]:
-    """Часть запроса для изображения; недоступный файл — текстом, не исключением."""
+    """Часть запроса для изображения; недоступный файл — текстом, не исключением.
+
+    `ref.path` не проверен: он приходит из checkpoint (JSON) или, для
+    контейнеризованного агента, может оказаться абсолютным (`/workspace/...`,
+    см. resolve_workspace_path в document_tools.py). `workspace / abs_path` в
+    Python отдаёт `abs_path` как есть — join не спасает. Поэтому здесь
+    отдельная проверка: путь после resolve() обязан остаться внутри
+    workspace, иначе — деградация в текст, как при отсутствующем файле.
+    Нормализация `/workspace/...` в относительный путь — забота места, где
+    ImageRef создаётся (задача 4), не этого рендера.
+    """
     if workspace is None:
         return {"type": "text", "text": f"изображение {ref.path} недоступно"}
-    path = workspace / ref.path
+    root = workspace.resolve()
+    candidate = (root / ref.path).resolve()
+    if not candidate.is_relative_to(root):
+        # Абсолютный или выходящий через `..` путь: в запрос такое не уходит.
+        return {"type": "text", "text": f"изображение {ref.path} недоступно"}
     try:
-        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        data = base64.b64encode(candidate.read_bytes()).decode("ascii")
     except OSError:
         return {"type": "text", "text": f"изображение {ref.path} недоступно"}
     return {"type": "image_url", "image_url": {"url": f"data:{ref.mime};base64,{data}"}}
