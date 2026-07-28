@@ -384,7 +384,7 @@ async def test_config_write_keeps_file_readable_by_human(service: GatewayService
         encoding="utf-8",
     )
 
-    service.write_config({"runtime.autonomy": "supervised"})
+    await service.write_config({"runtime.autonomy": "supervised"})
 
     text = service.config_path.read_text(encoding="utf-8")
     assert "# хвостовой комментарий" in text
@@ -392,11 +392,65 @@ async def test_config_write_keeps_file_readable_by_human(service: GatewayService
 
 @pytest.mark.asyncio
 async def test_config_write_persists_and_reloads(service: GatewayService) -> None:
-    service.write_config({"runtime.autonomy": "supervised", "runtime.max_iterations": 7})
+    await service.write_config({"runtime.autonomy": "supervised", "runtime.max_iterations": 7})
 
     reloaded = load_config(project_dir=service.workspace)
     assert reloaded.runtime.autonomy.value == "supervised"
     assert reloaded.runtime.max_iterations == 7
+
+
+@pytest.mark.asyncio
+async def test_write_config_reloads_snapshot_used_by_runs(
+    service: GatewayService, tmp_path: Path
+) -> None:
+    """Правка исполнителя должна действовать без перезапуска svarog serve."""
+    assert service.cfg.runtime.max_iterations != 7
+    view = await service.write_config({"runtime.max_iterations": 7})
+    assert view.restart_required is False
+    assert service.cfg.runtime.max_iterations == 7
+    assert service._runner.cfg.runtime.max_iterations == 7
+
+
+@pytest.mark.asyncio
+async def test_write_config_defers_reload_while_run_is_live(service: GatewayService) -> None:
+    """Живой run держит свой снимок конфига до конца (ADR-0015 §0.4).
+
+    Правка при этом всё равно пишется в файл — иначе следующий рестарт
+    покажет то, что человек уже якобы сохранил, но что незаметно потерялось.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState
+
+    session = await service.create_session(title="занят")
+    run_id = await service.send_message(session.session_id, "задача", None)
+    # Run падает на недоступном провайдере; дожидаемся, чтобы фоновая задача
+    # не осталась висеть после теста. Живое состояние для проверки ветки
+    # проставляем сами — важна ветка, а не гонка с фоновой задачей.
+    for _ in range(400):
+        if (await service.get_run(run_id)).state in {"completed", "failed"}:
+            break
+        await asyncio.sleep(0.01)
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-live-config",
+                session_id=session.session_id,
+                task="идёт",
+                state=RunState.RUNNING,
+                autonomy="supervised",
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    before = service.cfg.runtime.max_iterations
+    view = await service.write_config({"runtime.max_iterations": before + 1})
+
+    assert view.restart_required is True
+    assert service.cfg.runtime.max_iterations == before
 
 
 @pytest.mark.asyncio
@@ -555,7 +609,7 @@ async def test_config_form_shows_file_not_startup_snapshot(service: GatewayServi
     `GatewayService.cfg` — снимок при старте; если рисовать форму из него,
     значение откатывается на глазах у человека.
     """
-    service.write_config({"runtime.autonomy": "supervised"})
+    await service.write_config({"runtime.autonomy": "supervised"})
 
     view = service.describe_config()
 
@@ -583,7 +637,7 @@ async def test_config_refuses_when_patch_would_break_file(service: GatewayServic
     before = service.config_path.read_text(encoding="utf-8")
 
     with pytest.raises(ConfigError, match=r"сломала бы|вручную"):
-        service.write_config({"sandbox.timeout_sec": 300})
+        await service.write_config({"sandbox.timeout_sec": 300})
 
     assert service.config_path.read_text(encoding="utf-8") == before
 

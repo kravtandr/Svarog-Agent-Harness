@@ -486,7 +486,7 @@ def create_app(
     @app.post("/config", response_model=ConfigDiffView)
     async def write_config(req: ConfigUpdateRequest, service: ServiceDep) -> ConfigDiffView:
         try:
-            return service.write_config(req.values)
+            return await service.write_config(req.values)
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 

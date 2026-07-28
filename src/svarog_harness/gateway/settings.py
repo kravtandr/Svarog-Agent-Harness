@@ -64,6 +64,9 @@ class ConfigDiffView(BaseModel):
     path: str
     lines: list[DiffLine]
     changes: int
+    # True, если правка легла в файл, но снимок конфига под живым run'ом
+    # (ADR-0015 §0.4) остался прежним — подхватится только когда run закончится.
+    restart_required: bool = False
 
 
 # Подписи и пояснения — единственное, чего нет в схеме. Порядок здесь же

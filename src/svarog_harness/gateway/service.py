@@ -1062,13 +1062,34 @@ class GatewayService:
             changes=sum(1 for line in lines if line.kind != "same"),
         )
 
-    def write_config(self, values: dict[str, Any]) -> ConfigDiffView:
-        """Записать изменения в svarog.yaml после той же проверки, что и preview."""
+    async def write_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Записать правку и, если ни один запуск не жив, перечитать конфиг.
+
+        Конфиг под работающим run не меняется (ADR-0015 §0.4), поэтому при
+        живом запуске снимок остаётся прежним, а ответ честно говорит, что
+        правка вступит в силу позже.
+        """
         view = self.preview_config(values)
         _, after = self._updated_config_text(values)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(after, encoding="utf-8")
+
+        if await self._any_run_live():
+            return view.model_copy(update={"restart_required": True})
+
+        self.cfg = load_config(project_dir=self.workspace)
+        self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
+        # Тёплые слоты держат env/MCP, поднятые под прежним конфигом.
+        await self.close_warm_sessions()
+        self._catalog.clear()
         return view
+
+    async def _any_run_live(self) -> bool:
+        async def action(db: AsyncSession) -> bool:
+            found = await db.execute(select(Run).where(Run.state.in_(_LIVE_STATES)).limit(1))
+            return found.scalar_one_or_none() is not None
+
+        return await self._read(action)
 
     def list_secrets(self) -> list[SecretView]:
         """Имена секретов и найдено ли значение. Значения не возвращаются никогда."""
