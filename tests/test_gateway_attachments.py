@@ -390,6 +390,53 @@ async def test_missing_attachment_is_rejected(service) -> None:
         )
 
 
+# --- раздача вложения обратно (задача 15) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_attachment_serves_stored_bytes(service: GatewayService) -> None:
+    session = await service.create_session(title="раздача")
+    stored = await service.store_attachment(session.session_id, "скрин.png", b"\x89PNG")
+    client = TestClient(create_app(service=service))
+    name = stored.path.removeprefix(".attachments/")
+
+    response = client.get(f"/sessions/{session.session_id}/attachments/{name}")
+
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG"
+
+
+@pytest.mark.asyncio
+async def test_read_attachment_unknown_session_gives_404(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+
+    response = client.get("/sessions/does-not-exist/attachments/скрин.png")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_read_attachment_missing_file_gives_404(service: GatewayService) -> None:
+    session = await service.create_session(title="нет файла")
+    client = TestClient(create_app(service=service))
+
+    response = client.get(f"/sessions/{session.session_id}/attachments/нет.png")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_attachment_path_rejects_traversal_not_string_concat(
+    service: GatewayService,
+) -> None:
+    """`attachment_path` обязан резолвить через `verify_attachment` (тот же
+    fail-closed путь, что при приёме), а не собирать путь конкатенацией."""
+    session = await service.create_session(title="чужое")
+
+    with pytest.raises(AttachmentPathError):
+        await service.attachment_path(session.session_id, "../svarog.yaml")
+
+
 @pytest.mark.asyncio
 async def test_attachment_leaves_working_tree_clean(service) -> None:
     """Скриншот не должен уехать в историю task-ветки автокоммитом (Flow C)."""

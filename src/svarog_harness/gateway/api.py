@@ -377,6 +377,14 @@ def create_app(
             raise HTTPException(status_code=413, detail=str(exc)) from None
         return AttachmentView(**vars(stored))
 
+    @app.get("/sessions/{session_id}/attachments/{name}")
+    async def read_attachment(session_id: str, name: str, service: ServiceDep) -> FileResponse:
+        try:
+            path = await service.attachment_path(session_id, name)
+        except (SessionNotFoundError, AttachmentPathError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return FileResponse(path)
+
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
         try:

@@ -150,6 +150,39 @@ describe("нормализация ленты", () => {
   });
 });
 
+describe("вложения в истории", () => {
+  it("отделяет строку вложений от текста человека", () => {
+    const [item] = fromHistory([
+      view({
+        kind: "user",
+        text: "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "user",
+      text: "смотри",
+      attachments: [".attachments/ab_скрин.png"],
+    });
+  });
+
+  it("несколько вложений разбираются по запятой", () => {
+    const [item] = fromHistory([
+      view({
+        kind: "user",
+        text: "вот файлы\n\nВложения (прочитай их read_image / read_document): .attachments/a.png, .attachments/b.pdf",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      attachments: [".attachments/a.png", ".attachments/b.pdf"],
+    });
+  });
+
+  it("сообщение без вложений — пустой список, а не потерянный текст", () => {
+    const [item] = fromHistory([view({ kind: "user", text: "просто текст" })]);
+    expect(item).toMatchObject({ text: "просто текст", attachments: [] });
+  });
+});
+
 describe("итог запуска", () => {
   it("показывает провал, а не оставляет ленту в тишине", () => {
     const items = feed([

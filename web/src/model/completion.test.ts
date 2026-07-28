@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { detectCompletion, replaceToken } from "./completion";
+import { detectCompletion, parseCommand, replaceToken } from "./completion";
 
 describe("detectCompletion", () => {
   it("молчит на обычном тексте", () => {
@@ -59,5 +59,34 @@ describe("replaceToken", () => {
   it("сохраняет хвост строки после курсора", () => {
     const result = replaceToken("смотри @sr конец", 10, "@src/app.tsx");
     expect(result.text).toBe("смотри @src/app.tsx  конец");
+  });
+});
+
+describe("parseCommand", () => {
+  it("обычное сообщение — не команда", () => {
+    expect(parseCommand("привет, как дела?")).toBeNull();
+  });
+
+  it("узнаёт известную команду", () => {
+    expect(parseCommand("/new")).toEqual({ name: "new", args: "" });
+  });
+
+  it("неизвестная команда возвращает сырое имя, а не null", () => {
+    expect(parseCommand("/опечатка")).toEqual({ name: "", args: "/опечатка" });
+  });
+
+  it("голый слэш без имени — тоже неизвестная команда", () => {
+    expect(parseCommand("/")).toEqual({ name: "", args: "/" });
+  });
+
+  // Слэш-режим требует однословного токена (как в detectCompletion) — иначе
+  // реальное сообщение вида "/build the new feature" никогда нельзя было бы
+  // отправить: любой слэш в начале строки блокировал бы его как "команду".
+  it("текст с пробелом после слэша — обычное сообщение, а не команда", () => {
+    expect(parseCommand("/build the new feature")).toBeNull();
+  });
+
+  it("перенос строки после слэша — тоже обычное сообщение", () => {
+    expect(parseCommand("/new\nещё текст")).toBeNull();
   });
 });

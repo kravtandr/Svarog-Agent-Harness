@@ -3,7 +3,7 @@ import type { ThreadItemView } from "../api/types";
 export type CallStatus = "ok" | "run" | "error";
 
 export type ThreadItem =
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; attachments: string[] }
   | { kind: "say"; id: string; text: string }
   | {
       kind: "call";
@@ -46,6 +46,31 @@ function toStatus(raw: string): CallStatus {
   return "error";
 }
 
+/**
+ * Сервер дописывает к тексту задачи строку вложений через `\n\n`
+ * (`gateway/attachments.py: attachments_note`) — так в трассе видно ровно
+ * то, что получил агент. Здесь эта строка отделяется обратно: человек
+ * должен видеть написанное им, а вложения — миниатюрами, не текстом пути.
+ */
+function splitAttachments(raw: string): {
+  text: string;
+  attachments: string[];
+} {
+  const marker = "\n\nВложения (";
+  const at = raw.lastIndexOf(marker);
+  if (at < 0) return { text: raw, attachments: [] };
+  const line = raw.slice(at + 2); // "Вложения (<подсказка>): путь1, путь2"
+  const sep = line.indexOf("): ");
+  if (sep < 0) return { text: raw, attachments: [] };
+  const paths = line
+    .slice(sep + 3)
+    .split(", ")
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+  if (paths.length === 0) return { text: raw, attachments: [] };
+  return { text: raw.slice(0, at), attachments: paths };
+}
+
 /** `github/list_issues` → сервер и имя; свой инструмент — сервер null. */
 function splitTool(tool: string): { server: string | null; name: string } {
   const at = tool.lastIndexOf("/");
@@ -55,8 +80,10 @@ function splitTool(tool: string): { server: string | null; name: string } {
 
 export function fromHistory(items: ThreadItemView[]): ThreadItem[] {
   return items.map((item): ThreadItem => {
-    if (item.kind === "user")
-      return { kind: "user", id: nextId(), text: item.text };
+    if (item.kind === "user") {
+      const { text, attachments } = splitAttachments(item.text);
+      return { kind: "user", id: nextId(), text, attachments };
+    }
     if (item.kind === "say")
       return { kind: "say", id: nextId(), text: item.text };
     return {

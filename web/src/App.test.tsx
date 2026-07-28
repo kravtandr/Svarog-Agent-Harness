@@ -82,4 +82,32 @@ describe("оболочка приложения", () => {
 
     expect(client.createSession).toHaveBeenCalledWith("Новый чат");
   });
+
+  it("команда /new в чате заводит новый чат так же, как кнопка навигатора", async () => {
+    const client = api();
+    render(<App api={client} />);
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "/new{Enter}",
+    );
+
+    await waitFor(() =>
+      expect(client.createSession).toHaveBeenCalledWith("Новый чат"),
+    );
+  });
+
+  it("команда /sessions переводит фокус на навигатор", async () => {
+    const client = api();
+    render(<App api={client} />);
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /написать/i }),
+      "/sessions{Enter}",
+    );
+
+    expect(screen.getByRole("button", { name: /Новый чат/ })).toHaveFocus();
+  });
 });

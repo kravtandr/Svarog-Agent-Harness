@@ -29,6 +29,7 @@ from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.attachments import (
+    ATTACHMENTS_DIR,
     StoredAttachment,
     attachments_note,
     store_attachment,
@@ -1040,6 +1041,21 @@ class GatewayService:
         _, meta = await self._read(action)
         workspace = Path(str(meta.get("workspace") or self.workspace))
         return await store_attachment(workspace, name, data)
+
+    async def attachment_path(self, session_id: str, name: str) -> Path:
+        """Резолвит вложение сессии для раздачи назад (`GET .../attachments/{name}`).
+
+        Тот же fail-closed резолв, что при приёме (`verify_attachment`) — путь
+        строится и проверяется в одном месте, а не конкатенацией строк здесь.
+        """
+
+        async def action(db: AsyncSession) -> dict[str, object]:
+            session = await find_session_by_prefix(db, session_id)
+            return dict(session.meta or {})
+
+        meta = await self._read(action)
+        workspace = Path(str(meta.get("workspace") or self.workspace))
+        return verify_attachment(workspace, f"{ATTACHMENTS_DIR}/{name}")
 
     # --- память (план 2026-07-27) ------------------------------------------
 

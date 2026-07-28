@@ -40,11 +40,36 @@
 .chat__error {
   margin: 26px 0;
   color: var(--bad);
+  /* /help выводит список команд по одному на строку — перенос должен
+     остаться настоящим, а не схлопнуться пробелом. */
+  white-space: pre-line;
 }
 
 .chat__hint {
   margin: 26px 0;
   color: var(--muted);
+  white-space: pre-line;
+}
+
+.chat__thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat__thumb {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.chat__upload-error {
+  max-width: 700px;
+  margin: 0 auto 12px;
+  padding: 0 24px;
 }
 
 @media (max-width: 899px) {

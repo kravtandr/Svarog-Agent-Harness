@@ -1,10 +1,13 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Api } from "../api/client";
+import { ApiError, type Api } from "../api/client";
 import { fakeApi } from "../test/fakeApi";
 import { ChatScreen } from "./ChatScreen";
+
+/** Общие пропсы для тестов, которым не важна конкретная сессия. */
+const base = { sessionId: "s1", ensureSession: async () => "s1" };
 
 const thread = {
   session_id: "s1",
@@ -70,13 +73,14 @@ describe("экран диалога", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    // executor не в override: конфиг по умолчанию (fakeApi) не отдаёт
-    // executor.type, а override не должен его гадать.
+    // executor не в override: GET /executors по умолчанию (fakeApi) не
+    // отдаёт ни одного варианта, а override не должен его гадать.
     expect(client.sendMessage).toHaveBeenCalledWith(
       "s1",
       "прогони тесты",
       "supervised",
       { provider: "", model: "" },
+      [],
     );
     await waitFor(() =>
       expect(screen.getByText("прогони тесты")).toBeInTheDocument(),
@@ -106,10 +110,13 @@ describe("экран диалога", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    expect(client.sendMessage).toHaveBeenCalledWith("s1", "жги", "yolo", {
-      provider: "",
-      model: "",
-    });
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "жги",
+      "yolo",
+      { provider: "", model: "" },
+      [],
+    );
   });
 
   it("показывает ошибку загрузки сессий, пришедшую сверху", async () => {
@@ -269,7 +276,6 @@ describe("подписка на поток", () => {
 
 describe("ошибки отправки", () => {
   it("показывает отказ сервера, а не молчит", async () => {
-    const { ApiError } = await import("../api/client");
     const client = api({
       sendMessage: vi
         .fn()
@@ -327,6 +333,7 @@ describe("чистая установка", () => {
       "первая задача",
       "supervised",
       { provider: "", model: "" },
+      [],
     );
   });
 });
@@ -365,10 +372,13 @@ describe("провайдер и модель", () => {
       "привет{Enter}",
     );
 
-    expect(sendMessage).toHaveBeenCalledWith("s1", "привет", "supervised", {
-      provider: "router",
-      model: "x/y",
-    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "привет",
+      "supervised",
+      { provider: "router", model: "x/y" },
+      [],
+    );
   });
 
   it("сохраняет выбор между сообщениями", async () => {
@@ -415,20 +425,16 @@ describe("провайдер и модель", () => {
       "s1",
       "привет",
       "supervised",
-      {
-        provider: "router",
-        model: "x/y",
-      },
+      { provider: "router", model: "x/y" },
+      [],
     );
     expect(sendMessage).toHaveBeenNthCalledWith(
       2,
       "s1",
       "ещё раз",
       "supervised",
-      {
-        provider: "router",
-        model: "x/y",
-      },
+      { provider: "router", model: "x/y" },
+      [],
     );
   });
 
@@ -467,48 +473,46 @@ describe("провайдер и модель", () => {
 
     // Модель — от нового провайдера ("m-backup"), а не унаследованная от
     // предыдущего ("m-router"): pickProvider обязан её подставить сам.
-    expect(sendMessage).toHaveBeenCalledWith("s1", "поехали", "supervised", {
-      provider: "backup",
-      model: "m-backup",
-    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "поехали",
+      "supervised",
+      { provider: "backup", model: "m-backup" },
+      [],
+    );
   });
 });
 
-describe("исполнитель из конфига", () => {
-  it("подставляет исполнителя, полученного из /config, в override", async () => {
+describe("исполнитель из /executors", () => {
+  it("подставляет исполнителя, полученного из /executors, в override", async () => {
     const sendMessage = vi
       .fn()
       .mockResolvedValue({ run_id: "r1", state: "running" });
     const client = api({
       sendMessage,
-      config: vi.fn().mockResolvedValue({
-        path: "svarog.yaml",
-        sections: [
-          {
-            key: "executor",
-            title: "Исполнитель и песочница",
-            fields: [
-              {
-                path: "executor.type",
-                label: "Исполнитель",
-                help: "",
-                kind: "enum" as const,
-                value: "external",
-                choices: ["native", "external"],
-                minimum: null,
-                maximum: null,
-              },
-            ],
-          },
-        ],
-      }),
+      executors: vi.fn().mockResolvedValue([
+        {
+          value: "native",
+          kind: "native",
+          adapter: null,
+          available: true,
+          is_active: false,
+        },
+        {
+          value: "codex",
+          kind: "external",
+          adapter: "codex",
+          available: true,
+          is_active: true,
+        },
+      ]),
     });
     render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
 
-    // Ждём, пока /config отработает: селект «Исполнитель» покажет
+    // Ждём, пока /executors отработает: селект «Исполнитель» покажет
     // настоящее значение, а не литерал и не угадку.
     await waitFor(() =>
-      expect(screen.getByLabelText("Исполнитель")).toHaveValue("external"),
+      expect(screen.getByLabelText("Исполнитель")).toHaveValue("codex"),
     );
 
     await userEvent.type(
@@ -516,20 +520,22 @@ describe("исполнитель из конфига", () => {
       "старт{Enter}",
     );
 
-    expect(sendMessage).toHaveBeenCalledWith("s1", "старт", "supervised", {
-      executor: "external",
-      provider: "",
-      model: "",
-    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "старт",
+      "supervised",
+      { executor: "external", provider: "", model: "" },
+      [],
+    );
   });
 
-  it("не гадает исполнителя, если /config не ответил", async () => {
+  it("не гадает исполнителя, если /executors не ответил", async () => {
     const sendMessage = vi
       .fn()
       .mockResolvedValue({ run_id: "r1", state: "running" });
     const client = api({
       sendMessage,
-      config: vi.fn().mockRejectedValue(new Error("нет связи")),
+      executors: vi.fn().mockRejectedValue(new Error("нет связи")),
     });
     render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
 
@@ -543,9 +549,344 @@ describe("исполнитель из конфига", () => {
 
     // executor вообще не входит в override — сервер возьмёт значение
     // из своего конфига, а не из угадки клиента.
-    expect(sendMessage).toHaveBeenCalledWith("s1", "старт", "supervised", {
-      provider: "",
-      model: "",
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "старт",
+      "supervised",
+      { provider: "", model: "" },
+      [],
+    );
+  });
+});
+
+describe("слэш-команды", () => {
+  it("/new заводит новый чат, а не уходит агенту", async () => {
+    const sendMessage = vi.fn();
+    const onNew = vi.fn();
+    render(
+      <ChatScreen {...base} api={fakeApi({ sendMessage })} onNew={onNew} />,
+    );
+
+    await userEvent.type(screen.getByLabelText("Написать Сварогу"), "/new");
+    await userEvent.keyboard("{Enter}{Enter}");
+
+    expect(onNew).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("неизвестная команда не отправляется, а объясняется", async () => {
+    const sendMessage = vi.fn();
+    render(<ChatScreen {...base} api={fakeApi({ sendMessage })} />);
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/опечатка{Escape}{Enter}",
+    );
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(await screen.findByText(/неизвестная команда/i)).toBeInTheDocument();
+  });
+
+  it("/sessions зовёт onSessions, а не отправляет текст агенту", async () => {
+    const sendMessage = vi.fn();
+    const onSessions = vi.fn();
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ sendMessage })}
+        onSessions={onSessions}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/sessions{Enter}",
+    );
+
+    expect(onSessions).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("/executor переводит фокус на выбор исполнителя", async () => {
+    // Пустой список из /executors держит селект отключённым (см. тест
+    // "не гадает исполнителя..." выше) — фокус проверяем на живом селекте.
+    const executors = vi.fn().mockResolvedValue([
+      {
+        value: "native",
+        kind: "native",
+        adapter: null,
+        available: true,
+        is_active: true,
+      },
+    ]);
+    render(<ChatScreen {...base} api={fakeApi({ executors })} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Исполнитель")).not.toBeDisabled(),
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/executor{Enter}",
+    );
+
+    expect(screen.getByLabelText("Исполнитель")).toHaveFocus();
+  });
+
+  it("/policies переводит фокус на выбор автономии", async () => {
+    render(<ChatScreen {...base} api={fakeApi()} />);
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/policies{Enter}",
+    );
+
+    expect(screen.getByLabelText("Автономия")).toHaveFocus();
+  });
+
+  it("/help показывает список команд из GET /commands", async () => {
+    const commands = vi.fn().mockResolvedValue([
+      { name: "help", usage: "/help", help: "показать команды" },
+      { name: "new", usage: "/new", help: "новый чат" },
+    ]);
+    render(<ChatScreen {...base} api={fakeApi({ commands })} />);
+
+    // "/help" совпадает с реальной командой из GET /commands — меню
+    // автодополнения открыто, первый Enter вставляет подсказку (с пробелом),
+    // второй уже отправляет: тот же порядок, что и в тесте про /new.
+    await userEvent.type(screen.getByLabelText("Написать Сварогу"), "/help");
+    await userEvent.keyboard("{Enter}{Enter}");
+
+    expect(
+      await screen.findByText(/\/help — показать команды/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/\/new — новый чат/)).toBeInTheDocument();
+  });
+
+  it("/copy копирует последний ответ агента в буфер", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    // Стенд навигатора трогает общий jsdom-объект — обязательно возвращаем
+    // как было, иначе следующий тест ("без navigator.clipboard") увидит
+    // чужой буфер, а не его отсутствие.
+    const original = (navigator as { clipboard?: unknown }).clipboard;
+    Object.assign(navigator, { clipboard: { writeText } });
+    try {
+      const client = api({
+        sessionThread: vi.fn().mockResolvedValue({
+          session_id: "s1",
+          title: "",
+          items: [
+            {
+              kind: "say" as const,
+              text: "готово",
+              server: null,
+              name: "",
+              arg: "",
+              result: "",
+              status: "",
+            },
+          ],
+        }),
+      });
+      render(<ChatScreen {...base} api={client} sessionId="s1" />);
+      await waitFor(() =>
+        expect(screen.getByText("готово")).toBeInTheDocument(),
+      );
+
+      await userEvent.type(
+        screen.getByLabelText("Написать Сварогу"),
+        "/copy{Enter}",
+      );
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("готово"));
+    } finally {
+      Object.assign(navigator, { clipboard: original });
+    }
+  });
+
+  it("/copy без ответа агента сообщает, что нечего копировать", async () => {
+    render(<ChatScreen {...base} api={fakeApi()} />);
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/copy{Enter}",
+    );
+
+    expect(await screen.findByText(/нечего копировать/i)).toBeInTheDocument();
+  });
+
+  it("/copy без navigator.clipboard сообщает об этом, а не падает", async () => {
+    // jsdom не реализует navigator.clipboard — отдельного стенда не нужно,
+    // тест проверяет ровно тот случай, который в браузере даёт то же самое.
+    const client = api({
+      sessionThread: vi.fn().mockResolvedValue({
+        session_id: "s1",
+        title: "",
+        items: [
+          {
+            kind: "say" as const,
+            text: "готово",
+            server: null,
+            name: "",
+            arg: "",
+            result: "",
+            status: "",
+          },
+        ],
+      }),
     });
+    render(<ChatScreen {...base} api={client} sessionId="s1" />);
+    await waitFor(() => expect(screen.getByText("готово")).toBeInTheDocument());
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "/copy{Enter}",
+    );
+
+    expect(
+      await screen.findByText(/буфер обмена недоступен/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("вложения в композере", () => {
+  it("прикреплённый файл уходит вместе с сообщением", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ sendMessage, uploadAttachment })}
+        sessionId="s1"
+      />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+    await screen.findByText("скрин.png");
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "смотри{Enter}",
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "смотри",
+      expect.anything(),
+      expect.anything(),
+      [".attachments/ab_скрин.png"],
+    );
+  });
+
+  it("ошибка загрузки показана и не мешает отправить сообщение", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockRejectedValue(new ApiError(415, "расширение '.exe' не поддержано"));
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ uploadAttachment, sendMessage })}
+        sessionId="s1"
+      />,
+    );
+
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [new File([], "вирус.exe")], items: [] },
+    });
+    expect(await screen.findByText(/не поддержано/)).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "текст{Enter}",
+    );
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "текст",
+      expect.anything(),
+      expect.anything(),
+      [],
+    );
+  });
+
+  it("переключение сессии сбрасывает незавершённое вложение прошлого чата", async () => {
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+    const client = fakeApi({ uploadAttachment });
+    const { rerender } = render(
+      <ChatScreen {...base} api={client} sessionId="s1" />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+    await screen.findByText("скрин.png");
+
+    rerender(
+      <ChatScreen
+        {...base}
+        api={client}
+        ensureSession={base.ensureSession}
+        sessionId="s2"
+      />,
+    );
+
+    // Путь вложения принадлежит workspace сессии s1 — отправка в s2 с ним
+    // получила бы 400 от verify_attachment, поэтому чип не должен пережить
+    // переключение чата.
+    await waitFor(() =>
+      expect(screen.queryByText("скрин.png")).not.toBeInTheDocument(),
+    );
+  });
+});
+
+describe("миниатюры вложений в ленте", () => {
+  it("вложение в ленте рисуется миниатюрой, а не строкой пути", () => {
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({
+          sessionThread: vi.fn().mockResolvedValue({
+            session_id: "s1",
+            title: "",
+            items: [
+              {
+                kind: "user" as const,
+                text: "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png",
+                server: null,
+                name: "",
+                arg: "",
+                result: "",
+                status: "",
+              },
+            ],
+          }),
+        })}
+        sessionId="s1"
+      />,
+    );
+
+    return screen.findByRole("img", { name: /скрин\.png/ });
   });
 });
