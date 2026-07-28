@@ -250,10 +250,16 @@ def test_path_escaping_workspace_yields_no_ref() -> None:
 
 class _ScriptedProvider(ModelProvider):
     """Провайдер-заглушка по образцу ScriptedProvider из test_approval_flow.py:
-    ходы заданы заранее и отдаются по очереди, без обращения к реальной модели."""
+    ходы заданы заранее и отдаются по очереди, без обращения к реальной модели.
+
+    Расширено в задаче 7: запоминает `messages` каждого хода. AgentLoop работает
+    с ChatMessage/ImageRef, а не с телом запроса — чтобы увидеть то, что реально
+    получил бы клиент, нужно прогнать сохранённую историю через
+    `_to_openai_messages` отдельно (см. test_image_reaches_the_request_as_a_data_uri)."""
 
     def __init__(self, turns: list[CompletionResult]) -> None:
         self.turns = list(turns)
+        self.calls: list[list[ChatMessage]] = []
 
     async def complete(
         self,
@@ -262,6 +268,7 @@ class _ScriptedProvider(ModelProvider):
         *,
         on_text_delta: Callable[[str], None] | None = None,
     ) -> CompletionResult:
+        self.calls.append(list(messages))
         return self.turns.pop(0)
 
 
@@ -332,6 +339,67 @@ async def test_tool_message_precedes_the_image_message(
     assert roles[tool_at + 1] == ("user", True), (
         "за tool-сообщением должно сразу идти user-сообщение с непустыми images"
     )
+
+
+# --- Задача 7: сквозной прогон ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_image_reaches_the_request_as_a_data_uri(
+    tmp_path: Path, _vision_db: AsyncSession
+) -> None:
+    """Файл → read_image → история → запрос. Всё остальное — рассуждение."""
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    provider = _ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="read_image",
+                        arguments_json=json.dumps({"path": "shot.png"}),
+                    ),
+                ),
+                usage=Usage(10, 5),
+                finish_reason="tool_calls",
+            ),
+            CompletionResult(content="вижу изображение", usage=Usage(10, 5), finish_reason="stop"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(ReadImageTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        registry,
+        TraceRecorder(_vision_db),
+        RuntimeConfig(),
+        PolicyEngine(
+            autonomy=AutonomyMode.SUPERVISED, policies=PoliciesConfig(), workspace=tmp_path
+        ),
+        tmp_path,
+        model_name="test-model",
+    )
+
+    outcome = await loop.run("покажи картинку", AutonomyMode.SUPERVISED)
+
+    assert outcome.state is RunState.COMPLETED
+
+    # Второй ход провайдера — тот, где в историю уже попали tool-ответ и
+    # user-сообщение с ImageRef. Прогоняем его через настоящий
+    # _to_openai_messages: это и есть то, что увидел бы реальный клиент —
+    # не state.messages (там всё ещё ссылка на файл, а не base64).
+    rendered = _to_openai_messages(provider.calls[1], tmp_path)
+
+    tool_index = next(i for i, m in enumerate(rendered) if m["role"] == "tool")
+    assert rendered[tool_index]["tool_call_id"] == "c1"
+
+    user_message = rendered[tool_index + 1]
+    assert user_message["role"] == "user"
+    assert isinstance(user_message["content"], list), "содержимое обязано быть массивом частей"
+
+    image_part = next(p for p in user_message["content"] if p["type"] == "image_url")
+    assert image_part["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 # --- Пояснение при отказе провайдера (задача 5) ------------------------------
