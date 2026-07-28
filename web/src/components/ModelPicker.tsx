@@ -34,6 +34,17 @@ export function ModelPicker({
   // действие человека здесь — печатать, а не листать.
   useEffect(() => field.current?.focus(), []);
 
+  // На document, а не на onKeyDown внутри панели: фокус может уйти за её
+  // пределы табом (например, на соседний элемент композера), и Escape
+  // обязан закрывать панель независимо от того, где сейчас фокус.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const needle = query.trim().toLowerCase();
   const shown = models.filter(
     (card) =>
@@ -43,14 +54,7 @@ export function ModelPicker({
   );
 
   return (
-    <div
-      className="picker"
-      role="dialog"
-      aria-label="Выбор модели"
-      onKeyDown={(event) => {
-        if (event.key === "Escape") onClose();
-      }}
-    >
+    <div className="picker" role="dialog" aria-label="Выбор модели">
       <input
         ref={field}
         className="picker__search"

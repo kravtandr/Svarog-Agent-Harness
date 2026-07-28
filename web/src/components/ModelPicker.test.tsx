@@ -111,4 +111,29 @@ describe("ModelPicker", () => {
     expect(screen.queryByText(/null/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/undefined/i)).not.toBeInTheDocument();
   });
+
+  it("закрывается по Escape, даже если фокус ушёл за пределы панели", async () => {
+    const onClose = vi.fn();
+    render(
+      <>
+        <button type="button">снаружи</button>
+        <ModelPicker
+          models={MODELS}
+          current=""
+          error={null}
+          onPick={vi.fn()}
+          onClose={onClose}
+        />
+      </>,
+    );
+
+    // Табом (или чем угодно) фокус мог уйти за пределы панели — например,
+    // на соседний элемент композера, который появится в следующей задаче.
+    screen.getByText("снаружи").focus();
+    expect(screen.getByText("снаружи")).toHaveFocus();
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(onClose).toHaveBeenCalled();
+  });
 });
