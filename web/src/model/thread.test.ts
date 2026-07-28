@@ -151,16 +151,17 @@ describe("нормализация ленты", () => {
 });
 
 describe("вложения в истории", () => {
-  it("отделяет строку вложений от текста человека", () => {
-    const [item] = fromHistory([
-      view({
-        kind: "user",
-        text: "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png",
-      }),
-    ]);
+  it("вынимает пути вложений, но не трогает и не укорачивает текст", () => {
+    // Спека прямо требует, чтобы строка "Вложения (...)" осталась видна в
+    // ленте — человек должен видеть ровно то, что получил агент, без
+    // скрытых добавок. attachments — это дополнительное поле для миниатюр,
+    // а не замена text.
+    const raw =
+      "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png";
+    const [item] = fromHistory([view({ kind: "user", text: raw })]);
     expect(item).toMatchObject({
       kind: "user",
-      text: "смотри",
+      text: raw,
       attachments: [".attachments/ab_скрин.png"],
     });
   });

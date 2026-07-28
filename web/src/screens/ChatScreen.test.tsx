@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, type Api } from "../api/client";
 import { fakeApi } from "../test/fakeApi";
@@ -8,6 +8,20 @@ import { ChatScreen } from "./ChatScreen";
 
 /** Общие пропсы для тестов, которым не важна конкретная сессия. */
 const base = { sessionId: "s1", ensureSession: async () => "s1" };
+
+// Миниатюры вложений сами fetch'ат байты (см. ChatScreen.tsx: AttachmentThumb) —
+// по умолчанию сеть в тестах недоступна намеренно: тесты, которым нужна
+// настоящая миниатюра, переопределяют global.fetch сами.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockRejectedValue(new Error("сеть отключена в тестах")),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const thread = {
   session_id: "s1",
@@ -859,10 +873,67 @@ describe("вложения в композере", () => {
       expect(screen.queryByText("скрин.png")).not.toBeInTheDocument(),
     );
   });
+
+  it("вложение переживает создание сессии на чистой установке, даже если sessionId сменился уже после того, как чип появился", async () => {
+    // На чистой установке sessionId===null; ensureSession() создаёт сессию
+    // и возвращает её id раньше, чем родитель (App) успевает перерисовать
+    // этот экран с новым sessionId-пропом — порядок, в котором это
+    // происходит, не гарантирован. Тест намеренно рендерит успешный чип
+    // ДО перерисовки с новым sessionId, чтобы проверить именно тот случай,
+    // где наивный сброс по смене сессии стёр бы чип задним числом.
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+    const client = fakeApi({ uploadAttachment });
+    const ensureSession = vi.fn().mockResolvedValue("s-new");
+    const { rerender } = render(
+      <ChatScreen
+        api={client}
+        sessionId={null}
+        ensureSession={ensureSession}
+      />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+    await screen.findByText("скрин.png");
+
+    // Родитель наконец перерисовался с новым sessionId — эффект смены
+    // сессии срабатывает первый раз именно сейчас, уже после того как чип
+    // появился.
+    rerender(
+      <ChatScreen
+        api={client}
+        sessionId="s-new"
+        ensureSession={ensureSession}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(client.sessionThread).toHaveBeenCalledWith("s-new"),
+    );
+    expect(screen.getByText("скрин.png")).toBeInTheDocument();
+  });
 });
 
 describe("миниатюры вложений в ленте", () => {
-  it("вложение в ленте рисуется миниатюрой, а не строкой пути", () => {
+  it("вложение в ленте рисуется миниатюрой, а не строкой пути", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(new Blob([new Uint8Array([1])], { type: "image/png" }), {
+          status: 200,
+        }),
+      ),
+    );
     render(
       <ChatScreen
         {...base}
@@ -887,6 +958,43 @@ describe("миниатюры вложений в ленте", () => {
       />,
     );
 
-    return screen.findByRole("img", { name: /скрин\.png/ });
+    await screen.findByRole("img", { name: /скрин\.png/ });
+    // Строка "Вложения (...)" остаётся видна — спека прямо требует, чтобы
+    // человек видел ровно то, что получил агент, миниатюра только вдобавок.
+    expect(screen.getByText(/Вложения \(/)).toBeInTheDocument();
+  });
+
+  it("документ без inline-раздачи рисуется именованным чипом, а не сломанной картинкой", async () => {
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({
+          sessionThread: vi.fn().mockResolvedValue({
+            session_id: "s1",
+            title: "",
+            items: [
+              {
+                kind: "user" as const,
+                text: "вот отчёт\n\nВложения (прочитай их read_image / read_document): .attachments/ab12cd34_отчёт.pdf",
+                server: null,
+                name: "",
+                arg: "",
+                result: "",
+                status: "",
+              },
+            ],
+          }),
+        })}
+        sessionId="s1"
+      />,
+    );
+
+    // Строка "Вложения (...)" в тексте и подпись чипа обе содержат
+    // "отчёт.pdf" — ищем именно чип, а не любое совпадение по тексту.
+    const chip = await screen.findByText(/отчёт\.pdf/, {
+      selector: ".chat__doc",
+    });
+    expect(chip).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 });

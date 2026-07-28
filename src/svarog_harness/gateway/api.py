@@ -93,6 +93,7 @@ from svarog_harness.gitflow.provision import (
 from svarog_harness.llm.openai_compatible import ApiKeyError
 from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.tenant.quota import QuotaExceededError
+from svarog_harness.tools.document_tools import _IMAGE_MIME
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
@@ -383,7 +384,17 @@ def create_app(
             path = await service.attachment_path(session_id, name)
         except (SessionNotFoundError, AttachmentPathError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
-        return FileResponse(path)
+        mime = _IMAGE_MIME.get(path.suffix.lower())
+        if mime is not None:
+            # Картинка — единственный сегодняшний потребитель (<img> в
+            # ChatScreen); content-type задаём явно из белого списка, не
+            # угадываем голым FileResponse.
+            return FileResponse(path, media_type=mime)
+        # Всё остальное — включая .html из белого списка загрузки — только
+        # как скачивание. SPA раздаётся с этого же origin, где в
+        # sessionStorage лежит bearer-токен: открытая по прямой ссылке
+        # .html-страница не должна получить шанс исполниться в этом origin.
+        return FileResponse(path, filename=name)
 
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:

@@ -28,6 +28,74 @@ function basename(path: string): string {
   return at < 0 ? path : path.slice(at + 1);
 }
 
+/** "ab12cd34_скрин.png" → "скрин.png": `store_attachment` (attachments.py)
+    кладёт файл как "{8 hex}_{имя, как его видел человек}". Для alt/подписи
+    нужно вот это имя, а не basename с хеш-префиксом — если префикс не
+    похож на хеш (внешние данные, не то, что ожидали), берём basename как
+    есть, а не гадаем дальше. */
+function humanName(path: string): string {
+  const base = basename(path);
+  const match = /^[0-9a-f]{8}_(.+)$/.exec(base);
+  return match !== null ? match[1] : base;
+}
+
+/** Тот же список расширений, что и `_IMAGE_MIME` в
+    `tools/document_tools.py` — раздача (api.py: read_attachment) отдаёт
+    именно эти суффиксы как картинку, остальное (включая .pdf/.docx/.html
+    из белого списка загрузки) — как скачивание, не для <img>. */
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+function isImagePath(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && IMAGE_EXTENSIONS.has(path.slice(dot).toLowerCase());
+}
+
+/**
+ * Миниатюра тянет байты сама через `fetch` с `Authorization`-заголовком и
+ * превращает ответ в blob-URL: голый `<img src>` не может послать токен, а
+ * `GET /sessions/{id}/attachments/{name}` требует его на любом не-loopback
+ * bind (`api.py: _require_service`). Blob-URL, а не `?token=` в src — токен
+ * в URL оседает в истории браузера и в Referer; тот приём годился только
+ * для WebSocket, который не может выставить заголовок, а `fetch` может.
+ */
+function AttachmentThumb({
+  src,
+  alt,
+  token,
+}: {
+  src: string;
+  alt: string;
+  token?: string;
+}) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    (async () => {
+      try {
+        const headers: Record<string, string> = {};
+        if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+        const response = await fetch(src, { headers });
+        if (!response.ok) return;
+        const blob = await response.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setBlobUrl(objectUrl);
+      } catch {
+        // Тихо: миниатюра просто не появится, текст с путём уже виден выше.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src, token]);
+
+  if (blobUrl === null) return null;
+  return <img className="chat__thumb" src={blobUrl} alt={alt} />;
+}
+
 /** Подряд идущие вызовы рисуются одной группой, а не по карточке на каждый. */
 function groupItems(items: ThreadItem[]): Entry[] {
   const grouped: Entry[] = [];
@@ -92,6 +160,13 @@ export function ChatScreen({
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
   const commandSeq = useRef(0);
+  // Сессия, которую только что завела сама загрузка вложения на чистой
+  // установке (sessionId был null) — эффект смены сессии ниже не должен
+  // стереть тот самый чип, ради которого сессия и была создана. Порядок,
+  // в котором завершаются ensureSession() и приходит новый sessionId-проп,
+  // не гарантирован (React не обязан прогонять их в каком-то одном
+  // порядке) — сравнение по id, а не расчёт на конкретную гонку.
+  const justCreatedSessionId = useRef<string | null>(null);
 
   useEffect(() => {
     api
@@ -176,11 +251,17 @@ export function ChatScreen({
     setItems([]);
     setThreadError(null);
     setSendError(null);
-    // Непрочитанное вложение из прошлого чата принадлежит его workspace:
-    // отправка в новом чате получила бы 400 от verify_attachment. Проще и
-    // честнее сбросить, чем молча тащить путь чужой сессии дальше.
-    setAttachments([]);
-    setUploadError(null);
+    if (justCreatedSessionId.current === sessionId) {
+      // Эта сессия только что создана самим attach() (см. ниже) — вложение,
+      // ради которого она появилась, должно пережить это переключение.
+      justCreatedSessionId.current = null;
+    } else {
+      // Непрочитанное вложение из прошлого чата принадлежит его workspace:
+      // отправка в новом чате получила бы 400 от verify_attachment. Проще и
+      // честнее сбросить, чем молча тащить путь чужой сессии дальше.
+      setAttachments([]);
+      setUploadError(null);
+    }
     api
       .sessionThread(sessionId)
       .then((thread) => setItems(fromHistory(thread.items)))
@@ -320,7 +401,14 @@ export function ChatScreen({
     async (file: File) => {
       setUploadError(null);
       try {
-        const target = sessionId ?? (await ensureSession());
+        let target = sessionId;
+        if (target === null) {
+          target = await ensureSession();
+          // Помечаем сразу после получения id, а не после успешной
+          // загрузки: эффект смены сессии может сработать в любой момент
+          // между этими двумя строками, и метка обязана стоять раньше.
+          justCreatedSessionId.current = target;
+        }
         const stored = await api.uploadAttachment(target, file);
         setAttachments((current) => [...current, stored]);
       } catch (exc: unknown) {
@@ -391,21 +479,34 @@ export function ChatScreen({
             if (entry.kind === "user")
               return (
                 <div key={entry.id} className="chat__you">
+                  {/* Строка "Вложения (...)" остаётся в entry.text как есть
+                      (thread.ts её не вырезает) — здесь только миниатюра
+                      вдобавок, не вместо неё: человек видит ровно то, что
+                      получил агент, плюс картинку/подпись к нему. */}
                   <div>{entry.text}</div>
-                  {/* Строка "Вложения (...)" остаётся в тексте выше — здесь
-                      только миниатюра вдобавок, не вместо неё: человек видит
-                      ровно то, что получил агент, плюс картинку к нему. */}
                   {sessionId !== null && entry.attachments.length > 0 && (
                     <div className="chat__thumbs">
                       {entry.attachments.map((path) => {
-                        const name = basename(path);
+                        const name = humanName(path);
+                        const src = `${baseUrl}/sessions/${sessionId}/attachments/${encodeURIComponent(basename(path))}`;
+                        if (isImagePath(path)) {
+                          return (
+                            <AttachmentThumb
+                              key={path}
+                              src={src}
+                              alt={name}
+                              token={token}
+                            />
+                          );
+                        }
+                        // Не картинка (.pdf/.docx/.html/...) — именованный
+                        // чип, а не сломанный <img>: раздача для таких
+                        // файлов идёт как скачивание (api.py: read_attachment),
+                        // а не inline.
                         return (
-                          <img
-                            key={path}
-                            className="chat__thumb"
-                            src={`${baseUrl}/sessions/${sessionId}/attachments/${encodeURIComponent(name)}`}
-                            alt={name}
-                          />
+                          <span key={path} className="chat__doc">
+                            📄 {name}
+                          </span>
                         );
                       })}
                     </div>

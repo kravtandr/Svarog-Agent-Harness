@@ -407,6 +407,48 @@ async def test_read_attachment_serves_stored_bytes(service: GatewayService) -> N
 
 
 @pytest.mark.asyncio
+async def test_read_attachment_image_comes_back_inline_with_explicit_mime(
+    service: GatewayService,
+) -> None:
+    """Картинка — единственное, для чего есть готовый потребитель (<img> в
+    ChatScreen); content-type задаётся явно из белого списка изображений,
+    а не угадывается голым FileResponse по суффиксу."""
+    session = await service.create_session(title="картинка")
+    stored = await service.store_attachment(session.session_id, "скрин.png", b"\x89PNG")
+    client = TestClient(create_app(service=service))
+    name = stored.path.removeprefix(".attachments/")
+
+    response = client.get(f"/sessions/{session.session_id}/attachments/{name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_read_attachment_html_is_forced_download_not_inline(
+    service: GatewayService,
+) -> None:
+    """`.html` проходит белый список загрузки (`ALLOWED_SUFFIXES`), а SPA
+    раздаётся с того же origin, где в sessionStorage лежит bearer-токен.
+    Открытая по прямой ссылке .html-страница не должна исполниться в этом
+    origin — раздача обязана форсировать скачивание (Content-Disposition:
+    attachment), а не угадывать content-type по суффиксу и отдавать голый
+    FileResponse, который браузер отрисует inline."""
+    session = await service.create_session(title="html вложение")
+    stored = await service.store_attachment(
+        session.session_id, "страница.html", b"<script>alert(1)</script>"
+    )
+    client = TestClient(create_app(service=service))
+    name = stored.path.removeprefix(".attachments/")
+
+    response = client.get(f"/sessions/{session.session_id}/attachments/{name}")
+
+    assert response.status_code == 200
+    assert response.headers.get("content-disposition", "").startswith("attachment")
+
+
+@pytest.mark.asyncio
 async def test_read_attachment_unknown_session_gives_404(service: GatewayService) -> None:
     client = TestClient(create_app(service=service))
 
