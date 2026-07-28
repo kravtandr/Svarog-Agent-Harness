@@ -284,7 +284,12 @@ class GatewayService:
                 # Слот держит env/MCP, поднятые под прошлым конфигом: с другим
                 # исполнителем или провайдером это чужой sandbox.
                 await self._drop_warm(session_id)
-            cfg = apply_override(self.cfg, override)
+            # Через _derive, а не голый apply_override: этот слот держит
+            # runner, от cfg которого при старте посчитается config_hash —
+            # он обязан совпасть с тем, что при resume соберёт _runner_for_run
+            # (тоже через _derive), иначе _assert_config_unchanged откажет
+            # resume'у (ADR-0015 §0.4).
+            cfg = await self._derive(override)
             run_meta: dict[str, object] | None = (
                 {OVERRIDE_META_KEY: override.to_meta()} if not override.is_empty() else None
             )

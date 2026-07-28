@@ -12,6 +12,8 @@ from svarog_harness.gateway import GatewayService
 from svarog_harness.gateway.api import create_app
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models, parse_models
 from svarog_harness.gateway.overrides import RunOverride
+from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
+from svarog_harness.trace.lookup import find_run_by_prefix
 
 
 def test_parses_openrouter_shape_with_pricing() -> None:
@@ -205,3 +207,56 @@ async def test_model_override_takes_prices_from_catalog(service, monkeypatch) ->
     runner = await service._runner_for_run(run_id)
     # При resume цены восстанавливаются из того же каталога.
     assert runner.cfg.models.providers["router"].input_usd_per_mtok == 0.25
+
+
+@pytest.mark.asyncio
+async def test_warm_session_start_and_resume_agree_on_priced_config(service, monkeypatch) -> None:
+    """Тёплая сессия (fixture: cloud.warm_session_ttl_sec=60) не должна создавать
+    дрейф конфига между стартом run'а и его resume.
+
+    Регрессия: `_acquire_warm` строил производный конфиг голым `apply_override`
+    (без цен), тогда как `send_message`/`_runner_for_run` уже шли через `_derive`.
+    Когда тёплый слот создаётся заново под override с моделью, реальный запуск
+    исполнялся под непроцененным конфигом, а `config_hash` в Run.meta писался
+    именно от него; resume пересчитывал цену заново через `_derive` и получал
+    другой дайджест — `_assert_config_unchanged` отклонил бы такой resume
+    (ADR-0015 §0.4). Проверяем и то, что реально стартовавший runner несёт цены
+    каталога, и то, что дайджест конфига, который соберёт resume, совпадает с
+    тем, что записан при старте.
+    """
+
+    async def fake_fetch(provider, api_key, **kwargs):
+        return [ModelCard(id="x/y", input_usd_per_mtok=0.25, output_usd_per_mtok=0.75)]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+
+    captured: list[object] = []
+    orig_run_bg = GatewayService._run_bg
+
+    async def spy_run_bg(self, task, autonomy, started, **kwargs):
+        captured.append(kwargs.get("runner"))
+        await orig_run_bg(self, task, autonomy, started, **kwargs)
+
+    monkeypatch.setattr(GatewayService, "_run_bg", spy_run_bg)
+
+    session = await service.create_session(title="тёплая сессия с ценами")
+    run_id = await service.send_message(
+        session.session_id, "задача", None, RunOverride(provider="router", model="x/y")
+    )
+
+    assert captured and captured[0] is not None, "runner не передан в _run_bg"
+    started_runner = captured[0]
+    # Runner, под которым реально стартовал run, обязан нести цены каталога —
+    # а не цены из svarog.yaml для другой модели того же провайдера.
+    assert started_runner.cfg.models.providers["router"].input_usd_per_mtok == 0.25
+    assert started_runner.cfg.models.providers["router"].output_usd_per_mtok == 0.75
+
+    async def read(db):
+        run = await find_run_by_prefix(db, run_id)
+        return dict(run.meta or {})
+
+    meta = await service._read(read)
+    resumed_runner = await service._runner_for_run(run_id)
+    # Инвариант, который и защищает ADR-0015 §0.4: то, что пересчитает resume,
+    # обязано дать тот же дайджест, что записан при реальном старте run'а.
+    assert config_digest(resumed_runner.cfg, service.workspace) == meta[CONFIG_HASH_META_KEY]
