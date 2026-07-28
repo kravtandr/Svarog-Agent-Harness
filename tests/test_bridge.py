@@ -454,6 +454,7 @@ async def test_mcp_read_image_end_to_end(tmp_path: Path) -> None:
     )
     content = reply["result"]["content"]
     assert content[0]["type"] == "image" and content[0]["mimeType"] == "image/png"
+    assert "path" not in content[0], "служебный ключ не должен уходить в MCP"
 
 
 class _BlocksArgs(BaseModel):
@@ -470,7 +471,9 @@ class _BlocksTool(Tool[_BlocksArgs]):
         return ToolResult(
             ok=True,
             output="картинка",
-            blocks=[{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+            # path здесь тоже служебный, как у read_image — проверяем, что
+            # мост снимает его и с блоков произвольного инструмента.
+            blocks=[{"type": "image", "data": "aGk=", "mimeType": "image/png", "path": "fake.png"}],
         )
 
 
