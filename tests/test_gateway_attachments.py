@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.gateway import GatewayService
-from svarog_harness.gateway.api import create_app
+from svarog_harness.gateway.api import _read_capped, create_app
 from svarog_harness.gateway.attachments import (
     ALLOWED_SUFFIXES,
     MAX_UPLOAD_BYTES,
@@ -197,6 +197,17 @@ async def test_image_over_vision_limit_is_flagged_not_refused(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_nul_byte_in_name_rejected_not_500(tmp_path: Path) -> None:
+    """NUL-байт в имени валит `Path.resolve()`/`write_bytes` в `ValueError` —
+    это должно стать чистым `AttachmentTypeError` (наружу 415), а не утечкой
+    сырого ValueError/OSError, которая на HTTP-слое превратилась бы в 500."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with pytest.raises(AttachmentTypeError):
+        await store_attachment(ws, "скрин\x00.png", b"1")
+
+
+@pytest.mark.asyncio
 async def test_store_hides_attachments_dir_from_git(tmp_path: Path) -> None:
     """store_attachment сам прячет .attachments/ от git — не нужно вызывать
     ensure_git_excluded отдельно на стороне вызывающего кода."""
@@ -209,6 +220,29 @@ async def test_store_hides_attachments_dir_from_git(tmp_path: Path) -> None:
 
     exclude = ws / ".git" / "info" / "exclude"
     assert ".attachments/" in exclude.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.asyncio
+async def test_read_capped_stops_before_consuming_everything() -> None:
+    """Тело больше потолка не должно оседать в памяти целиком — иначе
+    MAX_UPLOAD_BYTES защищал бы только после того, как вред уже нанесён
+    (ADR-0014: тенантов в процессе может быть несколько)."""
+    read_calls = 0
+
+    class _FakeUpload:
+        async def read(self, size: int) -> bytes:
+            nonlocal read_calls
+            read_calls += 1
+            # Как будто источник готов отдавать сколько угодно — единственное,
+            # что должно остановить чтение, — сама проверка потолка.
+            return b"x" * size
+
+    with pytest.raises(AttachmentTooLarge):
+        await _read_capped(_FakeUpload(), limit=100)
+
+    # Один чанк по 64 КиБ уже больше потолка в 100 байт — обрыв на первом же
+    # чтении, а не после того, как гигабайты осели бы в памяти.
+    assert read_calls == 1
 
 
 @pytest.mark.asyncio
@@ -237,6 +271,43 @@ async def test_upload_rejects_bad_suffix_with_415(service: GatewayService) -> No
         files={"file": ("вирус.exe", b"MZ", "application/octet-stream")},
     )
     assert response.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_upload_refuses_while_run_is_live(service: GatewayService) -> None:
+    """Прикреплять файл к сессии с идущим запуском нельзя — как и удалять
+    её историю (ср. test_delete_session_refuses_while_run_is_live)."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from svarog_harness.storage.models import Run, RunState
+
+    session = await service.create_session(title="занятая")
+
+    async def seed(db: AsyncSession) -> None:
+        db.add(
+            Run(
+                id="run-live",
+                session_id=session.session_id,
+                task="идёт",
+                state=RunState.RUNNING,
+                autonomy="supervised",
+            )
+        )
+        await db.commit()
+
+    await service._read(seed)
+
+    client = TestClient(create_app(service=service))
+    response = client.post(
+        f"/sessions/{session.session_id}/attachments",
+        files={"file": ("скрин.png", b"\x89PNG", "image/png")},
+    )
+
+    assert response.status_code == 409
+    attachments_dir = service.workspace / ".attachments"
+    assert not attachments_dir.exists() or not any(attachments_dir.iterdir()), (
+        "под живой запуск файл не должен попасть в .attachments/"
+    )
 
 
 @pytest.mark.asyncio

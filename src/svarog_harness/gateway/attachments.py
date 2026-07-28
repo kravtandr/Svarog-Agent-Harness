@@ -62,10 +62,21 @@ async def store_attachment(workspace: Path, name: str, data: bytes) -> StoredAtt
     # Префикс-хеш от содержимого и имени: коллизий нет, отказывать при
     # повторной загрузке не нужно, а человеку показывается исходное имя.
     digest = hashlib.sha256(data + clean.encode("utf-8")).hexdigest()[:8]
-    target = (root / f"{digest}_{clean}").resolve()
+    try:
+        target = (root / f"{digest}_{clean}").resolve()
+    except (OSError, ValueError) as exc:
+        # NUL-байт в имени валит `resolve()` в ValueError ещё до всякой
+        # записи — превращаем в тот же 415, что и неподдержанное расширение,
+        # а не даём сырому ValueError утечь наружу как 500.
+        raise AttachmentTypeError(f"имя '{name}' нельзя использовать как файл: {exc}") from exc
     if not target.is_relative_to(root):
         raise AttachmentTypeError(f"имя '{name}' выводит за пределы {ATTACHMENTS_DIR}")
-    target.write_bytes(data)
+    try:
+        target.write_bytes(data)
+    except (OSError, ValueError) as exc:
+        # Тот же случай, но для имён, которые resolve() пропустил, а упали
+        # уже на самой записи (например, слишком длинное имя — ENAMETOOLONG).
+        raise AttachmentTypeError(f"имя '{name}' нельзя использовать как файл: {exc}") from exc
     await ensure_git_excluded(workspace, f"{ATTACHMENTS_DIR}/")
 
     mime = _IMAGE_MIME.get(suffix)

@@ -30,7 +30,11 @@ from starlette.background import BackgroundTask
 
 from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
-from svarog_harness.gateway.attachments import AttachmentTooLarge, AttachmentTypeError
+from svarog_harness.gateway.attachments import (
+    MAX_UPLOAD_BYTES,
+    AttachmentTooLarge,
+    AttachmentTypeError,
+)
 from svarog_harness.gateway.catalog import CatalogError
 from svarog_harness.gateway.commands import WEB_COMMANDS
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
@@ -94,6 +98,23 @@ from svarog_harness.trace.lookup import (
     SessionNotFoundError,
 )
 from svarog_harness.trace.recorder import WorkspaceBusyError
+
+
+async def _read_capped(file: UploadFile, limit: int) -> bytes:
+    """Прочитать тело с потолком: за лимитом обрываем, не дочитывая до конца.
+
+    Иначе `MAX_UPLOAD_BYTES` проверялся бы уже после того, как всё тело
+    оказалось в памяти, — то есть не защищал бы ровно от того, ради чего
+    заведён (ADR-0014: тенантов в процессе может быть несколько).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise AttachmentTooLarge(f"файл больше потолка {limit} байт")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def create_app(
@@ -340,8 +361,10 @@ def create_app(
     async def upload_attachment(
         session_id: str, service: ServiceDep, file: Annotated[UploadFile, File()]
     ) -> AttachmentView:
-        data = await file.read()
         try:
+            # Читаем с тем же потолком, что и store_attachment: иначе тело
+            # целиком осядет в памяти ещё до того, как размер кто-то проверит.
+            data = await _read_capped(file, MAX_UPLOAD_BYTES)
             stored = await service.store_attachment(session_id, file.filename or "файл", data)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
