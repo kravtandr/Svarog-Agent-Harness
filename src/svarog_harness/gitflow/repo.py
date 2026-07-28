@@ -90,13 +90,6 @@ class GitRepo:
             return None
         return Path(out.strip())
 
-    async def git_dir(self) -> Path | None:
-        """Настоящий каталог git; при separate_git_dir — не `workspace/.git`."""
-        code, out, _ = await self._git("rev-parse", "--absolute-git-dir", check=False)
-        if code != 0 or not out.strip():
-            return None
-        return Path(out.strip())
-
     async def init(
         self, *, initial_branch: str = "main", separate_git_dir: Path | None = None
     ) -> None:
