@@ -515,6 +515,14 @@ class AgentLoop:
         безопасно, в батче только читающие вызовы. Остальные вызовы — по
         одному, как раньше.
 
+        Изображения из tool-результатов не дописываются в `state.messages`
+        сразу (блок C §1): openai-совместимый контракт требует, чтобы все
+        tool-сообщения одного ассистентского хода шли подряд, а вызовов в
+        `pending_tool_calls` может быть несколько — user-сообщение с картинкой
+        после первого же результата развело бы второй tool-ответ от его хода.
+        Вместо этого они копятся в `state.pending_images` и переносятся в
+        историю одним куском ниже, когда весь `pending_tool_calls` исчерпан.
+
         Возвращает, был ли хотя бы один успешный результат (сырьё для
         детектора затухающей отдачи, §1.6).
         """
@@ -540,18 +548,31 @@ class AgentLoop:
             await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
             images = self._image_refs(tool_result)
             if images:
-                # Отдельным user-сообщением, а не в tool-ответе: openai-совместимый
-                # контракт принимает части image_url только у роли user. Порядок
-                # обязателен — без tool-ответа ход остаётся без ответа на tool_call_id.
                 note = ChatMessage(
                     role="user", content=f"Изображение из {call.name}:", images=images
                 )
-                state.messages.append(note)
-                await self._record_message(run, "user", {"content": note.content})
+                state.pending_images = (*state.pending_images, note)
             state.pending_tool_calls = state.pending_tool_calls[1:]
             with self._phases.measure("checkpoint"):
                 await self._save_checkpoint(run, state)
+        await self._flush_pending_images(run, state)
         return had_success
+
+    async def _flush_pending_images(self, run: Run, state: LoopState) -> None:
+        """Перенести буфер картинок хода в историю — после, а не внутри хода.
+
+        Вызывается только когда `pending_tool_calls` полностью исчерпан:
+        порядок обязателен — без tool-ответа на каждый tool_call_id ход
+        остаётся неотвеченным, и провайдер отклонит запрос.
+        """
+        if not state.pending_images:
+            return
+        for note in state.pending_images:
+            state.messages.append(note)
+            await self._record_message(run, "user", {"content": note.content})
+        state.pending_images = ()
+        with self._phases.measure("checkpoint"):
+            await self._save_checkpoint(run, state)
 
     def _concurrency_safe_prefix(
         self, run: Run, calls: tuple[ToolCallRequest, ...]
@@ -638,14 +659,13 @@ class AgentLoop:
             )
             images = self._image_refs(result)
             if images:
-                # Отдельным user-сообщением, а не в tool-ответе: openai-совместимый
-                # контракт принимает части image_url только у роли user. Порядок
-                # обязателен — без tool-ответа ход остаётся без ответа на tool_call_id.
+                # Буферизуется, не дописывается сразу — см. docstring
+                # _execute_pending: батч может быть частью хода с другими
+                # ещё не исполненными вызовами.
                 note = ChatMessage(
                     role="user", content=f"Изображение из {prepared.call.name}:", images=images
                 )
-                state.messages.append(note)
-                await self._record_message(run, "user", {"content": note.content})
+                state.pending_images = (*state.pending_images, note)
         await self._flush_skill_loads(run)
         state.pending_tool_calls = state.pending_tool_calls[len(batch) :]
         await self._save_checkpoint(run, state)

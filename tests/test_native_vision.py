@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import (
     AutonomyMode,
     PoliciesConfig,
@@ -30,14 +31,16 @@ from svarog_harness.llm.provider import (
     Usage,
 )
 from svarog_harness.policy.engine import PolicyEngine
+from svarog_harness.runtime import run_assembly
 from svarog_harness.runtime.checkpoint import LoopState, _message_from_dict, _message_to_dict
 from svarog_harness.runtime.loop import AgentLoop
-from svarog_harness.runtime.orchestrator import TaskRunner
+from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
 from svarog_harness.sandbox.local import LocalEnvironment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Checkpoint, RunState
 from svarog_harness.tools.base import ToolResult
 from svarog_harness.tools.document_tools import ReadImageArgs, ReadImageTool
+from svarog_harness.tools.file_tools import ReadFileTool
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.trace.recorder import TraceRecorder
 
@@ -341,6 +344,79 @@ async def test_tool_message_precedes_the_image_message(
     )
 
 
+@pytest.mark.asyncio
+async def test_tool_messages_of_the_same_turn_stay_contiguous(
+    tmp_path: Path, _vision_db: AsyncSession
+) -> None:
+    """Финальное ревью, находка 1 (КРИТИЧНО): ход с двумя tool-вызовами, первый
+    из которых read_image, — оба read-only и конкурентно-безопасны, поэтому
+    исполняются одним батчем (`_execute_batch`). Openai-совместимый контракт
+    требует, чтобы все tool-сообщения одного ассистентского хода шли подряд;
+    user-сообщение с картинкой, вклинившееся между ними, — 400 у реального
+    провайдера, который `assert_history_valid` не ловит (id совпадают)."""
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "note.txt").write_text("текст заметки", encoding="utf-8")
+    provider = _ScriptedProvider(
+        [
+            CompletionResult(
+                content="",
+                tool_calls=(
+                    ToolCallRequest(
+                        id="c1",
+                        name="read_image",
+                        arguments_json=json.dumps({"path": "shot.png"}),
+                    ),
+                    ToolCallRequest(
+                        id="c2",
+                        name="read_file",
+                        arguments_json=json.dumps({"path": "note.txt"}),
+                    ),
+                ),
+                usage=Usage(10, 5),
+                finish_reason="tool_calls",
+            ),
+            CompletionResult(content="готово", usage=Usage(10, 5), finish_reason="stop"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(ReadImageTool(tmp_path))
+    registry.register(ReadFileTool(tmp_path))
+    loop = AgentLoop(
+        provider,
+        registry,
+        TraceRecorder(_vision_db),
+        RuntimeConfig(),
+        PolicyEngine(
+            autonomy=AutonomyMode.SUPERVISED, policies=PoliciesConfig(), workspace=tmp_path
+        ),
+        tmp_path,
+        model_name="test-model",
+    )
+
+    outcome = await loop.run("покажи картинку и прочитай заметку", AutonomyMode.SUPERVISED)
+
+    assert outcome.state is RunState.COMPLETED
+
+    checkpoint = (
+        await _vision_db.execute(
+            select(Checkpoint)
+            .where(Checkpoint.run_id == outcome.run_id)
+            .order_by(Checkpoint.iteration.desc(), Checkpoint.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    state = LoopState.from_dict(checkpoint.state)
+
+    tool_indices = [i for i, m in enumerate(state.messages) if m.role == "tool"]
+    assert len(tool_indices) == 2, "оба tool-ответа обязаны попасть в историю"
+    first, last = tool_indices[0], tool_indices[-1]
+    between = range(first, last + 1)
+    assert all(state.messages[i].role == "tool" for i in between), (
+        "между первым и последним tool-сообщением одного хода не должно быть "
+        "ничего постороннего — иначе провайдер отклонит запрос как невалидный"
+    )
+
+
 # --- Задача 7: сквозной прогон ------------------------------------------------
 
 
@@ -510,3 +586,75 @@ def test_read_document_registered_only_when_markitdown_present(
     registry = _build_registry(tmp_path)
     assert "read_document" not in registry.names()
     assert "read_image" in registry.names(), "картинки от markitdown не зависят"
+
+
+def test_read_document_is_registered_when_markitdown_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Находка 9 финального ревью: регистрация была проверена только в
+    отрицательном случае — без этого позитивного `run_assembly.py:537-538`
+    можно удалить, и `test_read_document_registered_only_when_markitdown_present`
+    останется зелёным (там markitdown как раз выключен)."""
+    monkeypatch.setattr(
+        "svarog_harness.runtime.run_assembly.document_tools_available", lambda: True
+    )
+    registry = _build_registry(tmp_path)
+    assert "read_document" in registry.names()
+
+
+# --- находка 3 финального ревью: default_provider обязан получать workspace --
+
+
+def _write_native_vision_config(ws: Path, tmp_path: Path) -> None:
+    (ws / "svarog.yaml").write_text(
+        "models:\n  default: local\n  providers:\n    local:\n"
+        "      base_url: http://localhost:9/v1\n      model: fake-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+
+
+async def test_default_provider_is_built_with_the_runs_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Находка 3 финального ревью: `run_assembly.py` передаёт `workspace` в
+    `default_provider`, чтобы тот умел рендерить `ChatMessage.images` в
+    `image_url` (native vision). ~15 провайдерских заглушек по тестам приняли
+    сигнатуру `(models_cfg, store=None, workspace=None)`, ничего не проверяя
+    про третий аргумент — удали передачу `workspace` в build_loop, и весь
+    набор тестов остаётся зелёным, а любое изображение молча вырождается в
+    «недоступно». Этот тест — единственный, что ловит именно такое удаление."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_native_vision_config(ws, tmp_path)
+
+    captured: list[Path | None] = []
+
+    class _CapturingProvider(ModelProvider):
+        async def complete(
+            self,
+            messages: list[ChatMessage],
+            tools: list[ToolDefinition],
+            *,
+            on_text_delta: Callable[[str], None] | None = None,
+        ) -> CompletionResult:
+            return CompletionResult(content="готово", usage=Usage(10, 5), finish_reason="stop")
+
+    def fake_default_provider(
+        models_cfg: object, store: object = None, workspace: Path | None = None
+    ) -> ModelProvider:
+        captured.append(workspace)
+        return _CapturingProvider()
+
+    monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)
+
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    outcome = await runner.run_once("привет", AutonomyMode.YOLO, hooks=RunHooks())
+
+    assert outcome.state is RunState.COMPLETED
+    assert captured == [ws], (
+        "default_provider обязан получить workspace именно этого run'а — "
+        "иначе рендер image_url не найдёт файлы вложений"
+    )
