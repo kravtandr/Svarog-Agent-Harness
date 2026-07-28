@@ -46,3 +46,39 @@ def test_commands_endpoint(service: GatewayService) -> None:
     body = client.get("/commands").json()
     assert [c["name"] for c in body] == [cmd.name for cmd in WEB_COMMANDS]
     assert body[0]["usage"].startswith("/")
+
+
+@pytest.mark.asyncio
+async def test_file_suggestions_come_from_session_workspace(service) -> None:
+    session = await service.create_session(title="файлы")
+    ws = service.workspace
+    (ws / "заметка.md").write_text("текст", encoding="utf-8")
+    (ws / "node_modules").mkdir(exist_ok=True)
+    (ws / "node_modules" / "мусор.js").write_text("//", encoding="utf-8")
+    (ws / ".attachments").mkdir(exist_ok=True)
+    (ws / ".attachments" / "скрин.png").write_bytes(b"\x89PNG")
+
+    found = await service.file_suggestions(session.session_id, "@")
+    paths = [s.value for s in found]
+
+    assert "@заметка.md" in paths
+    assert not any("node_modules" in p for p in paths), "тяжёлые каталоги отфильтрованы"
+    assert not any(".attachments" in p for p in paths), "вложения не засоряют подсказки"
+
+
+@pytest.mark.asyncio
+async def test_files_endpoint_filters_by_query(service) -> None:
+    session = await service.create_session(title="фильтр")
+    (service.workspace / "readme.md").write_text("x", encoding="utf-8")
+    (service.workspace / "прочее.txt").write_text("x", encoding="utf-8")
+    client = TestClient(create_app(service=service))
+
+    body = client.get(f"/sessions/{session.session_id}/files", params={"q": "@read"}).json()
+
+    assert [item["path"] for item in body] == ["readme.md"]
+
+
+@pytest.mark.asyncio
+async def test_files_endpoint_unknown_session_is_404(service) -> None:
+    client = TestClient(create_app(service=service))
+    assert client.get("/sessions/нет/files").status_code == 404

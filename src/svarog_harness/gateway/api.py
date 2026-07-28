@@ -34,6 +34,7 @@ from svarog_harness.gateway.models import (
     DirListing,
     ExecutorOptionView,
     FileEntry,
+    FileSuggestionView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
@@ -308,6 +309,16 @@ def create_app(
             return await service.session_thread(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.get("/sessions/{session_id}/files", response_model=list[FileSuggestionView])
+    async def session_files(
+        session_id: str, service: ServiceDep, q: str = ""
+    ) -> list[FileSuggestionView]:
+        try:
+            found = await service.file_suggestions(session_id, q)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return [FileSuggestionView(path=s.value.removeprefix("@"), label=s.label) for s in found]
 
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:

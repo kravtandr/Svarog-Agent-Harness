@@ -263,3 +263,10 @@ class SlashCommandView(BaseModel):
     name: str
     usage: str
     help: str
+
+
+class FileSuggestionView(BaseModel):
+    """Подсказка `@file` для автодополнения веб-чата."""
+
+    path: str
+    label: str

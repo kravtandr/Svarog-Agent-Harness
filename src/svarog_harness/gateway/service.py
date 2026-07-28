@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from svarog_harness.cli.chat_completion import Suggestion, at_suggestions
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
@@ -985,6 +986,23 @@ class GatewayService:
             return SessionThread(session_id=session.id, title=session.title or "", items=items)
 
         return await self._read(action)
+
+    async def file_suggestions(self, session_id: str, query: str) -> list[Suggestion]:
+        """Подсказки `@file` по workspace сессии.
+
+        Корень — workspace именно сессии, а не сервиса: у сессии может быть
+        своя рабочая папка (ADR-0017), и подсказки обязаны показывать те
+        файлы, которые агент этой сессии действительно увидит.
+        """
+
+        async def action(db: AsyncSession) -> dict[str, object]:
+            session = await find_session_by_prefix(db, session_id)
+            return dict(session.meta or {})
+
+        meta = await self._read(action)
+        workspace = Path(str(meta.get("workspace") or self.workspace))
+        token = query if query.startswith("@") else f"@{query}"
+        return at_suggestions(workspace, token)
 
     # --- память (план 2026-07-27) ------------------------------------------
 
