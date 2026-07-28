@@ -49,6 +49,19 @@ class ToolCallRequest:
 
 
 @dataclass(frozen=True)
+class ImageRef:
+    """Ссылка на изображение в workspace, а не его байты.
+
+    `LoopState.messages` сериализуется в checkpoint после каждого вызова
+    инструмента: пятимегабайтная картинка — это ~6.7 MB base64 в каждом
+    сохранении. Байты читаются один раз, при сборке запроса к провайдеру.
+    """
+
+    path: str  # относительно workspace run'а
+    mime: str
+
+
+@dataclass(frozen=True)
 class ChatMessage:
     """Сообщение диалога в нейтральном формате.
 
@@ -60,6 +73,7 @@ class ChatMessage:
     content: str = ""
     tool_calls: tuple[ToolCallRequest, ...] = ()
     tool_call_id: str | None = None
+    images: tuple[ImageRef, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from svarog_harness.llm.provider import ChatMessage, ToolCallRequest
+from svarog_harness.llm.provider import ChatMessage, ImageRef, ToolCallRequest
 
 
 @dataclass
@@ -133,6 +133,7 @@ def _message_to_dict(message: ChatMessage) -> dict[str, Any]:
         "content": message.content,
         "tool_calls": [_call_to_dict(c) for c in message.tool_calls],
         "tool_call_id": message.tool_call_id,
+        "images": [{"path": i.path, "mime": i.mime} for i in message.images],
     }
 
 
@@ -142,4 +143,8 @@ def _message_from_dict(raw: dict[str, Any]) -> ChatMessage:
         content=raw["content"],
         tool_calls=tuple(_call_from_dict(c) for c in raw["tool_calls"]),
         tool_call_id=raw["tool_call_id"],
+        # .get, а не [...]: checkpoint'ы, записанные до этой работы, ключа не несут.
+        images=tuple(
+            ImageRef(path=str(i["path"]), mime=str(i["mime"])) for i in raw.get("images", [])
+        ),
     )
