@@ -17,6 +17,7 @@ from svarog_harness.gateway.attachments import (
     ensure_git_excluded,
     safe_name,
     store_attachment,
+    verify_attachment,
 )
 from svarog_harness.gitflow import GitRepo
 from svarog_harness.trace.lookup import find_run_by_prefix
@@ -210,6 +211,42 @@ async def test_nul_byte_in_name_rejected_not_500(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_rejects_symlinked_attachments_dir(tmp_path: Path) -> None:
+    """Финальное ревью, находка 2: если `.attachments` сам — симлинк наружу,
+    старый код резолвил `root` на цель симлинка ДО всех проверок — и любой
+    путь внутри неё проходил `is_relative_to(root)`. ПОС ревьюера писал так
+    за пределы workspace и читал файл обратно через GET .../attachments/{name}.
+    Под `sandbox.type: docker` создать такой симлинк может сам агент — значит
+    это реальный побег из bind-mount, не гипотетика."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (ws / ".attachments").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(AttachmentTypeError):
+        await store_attachment(ws, "скрин.png", b"1")
+
+    assert not any(outside.iterdir()), "запись не должна была уйти за пределы workspace"
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_symlinked_attachments_dir(tmp_path: Path) -> None:
+    """Тот же побег, но на пути раздачи (`verify_attachment`, GET-эндпоинт):
+    файл, заранее лежащий вне workspace, не должен становиться читаемым
+    только потому, что `.attachments` — симлинк на его каталог."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "секрет.txt").write_text("не для этой сессии", encoding="utf-8")
+    (ws / ".attachments").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(AttachmentPathError):
+        verify_attachment(ws, ".attachments/секрет.txt")
+
+
+@pytest.mark.asyncio
 async def test_store_hides_attachments_dir_from_git(tmp_path: Path) -> None:
     """store_attachment сам прячет .attachments/ от git — не нужно вызывать
     ensure_git_excluded отдельно на стороне вызывающего кода."""
@@ -351,6 +388,106 @@ async def test_upload_unknown_session_gives_404(service: GatewayService) -> None
         files={"file": ("скрин.png", b"\x89PNG", "image/png")},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_upload_endpoint_rejects_too_large_with_413(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Находка 9 финального ревью: 413 (`AttachmentTooLarge`) был протестирован
+    только на уровне функции (`test_too_large_rejected`), не через реальный
+    эндпоинт — в отличие от 415/409/404 у upload'а. Настоящие 25 МБ не гоняем —
+    понижаем потолок в модуле `api`, тот же приём, что и в `test_read_capped_
+    stops_before_consuming_everything` для внутренней функции."""
+    import svarog_harness.gateway.api as api_module
+
+    monkeypatch.setattr(api_module, "MAX_UPLOAD_BYTES", 4)
+    session = await service.create_session(title="слишком большое")
+    client = TestClient(create_app(service=service))
+
+    response = client.post(
+        f"/sessions/{session.session_id}/attachments",
+        files={"file": ("скрин.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+    )
+
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_send_message_endpoint_rejects_bad_attachment_path_with_400(
+    service: GatewayService,
+) -> None:
+    """Находка 9 финального ревью: 400 (`AttachmentPathError` из `send_message`)
+    был протестирован только как `pytest.raises` на функции сервиса
+    (`test_path_outside_attachments_is_rejected`), не через реальный HTTP-эндпоинт."""
+    session = await service.create_session(title="плохой путь")
+    client = TestClient(create_app(service=service))
+
+    response = client.post(
+        f"/sessions/{session.session_id}/messages",
+        json={"text": "текст", "attachments": ["../../etc/passwd"]},
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_attachments_use_session_workspace_not_service_workspace(
+    service: GatewayService,
+) -> None:
+    """Находка 9 финального ревью: `store_attachment`, `attachment_path` и
+    `send_message` резолвят `meta['workspace'] or self.workspace` — но во всех
+    тестах выше workspace сессии и workspace сервиса совпадают, так что баг,
+    захардкодивший `self.workspace`, был бы невидим (файл ушёл бы не в тот
+    тенант). По образцу `test_file_suggestions_use_named_workspace_not_
+    service_workspace` (tests/test_gateway_completion.py) — именованный
+    workspace (ADR-0017), заведомо другой каталог."""
+    await service.create_workspace("proj")
+    session = await service.create_session(title="именованный", workspace_name="proj")
+    assert session.workspace is not None
+    session_ws = Path(session.workspace)
+    assert session_ws != service.workspace.expanduser().resolve()
+
+    stored = await service.store_attachment(session.session_id, "скрин.png", b"\x89PNG")
+
+    assert (session_ws / stored.path).is_file(), "файл обязан лечь в workspace сессии"
+    assert not (service.workspace / stored.path).exists(), (
+        "и не должен появиться в workspace сервиса"
+    )
+
+    resolved = await service.attachment_path(session.session_id, Path(stored.path).name)
+    assert resolved == (session_ws / stored.path).resolve()
+
+    run_id = await service.send_message(
+        session.session_id, "посмотри", None, attachments=[stored.path]
+    )
+    assert run_id
+
+
+@pytest.mark.asyncio
+async def test_attachment_from_another_session_is_rejected_with_400(
+    service: GatewayService,
+) -> None:
+    """Спецификация (2026-07-28-composer-completion-and-uploads-design.md):
+    «вложение из другой сессии → 400». Прежде эта строка спецификации
+    прикрывалась `test_path_outside_attachments_is_rejected`, которая гоняет
+    `../../etc/passwd` — это обход пути, а не вложение реально другой сессии
+    (находка 9 финального ревью). Здесь вложение — настоящий файл, сохранённый
+    в именованном workspace другой сессии."""
+    await service.create_workspace("a")
+    await service.create_workspace("b")
+    session_a = await service.create_session(title="A", workspace_name="a")
+    session_b = await service.create_session(title="B", workspace_name="b")
+
+    stored_in_b = await service.store_attachment(session_b.session_id, "скрин.png", b"\x89PNG")
+
+    client = TestClient(create_app(service=service))
+    response = client.post(
+        f"/sessions/{session_a.session_id}/messages",
+        json={"text": "смотри", "attachments": [stored_in_b.path]},
+    )
+
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio

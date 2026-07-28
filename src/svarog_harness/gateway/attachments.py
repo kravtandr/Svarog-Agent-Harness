@@ -61,7 +61,18 @@ async def store_attachment(workspace: Path, name: str, data: bytes) -> StoredAtt
         allowed = ", ".join(sorted(ALLOWED_SUFFIXES))
         raise AttachmentTypeError(f"расширение '{suffix}' не поддержано; доступны: {allowed}")
 
-    root = (workspace / ATTACHMENTS_DIR).resolve()
+    ws = workspace.resolve()
+    root = ws / ATTACHMENTS_DIR
+    if root.is_symlink():
+        # `.attachments` сам — симлинк наружу: resolve() ниже увёл бы root на
+        # цель симлинка, и любой последующий is_relative_to(root) проходил бы
+        # для чего угодно внутри неё (находка 2 финального ревью). Симлинк
+        # *внутри* .attachments уже ловится ниже (target.is_relative_to(root));
+        # здесь — сама точка входа.
+        raise AttachmentTypeError(f"{ATTACHMENTS_DIR} — симлинк: отказано")
+    root = root.resolve()
+    if not root.is_relative_to(ws):
+        raise AttachmentTypeError(f"{ATTACHMENTS_DIR} ведёт за пределы рабочей папки")
     root.mkdir(parents=True, exist_ok=True)
     # Префикс-хеш от содержимого и имени: коллизий нет, отказывать при
     # повторной загрузке не нужно, а человеку показывается исходное имя.
@@ -105,7 +116,16 @@ def attachments_note(paths: list[str]) -> str:
 
 def verify_attachment(workspace: Path, rel: str) -> Path:
     """Путь обязан лежать в `.attachments/` этой рабочей папки и существовать."""
-    root = (workspace / ATTACHMENTS_DIR).resolve()
+    ws = workspace.resolve()
+    root = ws / ATTACHMENTS_DIR
+    if root.is_symlink():
+        # См. store_attachment: `.attachments` сам — симлинк наружу обходит
+        # проверку ниже, потому что resolve() увёл бы root на цель симлинка, и
+        # is_relative_to(root) стал бы тривиально верным для чего угодно там.
+        raise AttachmentPathError(f"{ATTACHMENTS_DIR} — симлинк: отказано")
+    root = root.resolve()
+    if not root.is_relative_to(ws):
+        raise AttachmentPathError(f"{ATTACHMENTS_DIR} ведёт за пределы рабочей папки")
     candidate = (workspace / rel).resolve()
     if not candidate.is_relative_to(root):
         raise AttachmentPathError(f"вложение '{rel}' не из {ATTACHMENTS_DIR} этой сессии")
