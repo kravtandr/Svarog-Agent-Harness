@@ -81,21 +81,10 @@ async def fetch_models(
 ) -> list[ModelCard]:
     """Список моделей провайдера. Ключ уходит только в заголовок запроса."""
     url = f"{provider.base_url.rstrip('/')}/models"
-    # Заголовок с ключом отправляем в заголовке Authorization.
-    # Используем byte tuples для поддержки UTF-8 значений в тестах.
-    header_items: list[tuple[bytes, bytes]] = []
-    if api_key:
-        auth_value = f"Bearer {api_key}"
-        header_items.append((b"authorization", auth_value.encode("utf-8")))
-
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-            # Создаём запрос с byte headers
-            request = client.build_request("GET", url)
-            # Заменяем заголовки на версию с поддержкой UTF-8
-            if header_items:
-                request.headers = httpx.Headers(header_items)
-            response = await client.send(request)
+            response = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         raise CatalogError(f"{url}: {exc}") from None
     if response.status_code >= 400:

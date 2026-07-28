@@ -63,15 +63,17 @@ async def test_fetch_uses_base_url_as_is_and_sends_key() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
+        # Проверяем, что заголовок Host не был удален (ADR-0006 compliance).
+        assert request.headers.get("host") is not None, "Host header is mandatory"
         return httpx.Response(200, json={"data": [{"id": "m1"}]})
 
     transport = httpx.MockTransport(handler)
     cards = await fetch_models(
-        _provider("https://openrouter.ai/api/v1/"), "секрет", transport=transport
+        _provider("https://openrouter.ai/api/v1/"), "sk-test-secret", transport=transport
     )
 
     assert seen["url"] == "https://openrouter.ai/api/v1/models"
-    assert seen["auth"] == "Bearer секрет"
+    assert seen["auth"] == "Bearer sk-test-secret"
     assert [c.id for c in cards] == ["m1"]
 
 
