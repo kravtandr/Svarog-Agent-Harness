@@ -3,7 +3,7 @@ import type { ThreadItemView } from "../api/types";
 export type CallStatus = "ok" | "run" | "error";
 
 export type ThreadItem =
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; attachments: string[] }
   | { kind: "say"; id: string; text: string }
   | {
       kind: "call";
@@ -46,6 +46,28 @@ function toStatus(raw: string): CallStatus {
   return "error";
 }
 
+/**
+ * Сервер дописывает к тексту задачи строку вложений через `\n\n`
+ * (`gateway/attachments.py: attachments_note`) — так в трассе видно ровно
+ * то, что получил агент. Дизайн-спека прямо требует, чтобы эта строка
+ * осталась видна в ленте («видно ровно то, что получил агент, без скрытых
+ * добавок») — здесь только извлекаются пути для миниатюр, сам текст не
+ * трогается и не укорачивается.
+ */
+function parseAttachments(raw: string): string[] {
+  const marker = "\n\nВложения (";
+  const at = raw.lastIndexOf(marker);
+  if (at < 0) return [];
+  const line = raw.slice(at + 2); // "Вложения (<подсказка>): путь1, путь2"
+  const sep = line.indexOf("): ");
+  if (sep < 0) return [];
+  return line
+    .slice(sep + 3)
+    .split(", ")
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+}
+
 /** `github/list_issues` → сервер и имя; свой инструмент — сервер null. */
 function splitTool(tool: string): { server: string | null; name: string } {
   const at = tool.lastIndexOf("/");
@@ -55,8 +77,14 @@ function splitTool(tool: string): { server: string | null; name: string } {
 
 export function fromHistory(items: ThreadItemView[]): ThreadItem[] {
   return items.map((item): ThreadItem => {
-    if (item.kind === "user")
-      return { kind: "user", id: nextId(), text: item.text };
+    if (item.kind === "user") {
+      return {
+        kind: "user",
+        id: nextId(),
+        text: item.text,
+        attachments: parseAttachments(item.text),
+      };
+    }
     if (item.kind === "say")
       return { kind: "say", id: nextId(), text: item.text };
     return {

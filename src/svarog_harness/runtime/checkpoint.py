@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from svarog_harness.llm.provider import ChatMessage, ToolCallRequest
+from svarog_harness.llm.provider import ChatMessage, ImageRef, ToolCallRequest
 
 
 @dataclass
@@ -28,6 +28,14 @@ class LoopState:
     # prompt_tokens последнего ответа провайдера — триггер микрокомпакции (§1.4).
     last_prompt_tokens: int = 0
     pending_tool_calls: tuple[ToolCallRequest, ...] = ()
+    # Буфер user-сообщений с изображениями внутри текущего хода (блок C §1):
+    # tool-результаты с картинками копятся здесь, пока `pending_tool_calls` не
+    # опустеет, и переносятся в `messages` одним куском ПОСЛЕ хода целиком —
+    # иначе они врезаются между tool-ответами одного ассистентского хода, и
+    # openai-совместимый контракт отклоняет запрос (соседние tool-сообщения
+    # обязаны идти подряд). Переживает checkpoint — resume посреди хода не
+    # должен терять уже накопленные картинки.
+    pending_images: tuple[ChatMessage, ...] = ()
     # Итераций с последнего refuel; при пороге контекст сбрасывается (§6.10).
     iterations_since_refuel: int = 0
     # Сколько автоматических продолжений после refuel уже израсходовано
@@ -68,6 +76,7 @@ class LoopState:
             "cost_usd": self.cost_usd,
             "last_prompt_tokens": self.last_prompt_tokens,
             "pending_tool_calls": [_call_to_dict(c) for c in self.pending_tool_calls],
+            "pending_images": [_message_to_dict(m) for m in self.pending_images],
             "iterations_since_refuel": self.iterations_since_refuel,
             "refuel_rounds": self.refuel_rounds,
             "tool_usage": self.tool_usage,
@@ -95,6 +104,9 @@ class LoopState:
             cost_usd=raw["cost_usd"],
             last_prompt_tokens=raw.get("last_prompt_tokens", 0),
             pending_tool_calls=tuple(_call_from_dict(c) for c in raw["pending_tool_calls"]),
+            # .get, а не [...]: checkpoint'ы, записанные до этой работы, ключа не несут —
+            # к моменту чтения ход всегда завершён, буфер пуст.
+            pending_images=tuple(_message_from_dict(m) for m in raw.get("pending_images", [])),
             iterations_since_refuel=raw.get("iterations_since_refuel", raw["iterations"]),
             refuel_rounds=raw.get("refuel_rounds", 0),
             tool_usage={str(k): int(v) for k, v in raw.get("tool_usage", {}).items()},
@@ -133,6 +145,7 @@ def _message_to_dict(message: ChatMessage) -> dict[str, Any]:
         "content": message.content,
         "tool_calls": [_call_to_dict(c) for c in message.tool_calls],
         "tool_call_id": message.tool_call_id,
+        "images": [{"path": i.path, "mime": i.mime} for i in message.images],
     }
 
 
@@ -142,4 +155,8 @@ def _message_from_dict(raw: dict[str, Any]) -> ChatMessage:
         content=raw["content"],
         tool_calls=tuple(_call_from_dict(c) for c in raw["tool_calls"]),
         tool_call_id=raw["tool_call_id"],
+        # .get, а не [...]: checkpoint'ы, записанные до этой работы, ключа не несут.
+        images=tuple(
+            ImageRef(path=str(i["path"]), mime=str(i["mime"])) for i in raw.get("images", [])
+        ),
     )

@@ -40,10 +40,58 @@
 .chat__error {
   margin: 26px 0;
   color: var(--bad);
+  /* /help выводит список команд по одному на строку — перенос должен
+     остаться настоящим, а не схлопнуться пробелом. */
+  white-space: pre-line;
 }
 
 .chat__hint {
   margin: 26px 0;
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.chat__thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat__thumb {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+/* Вложение, для которого сервер не отдаёт inline (не картинка из белого
+   списка) — именованный чип вместо сломанного <img>. */
+.chat__doc {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.chat__upload-error {
+  max-width: 700px;
+  margin: 0 auto 12px;
+  padding: 0 24px;
+}
+
+/* Тот же прямоугольник, что у .chat__upload-error (лента вложений сидит
+   прямо над композером, а не в потоке .chat__thread с его 26px-отступами
+   для реплик) — приглушённый цвет вместо тревожного, это не ошибка. */
+.chat__upload-pending {
+  max-width: 700px;
+  margin: 0 auto 12px;
+  padding: 0 24px;
   color: var(--muted);
 }
 

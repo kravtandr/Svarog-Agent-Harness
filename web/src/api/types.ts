@@ -130,25 +130,19 @@ export interface MemoryFile {
 /** Значения AutonomyMode сервера (config/schema.py). */
 export type Autonomy = "supervised" | "auto" | "yolo";
 
-export const AUTONOMY_LABELS: Record<Autonomy, string> = {
-  supervised: "под надзором",
-  auto: "авто",
-  yolo: "без тормозов",
-};
-
 /** Значения executor.type сервера (config/schema.py). */
 export type ExecutorKind = "native" | "external";
-
-export const EXECUTOR_LABELS: Record<ExecutorKind, string> = {
-  native: "нативный цикл",
-  external: "внешний агент",
-};
 
 /** Выбор в поле ввода: свойство сообщения, конфиг не меняется. */
 export interface RunOverride {
   executor?: ExecutorKind;
   provider?: string;
   model?: string;
+  // Адаптер внешнего агента; null для native — сервер трактует отсутствие
+  // поля как «взять из конфига». Три варианта, а не string: сервер сам
+  // сузил их до Literal (gateway/models.py), молчаливое расхождение здесь
+  // было бы багом.
+  adapter?: "claude-code" | "codex" | "opencode";
 }
 
 export interface ProviderCard {
@@ -164,4 +158,35 @@ export interface ModelCard {
   context_length: number | null;
   input_usd_per_mtok: number | null;
   output_usd_per_mtok: number | null;
+}
+
+/** Одна запись из GET /executors: значение выбора исполнителя в композере. */
+export interface ExecutorOption {
+  value: string;
+  kind: ExecutorKind;
+  adapter: string | null;
+  available: boolean;
+  is_active: boolean;
+}
+
+/** Слэш-команда из GET /commands (автодополнение композера). */
+export interface SlashCommand {
+  name: string;
+  usage: string;
+  help: string;
+}
+
+/** Подсказка файла из GET /sessions/{id}/files для «@file»-автодополнения. */
+export interface FileSuggestion {
+  path: string;
+  label: string;
+}
+
+/** Результат загрузки вложения через POST /sessions/{id}/attachments. */
+export interface Attachment {
+  path: string;
+  name: string;
+  size_bytes: number;
+  mime: string | null;
+  too_large_for_vision: boolean;
 }

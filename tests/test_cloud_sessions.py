@@ -94,7 +94,9 @@ def client(service: GatewayService) -> TestClient:
 
 
 def _install_provider(monkeypatch: pytest.MonkeyPatch, provider: ModelProvider) -> None:
-    def fake_default_provider(models_cfg: ModelsConfig, store: object = None) -> ModelProvider:
+    def fake_default_provider(
+        models_cfg: ModelsConfig, store: object = None, workspace: object = None
+    ) -> ModelProvider:
         return provider
 
     monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)

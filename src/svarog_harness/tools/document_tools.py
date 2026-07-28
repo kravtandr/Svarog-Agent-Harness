@@ -190,5 +190,8 @@ class ReadImageTool(Tool[ReadImageArgs]):
         return ToolResult(
             ok=True,
             output=f"изображение {args.path} ({mime}, {size} байт)",
-            blocks=[{"type": "image", "data": data, "mimeType": mime}],
+            # path — для нативного цикла: по нему строится ImageRef, который
+            # переживает checkpoint вместо base64. Мост снимает ключ перед
+            # отдачей блока в MCP.
+            blocks=[{"type": "image", "data": data, "mimeType": mime, "path": args.path}],
         )

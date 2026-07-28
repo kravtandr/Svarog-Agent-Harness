@@ -43,6 +43,11 @@ from svarog_harness.storage.db import create_engine, create_session_factory, ini
 from svarog_harness.storage.models import Approval, MemoryProposal, Run, SkillProposal
 from svarog_harness.tools.approval import RequestApprovalTool
 from svarog_harness.tools.child_tools import SpawnChildCallback, SpawnChildRunTool
+from svarog_harness.tools.document_tools import (
+    ReadDocumentTool,
+    ReadImageTool,
+    document_tools_available,
+)
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.memory_tools import (
     ProposeMemoryChangeTool,
@@ -336,7 +341,9 @@ class RunAssembly:
             profile=profile,
         )
         return AgentLoop(
-            default_provider(cfg.models, self._host_store),  # host-скоуп (ADR-0014 #2)
+            default_provider(
+                cfg.models, self._host_store, workspace
+            ),  # host-скоуп (ADR-0014 #2); workspace — для рендера image_url
             registry,
             recorder,
             cfg.runtime,
@@ -523,6 +530,12 @@ class RunAssembly:
             return registry
         for tool in file_tools(self._workspace):
             registry.register(tool)
+        # Картинки и документы — те же инструменты, что у внешнего агента
+        # (bridge_control.py). read_image зависимостей не имеет; read_document
+        # требует опциональной группы docs.
+        registry.register(ReadImageTool(self._workspace))
+        if document_tools_available():
+            registry.register(ReadDocumentTool(self._workspace))
         registry.register(
             UpdatePlanTool(
                 on_update=lambda items, note: plan_update_sink.append(

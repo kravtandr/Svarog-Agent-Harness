@@ -155,6 +155,13 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           loading={loading}
           error={error}
           token={token}
+          onNew={() => void startNew()}
+          // "Перейти к списку чатов" здесь — фокус на уже видимый навигатор
+          // (он показан на всех разделах), а не переключение section: тот
+          // же список сессий, что открывает "＋ Новый чат".
+          onSessions={() =>
+            document.querySelector<HTMLButtonElement>(".nav__new")?.focus()
+          }
         />
       )}
     </Shell>

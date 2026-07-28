@@ -1,7 +1,10 @@
 import type {
+  Attachment,
   Autonomy,
   ConfigDiff,
   ConfigView,
+  ExecutorOption,
+  FileSuggestion,
   MemoryFile,
   MemoryHit,
   MemoryPage,
@@ -16,6 +19,7 @@ import type {
   SessionSummary,
   SessionThread,
   SkillCard,
+  SlashCommand,
 } from "./types";
 
 /** Значения формы: путь поля → новое значение. */
@@ -46,8 +50,13 @@ export interface Api {
     text: string,
     autonomy?: Autonomy,
     override?: RunOverride,
+    attachments?: string[],
   ): Promise<RunRef>;
   decideApproval(approvalId: string, approved: boolean): Promise<RunRef>;
+  executors(): Promise<ExecutorOption[]>;
+  commands(): Promise<SlashCommand[]>;
+  sessionFiles(sessionId: string, q: string): Promise<FileSuggestion[]>;
+  uploadAttachment(sessionId: string, file: File): Promise<Attachment>;
   config(): Promise<ConfigView>;
   previewConfig(values: ConfigValues): Promise<ConfigDiff>;
   saveConfig(values: ConfigValues): Promise<ConfigDiff>;
@@ -65,9 +74,12 @@ export interface Api {
 
 export function createClient({ baseUrl, token }: ClientOptions): Api {
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-    };
+    // FormData (загрузка вложений) — без content-type: браузер сам
+    // проставит его вместе с multipart-boundary, руками это не собрать.
+    const isFormData = init.body instanceof FormData;
+    const headers: Record<string, string> = isFormData
+      ? {}
+      : { "content-type": "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(`${baseUrl}${path}`, { ...init, headers });
     if (!response.ok) {
@@ -116,7 +128,7 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
         throw new ApiError(response.status, detail);
       }
     },
-    sendMessage: (sessionId, text, autonomy, override) =>
+    sendMessage: (sessionId, text, autonomy, override, attachments) =>
       request<RunRef>(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: "POST",
         // Пустые поля не отправляем: сервер трактует отсутствие как
@@ -127,6 +139,8 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
           ...(override?.executor ? { executor: override.executor } : {}),
           ...(override?.provider ? { provider: override.provider } : {}),
           ...(override?.model ? { model: override.model } : {}),
+          ...(override?.adapter ? { adapter: override.adapter } : {}),
+          ...(attachments?.length ? { attachments } : {}),
         }),
       }),
     decideApproval: (approvalId, approved) =>
@@ -159,5 +173,19 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
     providers: () => request<ProviderCard[]>("/models"),
     providerModels: (name) =>
       request<ModelCard[]>(`/models/${encodeURIComponent(name)}`),
+    executors: () => request<ExecutorOption[]>("/executors"),
+    commands: () => request<SlashCommand[]>("/commands"),
+    sessionFiles: (sessionId, q) =>
+      request<FileSuggestion[]>(
+        `/sessions/${encodeURIComponent(sessionId)}/files?q=${encodeURIComponent(q)}`,
+      ),
+    uploadAttachment: (sessionId, file) => {
+      const form = new FormData();
+      form.append("file", file);
+      return request<Attachment>(
+        `/sessions/${encodeURIComponent(sessionId)}/attachments`,
+        { method: "POST", body: form },
+      );
+    },
   };
 }

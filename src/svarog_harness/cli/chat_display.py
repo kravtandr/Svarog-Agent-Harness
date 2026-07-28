@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,13 +19,8 @@ from rich.text import Text
 
 from svarog_harness import __version__
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig
+from svarog_harness.runtime.agents import EXTERNAL_ADAPTERS, adapter_available
 
-_EXTERNAL_ADAPTERS = ("claude-code", "codex", "opencode")
-_ADAPTER_BINARIES = {
-    "claude-code": "claude",
-    "codex": "codex",
-    "opencode": "opencode",
-}
 _MODE_LOCAL = "локальный loop"
 _MODE_CLOUD = "cloud-агент"
 MODE_LOCAL = _MODE_LOCAL
@@ -198,20 +192,14 @@ def _native_executor_label(cfg: SvarogConfig) -> str:
     return f"native/{detail}"
 
 
-def _adapter_available(name: str) -> bool:
-    """Host CLI адаптера в PATH (detection для каталога external)."""
-    binary = _ADAPTER_BINARIES.get(name)
-    return binary is not None and shutil.which(binary) is not None
-
-
 def chat_status_view(cfg: SvarogConfig, autonomy: AutonomyMode) -> ChatStatusView:
     """Доступные executors (каталог + detection), mode local/cloud, policy profile."""
     native = _native_executor_label(cfg)
     configured = cfg.executor.external.adapter if cfg.executor.external is not None else None
 
     executors: list[str] = [native]
-    for adapter in _EXTERNAL_ADAPTERS:
-        if adapter == configured or _adapter_available(adapter):
+    for adapter in EXTERNAL_ADAPTERS:
+        if adapter == configured or adapter_available(adapter):
             label = f"external/{adapter}"
             if label not in executors:
                 executors.append(label)

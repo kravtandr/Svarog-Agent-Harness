@@ -1,0 +1,71 @@
+/* Полоса чипов над полем ввода: сама коробка не позиционируется — этим
+   займётся композер (задача 14), здесь только внешний вид ряда. */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attachments__chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 6px 5px 8px;
+  border-radius: 999px;
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-family: var(--sans);
+  font-size: 12.5px;
+}
+
+.attachments__icon {
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
+.attachments__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachments__remove {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.attachments__remove:hover {
+  background: var(--line);
+  color: var(--text);
+}
+
+/* Занимает всю ширину чипа, чтобы уйти на отдельную строку внутри него,
+   а не растягивать чип вбок. */
+.attachments__warning {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--bad);
+  font-size: 11.5px;
+}

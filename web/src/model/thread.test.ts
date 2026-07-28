@@ -150,6 +150,40 @@ describe("нормализация ленты", () => {
   });
 });
 
+describe("вложения в истории", () => {
+  it("вынимает пути вложений, но не трогает и не укорачивает текст", () => {
+    // Спека прямо требует, чтобы строка "Вложения (...)" осталась видна в
+    // ленте — человек должен видеть ровно то, что получил агент, без
+    // скрытых добавок. attachments — это дополнительное поле для миниатюр,
+    // а не замена text.
+    const raw =
+      "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png";
+    const [item] = fromHistory([view({ kind: "user", text: raw })]);
+    expect(item).toMatchObject({
+      kind: "user",
+      text: raw,
+      attachments: [".attachments/ab_скрин.png"],
+    });
+  });
+
+  it("несколько вложений разбираются по запятой", () => {
+    const [item] = fromHistory([
+      view({
+        kind: "user",
+        text: "вот файлы\n\nВложения (прочитай их read_image / read_document): .attachments/a.png, .attachments/b.pdf",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      attachments: [".attachments/a.png", ".attachments/b.pdf"],
+    });
+  });
+
+  it("сообщение без вложений — пустой список, а не потерянный текст", () => {
+    const [item] = fromHistory([view({ kind: "user", text: "просто текст" })]);
+    expect(item).toMatchObject({ text: "просто текст", attachments: [] });
+  });
+});
+
 describe("итог запуска", () => {
   it("показывает провал, а не оставляет ленту в тишине", () => {
     const items = feed([

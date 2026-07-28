@@ -263,7 +263,7 @@ class BridgeControl:
         if result.ok and result.blocks:
             # Бинарные блоки redaction не проходят: источник ограничен
             # workspace, секреты в байтах картинок не живут (spec 2026-07-24).
-            return result.blocks, False
+            return _mcp_blocks(result.blocks), False
         return [{"type": "text", "text": text}], not result.ok
 
     async def _flush_side_effects(self) -> None:
@@ -460,6 +460,11 @@ _REQUEST_APPROVAL_DEF = {
         "required": ["action"],
     },
 }
+
+
+def _mcp_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Блоки для MCP-потребителя без наших служебных ключей."""
+    return [{k: v for k, v in block.items() if k != "path"} for block in blocks]
 
 
 def _rpc_result(msg_id: object, result: dict[str, Any]) -> dict[str, Any]:

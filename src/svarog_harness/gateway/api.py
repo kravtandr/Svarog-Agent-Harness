@@ -12,7 +12,17 @@ import os
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,18 +30,28 @@ from starlette.background import BackgroundTask
 
 from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
+from svarog_harness.gateway.attachments import (
+    MAX_UPLOAD_BYTES,
+    AttachmentPathError,
+    AttachmentTooLarge,
+    AttachmentTypeError,
+)
 from svarog_harness.gateway.catalog import CatalogError
+from svarog_harness.gateway.commands import WEB_COMMANDS
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
     ApprovalDecisionRequest,
     ApprovalView,
+    AttachmentView,
     CancelView,
     CreateRunRequest,
     CreateSessionRequest,
     CreateWorkspaceRequest,
     DirListing,
+    ExecutorOptionView,
     FileEntry,
+    FileSuggestionView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
@@ -47,6 +67,7 @@ from svarog_harness.gateway.models import (
     SessionThread,
     SessionView,
     SkillCard,
+    SlashCommandView,
     WhoamiView,
     WorkspaceView,
 )
@@ -72,12 +93,30 @@ from svarog_harness.gitflow.provision import (
 from svarog_harness.llm.openai_compatible import ApiKeyError
 from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.tenant.quota import QuotaExceededError
+from svarog_harness.tools.document_tools import _IMAGE_MIME
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
     RunNotFoundError,
     SessionNotFoundError,
 )
 from svarog_harness.trace.recorder import WorkspaceBusyError
+
+
+async def _read_capped(file: UploadFile, limit: int) -> bytes:
+    """Прочитать тело с потолком: за лимитом обрываем, не дочитывая до конца.
+
+    Иначе `MAX_UPLOAD_BYTES` проверялся бы уже после того, как всё тело
+    оказалось в памяти, — то есть не защищал бы ровно от того, ради чего
+    заведён (ADR-0014: тенантов в процессе может быть несколько).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise AttachmentTooLarge(f"файл больше потолка {limit} байт")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def create_app(
@@ -159,6 +198,10 @@ def create_app(
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/commands", response_model=list[SlashCommandView])
+    async def list_commands() -> list[SlashCommandView]:
+        return [SlashCommandView(**vars(cmd)) for cmd in WEB_COMMANDS]
+
     @app.post("/runs", response_model=RunRef, status_code=201)
     async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:
         try:
@@ -233,6 +276,12 @@ def create_app(
     async def whoami(service: ServiceDep) -> WhoamiView:
         return await service.whoami()
 
+    # --- исполнители composer'а (задача 3) ---------------------------------
+
+    @app.get("/executors", response_model=list[ExecutorOptionView])
+    async def list_executors(service: ServiceDep) -> list[ExecutorOptionView]:
+        return [ExecutorOptionView(**vars(option)) for option in service.executor_options()]
+
     # --- каталог моделей (задача 6) ---------------------------------------
 
     @app.get("/models", response_model=list[ProviderView])
@@ -296,6 +345,57 @@ def create_app(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
+    @app.get("/sessions/{session_id}/files", response_model=list[FileSuggestionView])
+    async def session_files(
+        session_id: str, service: ServiceDep, q: str = ""
+    ) -> list[FileSuggestionView]:
+        try:
+            found = await service.file_suggestions(session_id, q)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return [FileSuggestionView(path=s.value.removeprefix("@"), label=s.label) for s in found]
+
+    @app.post(
+        "/sessions/{session_id}/attachments",
+        response_model=AttachmentView,
+        status_code=201,
+    )
+    async def upload_attachment(
+        session_id: str, service: ServiceDep, file: Annotated[UploadFile, File()]
+    ) -> AttachmentView:
+        try:
+            # Читаем с тем же потолком, что и store_attachment: иначе тело
+            # целиком осядет в памяти ещё до того, как размер кто-то проверит.
+            data = await _read_capped(file, MAX_UPLOAD_BYTES)
+            stored = await service.store_attachment(session_id, file.filename or "файл", data)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except AttachmentTypeError as exc:
+            raise HTTPException(status_code=415, detail=str(exc)) from None
+        except AttachmentTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from None
+        return AttachmentView(**vars(stored))
+
+    @app.get("/sessions/{session_id}/attachments/{name}")
+    async def read_attachment(session_id: str, name: str, service: ServiceDep) -> FileResponse:
+        try:
+            path = await service.attachment_path(session_id, name)
+        except (SessionNotFoundError, AttachmentPathError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        mime = _IMAGE_MIME.get(path.suffix.lower())
+        if mime is not None:
+            # Картинка — единственный сегодняшний потребитель (<img> в
+            # ChatScreen); content-type задаём явно из белого списка, не
+            # угадываем голым FileResponse.
+            return FileResponse(path, media_type=mime)
+        # Всё остальное — включая .html из белого списка загрузки — только
+        # как скачивание. SPA раздаётся с этого же origin, где в
+        # sessionStorage лежит bearer-токен: открытая по прямой ссылке
+        # .html-страница не должна получить шанс исполниться в этом origin.
+        return FileResponse(path, filename=name)
+
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
         try:
@@ -303,7 +403,13 @@ def create_app(
                 session_id,
                 req.text,
                 req.autonomy,
-                RunOverride(executor=req.executor, provider=req.provider, model=req.model),
+                RunOverride(
+                    executor=req.executor,
+                    provider=req.provider,
+                    model=req.model,
+                    adapter=req.adapter,
+                ),
+                attachments=req.attachments,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -323,6 +429,8 @@ def create_app(
             # Выбор в поле ввода несовместим с конфигом — это ввод человека,
             # а не сбой сервера: 422 с текстом, который говорит, что делать.
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        except AttachmentPathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------

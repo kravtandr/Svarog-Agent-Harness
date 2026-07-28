@@ -90,7 +90,7 @@ def test_status_view_native_lists_modes_and_default_policy(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
-        "svarog_harness.cli.chat_display._adapter_available",
+        "svarog_harness.cli.chat_display.adapter_available",
         lambda name: False,
     )
     cfg = _cfg(tmp_path, _minimal_yaml(tmp_path, "sandbox:\n  type: local-trusted\n"))
@@ -109,7 +109,7 @@ def test_status_view_includes_detected_and_configured_adapters(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
-        "svarog_harness.cli.chat_display._adapter_available",
+        "svarog_harness.cli.chat_display.adapter_available",
         lambda name: name == "codex",
     )
     cfg = _cfg(
@@ -139,7 +139,7 @@ def test_status_view_policy_profile_matches_autonomy(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
-        "svarog_harness.cli.chat_display._adapter_available",
+        "svarog_harness.cli.chat_display.adapter_available",
         lambda _name: False,
     )
     cfg = _cfg(

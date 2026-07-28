@@ -155,6 +155,11 @@ class SendMessageRequest(BaseModel):
     executor: Literal["native", "external"] | None = None
     provider: str | None = None
     model: str | None = None
+    # Адаптер внешнего агента — тоже выбор в поле ввода, а не правка
+    # svarog.yaml; None — взять адаптер из конфига (см. RunOverride.adapter).
+    adapter: Literal["claude-code", "codex", "opencode"] | None = None
+    # Относительные пути из `.attachments/` этой сессии (задача 7).
+    attachments: list[str] = []
 
 
 class SessionView(BaseModel):
@@ -210,6 +215,16 @@ class SecretView(BaseModel):
     present: bool
 
 
+class ExecutorOptionView(BaseModel):
+    """Вариант исполнителя для селекта поля ввода (задача 3)."""
+
+    value: str
+    kind: Literal["native", "external"]
+    adapter: str | None = None
+    available: bool
+    is_active: bool
+
+
 class ThreadItemView(BaseModel):
     """Элемент ленты в той же форме, в какой его собирает живой поток.
 
@@ -245,3 +260,28 @@ class SessionSummary(BaseModel):
     updated_at: datetime
     runs_count: int
     last_state: str | None = None
+
+
+class SlashCommandView(BaseModel):
+    """Слэш-команда веб-чата для автодополнения и справки."""
+
+    name: str
+    usage: str
+    help: str
+
+
+class FileSuggestionView(BaseModel):
+    """Подсказка `@file` для автодополнения веб-чата."""
+
+    path: str
+    label: str
+
+
+class AttachmentView(BaseModel):
+    """Ответ на загрузку вложения (задача 7)."""
+
+    path: str
+    name: str
+    size_bytes: int
+    mime: str | None = None
+    too_large_for_vision: bool = False

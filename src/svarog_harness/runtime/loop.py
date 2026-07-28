@@ -12,6 +12,7 @@ Tool calls фиксируются в checkpoint до исполнения (write
 import asyncio
 import contextlib
 import hashlib
+import posixpath
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -26,6 +27,7 @@ from svarog_harness.gitflow.workspace import WorkspaceFlow
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
+    ImageRef,
     ModelProvider,
     ToolCallRequest,
 )
@@ -44,6 +46,7 @@ from svarog_harness.runtime.summaries import short_result
 from svarog_harness.secrets import redact
 from svarog_harness.storage.models import Approval, ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
+from svarog_harness.tools.document_tools import _CONTAINER_WORKSPACE
 from svarog_harness.tools.guidance import BoundaryKind, note_for
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
 from svarog_harness.tools.user_tools import ASK_USER_TOOL_NAME, question_options
@@ -512,6 +515,14 @@ class AgentLoop:
         безопасно, в батче только читающие вызовы. Остальные вызовы — по
         одному, как раньше.
 
+        Изображения из tool-результатов не дописываются в `state.messages`
+        сразу (блок C §1): openai-совместимый контракт требует, чтобы все
+        tool-сообщения одного ассистентского хода шли подряд, а вызовов в
+        `pending_tool_calls` может быть несколько — user-сообщение с картинкой
+        после первого же результата развело бы второй tool-ответ от его хода.
+        Вместо этого они копятся в `state.pending_images` и переносятся в
+        историю одним куском ниже, когда весь `pending_tool_calls` исчерпан.
+
         Возвращает, был ли хотя бы один успешный результат (сырьё для
         детектора затухающей отдачи, §1.6).
         """
@@ -535,10 +546,33 @@ class AgentLoop:
             rendered = self._render_tool_result(run, call, tool_result)
             state.messages.append(ChatMessage(role="tool", content=rendered, tool_call_id=call.id))
             await self._record_message(run, "tool", {"tool_call_id": call.id, "content": rendered})
+            images = self._image_refs(tool_result)
+            if images:
+                note = ChatMessage(
+                    role="user", content=f"Изображение из {call.name}:", images=images
+                )
+                state.pending_images = (*state.pending_images, note)
             state.pending_tool_calls = state.pending_tool_calls[1:]
             with self._phases.measure("checkpoint"):
                 await self._save_checkpoint(run, state)
+        await self._flush_pending_images(run, state)
         return had_success
+
+    async def _flush_pending_images(self, run: Run, state: LoopState) -> None:
+        """Перенести буфер картинок хода в историю — после, а не внутри хода.
+
+        Вызывается только когда `pending_tool_calls` полностью исчерпан:
+        порядок обязателен — без tool-ответа на каждый tool_call_id ход
+        остаётся неотвеченным, и провайдер отклонит запрос.
+        """
+        if not state.pending_images:
+            return
+        for note in state.pending_images:
+            state.messages.append(note)
+            await self._record_message(run, "user", {"content": note.content})
+        state.pending_images = ()
+        with self._phases.measure("checkpoint"):
+            await self._save_checkpoint(run, state)
 
     def _concurrency_safe_prefix(
         self, run: Run, calls: tuple[ToolCallRequest, ...]
@@ -623,10 +657,51 @@ class AgentLoop:
             await self._record_message(
                 run, "tool", {"tool_call_id": prepared.call.id, "content": rendered}
             )
+            images = self._image_refs(result)
+            if images:
+                # Буферизуется, не дописывается сразу — см. docstring
+                # _execute_pending: батч может быть частью хода с другими
+                # ещё не исполненными вызовами.
+                note = ChatMessage(
+                    role="user", content=f"Изображение из {prepared.call.name}:", images=images
+                )
+                state.pending_images = (*state.pending_images, note)
         await self._flush_skill_loads(run)
         state.pending_tool_calls = state.pending_tool_calls[len(batch) :]
         await self._save_checkpoint(run, state)
         return had_success
+
+    @staticmethod
+    def _image_refs(result: ToolResult) -> tuple[ImageRef, ...]:
+        """Ссылки на изображения из блоков результата; чужие блоки игнорируются.
+
+        Путь нормализуется к относительному от workspace до попадания в
+        ImageRef: агент в контейнере видит workspace смонтированным в
+        `_CONTAINER_WORKSPACE` и передаёт путь вида `/workspace/шот.png`
+        (resolve_workspace_path, tools/document_tools.py, прогон S28) —
+        абсолютный путь по семантике Path выигрывает при склейке и увёл бы
+        рендер (задача 3) за пределы workspace. Рендер уже отказывает
+        fail-closed на таком пути — это второй рубеж, а не замена нормализации
+        здесь. Путь, который и после снятия префикса выходит за пределы
+        workspace (`..`, оставшийся абсолютным), отбрасывается — ссылка на
+        такой блок не создаётся вовсе.
+        """
+        refs: list[ImageRef] = []
+        for block in result.blocks or ():
+            if block.get("type") != "image":
+                continue
+            path, mime = block.get("path"), block.get("mimeType")
+            if not isinstance(path, str) or not isinstance(mime, str):
+                continue
+            if path == _CONTAINER_WORKSPACE or path.startswith(_CONTAINER_WORKSPACE + "/"):
+                path = path[len(_CONTAINER_WORKSPACE) + 1 :]
+            normalized = posixpath.normpath(path) if path else ""
+            if not normalized or normalized == ".." or normalized.startswith("../"):
+                continue
+            if posixpath.isabs(normalized):
+                continue
+            refs.append(ImageRef(path=normalized, mime=mime))
+        return tuple(refs)
 
     async def _flush_skill_loads(self, run: Run) -> None:
         """Записать SkillLoad для скиллов, загруженных read_skill (ADR-0009)."""

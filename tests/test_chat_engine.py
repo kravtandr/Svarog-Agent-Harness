@@ -46,7 +46,9 @@ class ScriptedProvider(ModelProvider):
 def provider(monkeypatch: pytest.MonkeyPatch) -> ScriptedProvider:
     scripted = ScriptedProvider()
 
-    def fake_default_provider(models_cfg: object, store: object = None) -> ModelProvider:
+    def fake_default_provider(
+        models_cfg: object, store: object = None, workspace: object = None
+    ) -> ModelProvider:
         return scripted
 
     monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)
