@@ -21,6 +21,7 @@ from starlette.background import BackgroundTask
 from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
 from svarog_harness.gateway.catalog import CatalogError
+from svarog_harness.gateway.commands import WEB_COMMANDS
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
@@ -48,6 +49,7 @@ from svarog_harness.gateway.models import (
     SessionThread,
     SessionView,
     SkillCard,
+    SlashCommandView,
     WhoamiView,
     WorkspaceView,
 )
@@ -159,6 +161,10 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/commands", response_model=list[SlashCommandView])
+    async def list_commands() -> list[SlashCommandView]:
+        return [SlashCommandView(**vars(cmd)) for cmd in WEB_COMMANDS]
 
     @app.post("/runs", response_model=RunRef, status_code=201)
     async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:

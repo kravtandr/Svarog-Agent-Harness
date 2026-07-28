@@ -255,3 +255,11 @@ class SessionSummary(BaseModel):
     updated_at: datetime
     runs_count: int
     last_state: str | None = None
+
+
+class SlashCommandView(BaseModel):
+    """Слэш-команда веб-чата для автодополнения и справки."""
+
+    name: str
+    usage: str
+    help: str
