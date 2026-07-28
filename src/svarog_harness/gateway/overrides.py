@@ -149,6 +149,10 @@ def apply_override(
     update: dict[str, object] = {}
 
     if ov.adapter is not None:
+        if ov.adapter not in EXTERNAL_ADAPTERS:
+            raise OverrideError(
+                f"неизвестный адаптер '{ov.adapter}'; известны: {', '.join(EXTERNAL_ADAPTERS)}"
+            )
         kind = ov.executor if ov.executor is not None else cfg.executor.type
         if kind != "external":
             raise OverrideError(

@@ -88,3 +88,22 @@ def test_adapter_round_trips_through_meta() -> None:
     assert ov.to_meta() == {"executor": "external", "adapter": "opencode"}
     assert RunOverride.from_meta({"override": ov.to_meta()}) == ov
     assert RunOverride.from_meta({"override": {"adapter": 42}}).adapter is None
+
+
+def test_unknown_adapter_is_rejected_even_with_custom_image(tmp_path: Path) -> None:
+    """Регрессия: с кастомным образом ветка подмены образа не выполняется,
+    и без отдельной проверки неизвестное имя адаптера уходило прямиком в
+    model_copy — мимо любой валидации (pydantic не перепроверяет Literal
+    при model_copy)."""
+    cfg = _config(tmp_path, image="registry.example/custom:1")
+    with pytest.raises(OverrideError, match="totally-bogus-adapter"):
+        apply_override(cfg, RunOverride(executor="external", adapter="totally-bogus-adapter"))
+
+
+def test_adapter_only_override_on_already_external_config(tmp_path: Path) -> None:
+    """executor не задан в override — исполнитель берётся из cfg (уже
+    external), но адаптер и образ всё равно должны подмениться."""
+    cfg = _config(tmp_path)
+    derived = apply_override(cfg, RunOverride(adapter="opencode"))
+    assert derived.executor.external.adapter == "opencode"
+    assert derived.executor.external.image == DEFAULT_OPENCODE_IMAGE
