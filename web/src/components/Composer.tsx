@@ -28,7 +28,7 @@ export function Composer({
   onSend: (text: string) => void;
   autonomy: Autonomy;
   onAutonomyChange: (autonomy: Autonomy) => void;
-  executor: ExecutorKind;
+  executor: ExecutorKind | null;
   onExecutorChange: (executor: ExecutorKind) => void;
   providers: ProviderCard[];
   provider: string;
@@ -108,11 +108,19 @@ export function Composer({
               <select
                 className="composer__select"
                 aria-label="Исполнитель"
-                value={executor}
+                value={executor ?? ""}
+                // Пока /config не ответил, не знаем реальный executor.type —
+                // список закрыт для выбора: угаданное значение хуже пустого.
+                disabled={executor === null}
                 onChange={(event) =>
                   onExecutorChange(event.target.value as ExecutorKind)
                 }
               >
+                {executor === null && (
+                  <option value="" disabled>
+                    исполнитель…
+                  </option>
+                )}
                 {(Object.keys(EXECUTOR_LABELS) as ExecutorKind[]).map(
                   (kind) => (
                     <option key={kind} value={kind}>

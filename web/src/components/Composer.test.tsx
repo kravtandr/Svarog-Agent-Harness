@@ -2,7 +2,13 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ProviderCard } from "../api/types";
 import { Composer } from "./Composer";
+
+const TWO_PROVIDERS: ProviderCard[] = [
+  { name: "router", base_url: "https://x/v1", model: "m0", is_default: true },
+  { name: "backup", base_url: "https://y/v1", model: "m1", is_default: false },
+];
 
 const base = {
   autonomy: "supervised" as const,
@@ -71,6 +77,46 @@ describe("поле ввода", () => {
     );
 
     expect(onExecutorChange).toHaveBeenCalledWith("external");
+  });
+
+  it("гасит выбор исполнителя, пока /config не ответил", () => {
+    render(<Composer {...base} onSend={() => {}} executor={null} />);
+
+    const select = screen.getByLabelText("Исполнитель");
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("");
+  });
+
+  it("показывает провайдера, когда их больше одного", () => {
+    render(
+      <Composer
+        {...base}
+        onSend={() => {}}
+        providers={TWO_PROVIDERS}
+        provider="router"
+      />,
+    );
+
+    const select = screen.getByLabelText("Провайдер");
+    expect(select).toHaveValue("router");
+    expect(screen.getByRole("option", { name: "backup" })).toBeInTheDocument();
+  });
+
+  it("переключает провайдера", async () => {
+    const onProviderChange = vi.fn();
+    render(
+      <Composer
+        {...base}
+        onSend={() => {}}
+        providers={TWO_PROVIDERS}
+        provider="router"
+        onProviderChange={onProviderChange}
+      />,
+    );
+
+    await userEvent.selectOptions(screen.getByLabelText("Провайдер"), "backup");
+
+    expect(onProviderChange).toHaveBeenCalledWith("backup");
   });
 
   it("гасит выбор модели у внешнего агента", () => {

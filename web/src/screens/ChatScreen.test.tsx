@@ -70,11 +70,13 @@ describe("экран диалога", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
+    // executor не в override: конфиг по умолчанию (fakeApi) не отдаёт
+    // executor.type, а override не должен его гадать.
     expect(client.sendMessage).toHaveBeenCalledWith(
       "s1",
       "прогони тесты",
       "supervised",
-      { executor: "native", provider: "", model: "" },
+      { provider: "", model: "" },
     );
     await waitFor(() =>
       expect(screen.getByText("прогони тесты")).toBeInTheDocument(),
@@ -105,7 +107,6 @@ describe("экран диалога", () => {
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
     expect(client.sendMessage).toHaveBeenCalledWith("s1", "жги", "yolo", {
-      executor: "native",
       provider: "",
       model: "",
     });
@@ -325,13 +326,13 @@ describe("чистая установка", () => {
       "s-new",
       "первая задача",
       "supervised",
-      { executor: "native", provider: "", model: "" },
+      { provider: "", model: "" },
     );
   });
 });
 
-describe("исполнитель, провайдер и модель", () => {
-  it("отправляет выбранные исполнителя и модель", async () => {
+describe("провайдер и модель", () => {
+  it("отправляет выбранные провайдера и модель", async () => {
     const sendMessage = vi
       .fn()
       .mockResolvedValue({ run_id: "r1", state: "running" });
@@ -365,7 +366,6 @@ describe("исполнитель, провайдер и модель", () => {
     );
 
     expect(sendMessage).toHaveBeenCalledWith("s1", "привет", "supervised", {
-      executor: "native",
       provider: "router",
       model: "x/y",
     });
@@ -416,7 +416,6 @@ describe("исполнитель, провайдер и модель", () => {
       "привет",
       "supervised",
       {
-        executor: "native",
         provider: "router",
         model: "x/y",
       },
@@ -427,10 +426,126 @@ describe("исполнитель, провайдер и модель", () => {
       "ещё раз",
       "supervised",
       {
-        executor: "native",
         provider: "router",
         model: "x/y",
       },
     );
+  });
+
+  it("меняет провайдера и подставляет его собственную модель из конфига", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "router",
+          base_url: "https://x/v1",
+          model: "m-router",
+          is_default: true,
+        },
+        {
+          name: "backup",
+          base_url: "https://y/v1",
+          model: "m-backup",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Провайдер")).toHaveValue("router"),
+    );
+
+    await userEvent.selectOptions(screen.getByLabelText("Провайдер"), "backup");
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "поехали{Enter}",
+    );
+
+    // Модель — от нового провайдера ("m-backup"), а не унаследованная от
+    // предыдущего ("m-router"): pickProvider обязан её подставить сам.
+    expect(sendMessage).toHaveBeenCalledWith("s1", "поехали", "supervised", {
+      provider: "backup",
+      model: "m-backup",
+    });
+  });
+});
+
+describe("исполнитель из конфига", () => {
+  it("подставляет исполнителя, полученного из /config, в override", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      config: vi.fn().mockResolvedValue({
+        path: "svarog.yaml",
+        sections: [
+          {
+            key: "executor",
+            title: "Исполнитель и песочница",
+            fields: [
+              {
+                path: "executor.type",
+                label: "Исполнитель",
+                help: "",
+                kind: "enum" as const,
+                value: "external",
+                choices: ["native", "external"],
+                minimum: null,
+                maximum: null,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    // Ждём, пока /config отработает: селект «Исполнитель» покажет
+    // настоящее значение, а не литерал и не угадку.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Исполнитель")).toHaveValue("external"),
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "старт{Enter}",
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith("s1", "старт", "supervised", {
+      executor: "external",
+      provider: "",
+      model: "",
+    });
+  });
+
+  it("не гадает исполнителя, если /config не ответил", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      config: vi.fn().mockRejectedValue(new Error("нет связи")),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    // Селект остаётся закрытым для выбора — значение неизвестно.
+    expect(screen.getByLabelText("Исполнитель")).toBeDisabled();
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "старт{Enter}",
+    );
+
+    // executor вообще не входит в override — сервер возьмёт значение
+    // из своего конфига, а не из угадки клиента.
+    expect(sendMessage).toHaveBeenCalledWith("s1", "старт", "supervised", {
+      provider: "",
+      model: "",
+    });
   });
 });

@@ -56,7 +56,9 @@ export function ChatScreen({
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<Autonomy>("supervised");
-  const [executor, setExecutor] = useState<ExecutorKind>("native");
+  // null значит «как в конфиге, ещё не знаем»: GET /models ничего не говорит
+  // про executor.type, а он живёт в GET /config — отдельным запросом.
+  const [executor, setExecutor] = useState<ExecutorKind | null>(null);
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [providers, setProviders] = useState<ProviderCard[]>([]);
@@ -66,6 +68,27 @@ export function ChatScreen({
   const [sendError, setSendError] = useState<string | null>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
+
+  useEffect(() => {
+    api
+      .config()
+      .then((view) => {
+        const field = view.sections
+          .flatMap((section) => section.fields)
+          .find((item) => item.path === "executor.type");
+        // Нет поля или значение не из двух известных — не гадаем: executor
+        // остаётся null, override уйдёт без него (сервер возьмёт свой конфиг).
+        if (
+          field !== undefined &&
+          (field.value === "native" || field.value === "external")
+        ) {
+          setExecutor(field.value);
+        }
+      })
+      .catch(() => {
+        // Конфиг не пришёл — тот же принцип: остаёмся с null, не гадаем.
+      });
+  }, [api]);
 
   useEffect(() => {
     api
@@ -151,7 +174,10 @@ export function ChatScreen({
         // вариант: первое действие нового пользователя уходит в тишину.
         const target = sessionId ?? (await ensureSession());
         const ref = await api.sendMessage(target, text, autonomy, {
-          executor,
+          // executor опускаем, если он ещё не известен из /config: пустое
+          // поле сервер трактует как «взять из конфига», а угаданное
+          // значение — как настоящий override, который переживёт конфиг.
+          ...(executor === null ? {} : { executor }),
           provider,
           model,
         });
