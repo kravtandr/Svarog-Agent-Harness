@@ -315,6 +315,11 @@ async def test_send_message_reuses_shared_runner_without_override(
     строиться свежий TaskRunner. С warm-сессиями (ttl>0, конфиг по
     умолчанию) это маскируется тёплым слотом, поэтому ttl=0 обязателен,
     чтобы тест дошёл до вызова _runner_for.
+
+    Это контракт сырого API/CLI, а не браузера: веб-клиент (ChatScreen.tsx)
+    после первого рендера всегда пинует provider и model явно (решение
+    зафиксировано в §5 дизайн-документа composer'а), так что пустой override
+    с его стороны не приходит и эта ветка для него недостижима.
     """
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -386,6 +391,10 @@ async def test_warm_slot_without_override_shares_service_runner(
     и `_runner_for` обязан узнавать это по identity, а не строить новый
     `TaskRunner` (со своими `SecretStore`/host-store/`FileLockBackend`) на
     каждую тёплую сессию с конфигом по умолчанию.
+
+    Это тоже контракт сырого API/CLI: веб-клиент всегда пинует provider и
+    model явно (§5 дизайн-документа composer'а), поэтому с пустым override он
+    сюда не попадает — эту ветку покрывают только раздетые вызовы API/CLI.
     """
     ws = service.workspace
     slot = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride())

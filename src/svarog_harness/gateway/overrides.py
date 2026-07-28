@@ -15,6 +15,13 @@ from svarog_harness.config.schema import SvarogConfig
 
 # Ключ поддерева override в Run.meta.
 OVERRIDE_META_KEY = "override"
+# Ключ разрешённых цен модели в Run.meta (финал ревью, задача 2). Цены не
+# входят в security-дайджест (ADR-0015 §0.4) — их персистентность в meta
+# нужна не ради resume-гейта, а ради самого учёта стоимости: без неё resume
+# пересчитывал бы их заново через каталог провайдера, и недоступность
+# каталога (TTL истёк, write_config очистил кэш, провайдер лёг) молча
+# откатывала бы run на цены из svarog.yaml для другой модели.
+PRICES_META_KEY = "override_prices"
 
 ExecutorKind = Literal["native", "external"]
 
@@ -55,6 +62,48 @@ class RunOverride:
             provider=provider if isinstance(provider, str) else None,
             model=model if isinstance(model, str) else None,
         )
+
+
+def prices_to_meta(prices: tuple[float, float] | None) -> dict[str, float] | None:
+    """Цены для записи в Run.meta; None — нечего записывать."""
+    if prices is None:
+        return None
+    return {"input": prices[0], "output": prices[1]}
+
+
+def prices_from_meta(meta: dict[str, object] | None) -> tuple[float, float] | None:
+    """Восстановить цены из Run.meta; отсутствие или порча записи — None.
+
+    Терпимость намеренная и симметрична `RunOverride.from_meta`: запись
+    старого формата (до задачи 2) или ручная правка meta не должна ронять
+    resume, только вернуть его к резолвингу цен через каталог заново.
+    """
+    raw = (meta or {}).get(PRICES_META_KEY)
+    if not isinstance(raw, dict):
+        return None
+    input_price, output_price = raw.get("input"), raw.get("output")
+    if isinstance(input_price, bool) or isinstance(output_price, bool):
+        return None
+    if not isinstance(input_price, int | float) or not isinstance(output_price, int | float):
+        return None
+    return (float(input_price), float(output_price))
+
+
+def run_meta_for(
+    override: RunOverride, prices: tuple[float, float] | None
+) -> dict[str, object] | None:
+    """Meta run'а на старте: override и разрешённые им цены (задача 2).
+
+    Пустой override — производной конфигурации нет вовсе, значит и цен нет
+    (их резолвинг зависит от override.model): meta не нужна, как и раньше.
+    """
+    if override.is_empty():
+        return None
+    meta: dict[str, object] = {OVERRIDE_META_KEY: override.to_meta()}
+    priced = prices_to_meta(prices)
+    if priced is not None:
+        meta[PRICES_META_KEY] = priced
+    return meta
 
 
 def apply_override(

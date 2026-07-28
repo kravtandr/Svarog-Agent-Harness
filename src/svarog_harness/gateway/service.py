@@ -49,7 +49,12 @@ from svarog_harness.gateway.models import (
     WhoamiView,
     WorkspaceView,
 )
-from svarog_harness.gateway.overrides import OVERRIDE_META_KEY, RunOverride, apply_override
+from svarog_harness.gateway.overrides import (
+    RunOverride,
+    apply_override,
+    prices_from_meta,
+    run_meta_for,
+)
 from svarog_harness.gateway.settings import (
     ConfigDiffView,
     ConfigView,
@@ -106,6 +111,13 @@ _SESSION_HISTORY_LIMIT = 24
 # но не на каждый запрос — 10 минут достаточно, чтобы не дёргать сеть на
 # каждое открытие селектора модели.
 CATALOG_TTL_SEC = 600.0
+# TTL отрицательного кэша (неудачный fetch): короче успешного — недоступность
+# провайдера обычно временная (сеть, рестарт), и через минуту стоит попробовать
+# снова, а не ждать все 10 минут. Без него `send_message` (который зовёт
+# `_derive` дважды на сообщение: сам и снова внутри `_acquire_warm`) при
+# недоступном провайдере бьёт по сети под `_warm_lock` на каждое сообщение,
+# сериализуя все чат-сессии процесса за время его недоступности.
+CATALOG_NEGATIVE_TTL_SEC = 60.0
 
 
 class CancelNotAllowedError(Exception):
@@ -182,6 +194,9 @@ class GatewayService:
         # Каталоги моделей: имя провайдера → (момент загрузки, карточки).
         # TTL, а не вечный кэш: список моделей у провайдера меняется.
         self._catalog: dict[str, tuple[float, list[ModelCard]]] = {}
+        # Отрицательный кэш: имя провайдера → (момент неудачи, текст ошибки).
+        # Короткий TTL (CATALOG_NEGATIVE_TTL_SEC) — см. его комментарий.
+        self._catalog_failures: dict[str, tuple[float, str]] = {}
 
     # --- per-run workspaces (ADR-0017) ------------------------------------
 
@@ -289,10 +304,8 @@ class GatewayService:
             # он обязан совпасть с тем, что при resume соберёт _runner_for_run
             # (тоже через _derive), иначе _assert_config_unchanged откажет
             # resume'у (ADR-0015 §0.4).
-            cfg = await self._derive(override)
-            run_meta: dict[str, object] | None = (
-                {OVERRIDE_META_KEY: override.to_meta()} if not override.is_empty() else None
-            )
+            cfg, prices = await self._derive(override)
+            run_meta = run_meta_for(override, prices)
             runner = self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
             resources = await runner.prepare_session_resources(autonomy)
             slot = _WarmSlot(
@@ -348,17 +361,33 @@ class GatewayService:
         ]
 
     async def provider_models(self, name: str) -> list[ModelCard]:
-        """Список моделей провайдера с TTL-кэшем; CatalogError → 502."""
+        """Список моделей провайдера с TTL-кэшем; CatalogError → 502.
+
+        Неудача кэшируется тоже (короткий TTL, `CATALOG_NEGATIVE_TTL_SEC`):
+        иначе повторный вызов при недоступном провайдере не находит хита и
+        бьёт по сети заново, под тем же `_warm_lock`, что и все остальные
+        сессии процесса (задача 3, финал ревью). Хит отрицательного кэша
+        поднимает тот же `CatalogError`, что и реальный fetch, — поведение
+        502 у эндпоинта не меняется, пустой список наружу не уходит.
+        """
         provider = self.cfg.models.providers.get(name)
         if provider is None:
             raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
-        cached = self._catalog.get(name)
         now = time.monotonic()
+        cached = self._catalog.get(name)
         if cached is not None and now - cached[0] < CATALOG_TTL_SEC:
             return cached[1]
+        failed = self._catalog_failures.get(name)
+        if failed is not None and now - failed[0] < CATALOG_NEGATIVE_TTL_SEC:
+            raise CatalogError(failed[1])
         api_key = resolve_api_key(provider, self._runner.host_store)
-        cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        try:
+            cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        except CatalogError as exc:
+            self._catalog_failures[name] = (now, str(exc))
+            raise
         self._catalog[name] = (now, cards)
+        self._catalog_failures.pop(name, None)
         return cards
 
     async def _model_prices(self, provider: str, model: str) -> tuple[float, float] | None:
@@ -374,13 +403,20 @@ class GatewayService:
                 return (card.input_usd_per_mtok, card.output_usd_per_mtok)
         return None
 
-    async def _derive(self, override: RunOverride) -> SvarogConfig:
-        """Производный конфиг сообщения вместе с ценами выбранной модели."""
+    async def _derive(
+        self, override: RunOverride
+    ) -> tuple[SvarogConfig, tuple[float, float] | None]:
+        """Производный конфиг сообщения вместе с ценами выбранной модели.
+
+        Цены возвращаются отдельно от cfg, чтобы вызывающая сторона могла
+        записать их в Run.meta (`run_meta_for`, задача 2) — resume обязан
+        пережить их как есть, а не пересчитывать через каталог заново.
+        """
         prices = None
         if override.model is not None:
             target = override.provider or self.cfg.models.default
             prices = await self._model_prices(target, override.model)
-        return apply_override(self.cfg, override, prices=prices)
+        return apply_override(self.cfg, override, prices=prices), prices
 
     # --- запуск и возобновление runs -------------------------------------
 
@@ -472,10 +508,17 @@ class GatewayService:
             self._publish_error(holder, started, exc)
 
     async def _runner_for_run(self, run_id: str) -> TaskRunner:
-        """Runner для resume: workspace и override читаются из строки run'а.
+        """Runner для resume: workspace, override и цены читаются из строки run'а.
 
         Без восстановления override дайджест конфига разойдётся со снимком
         старта, и `_assert_config_unchanged` отклонит resume (ADR-0015 §0.4).
+
+        Цены — из Run.meta, не из каталога: `_derive` здесь намеренно не
+        вызывается, чтобы resume не бил по сети провайдера. Если бы цены
+        пересчитывались заново, недоступный к моменту resume провайдер (TTL
+        кэша истёк, `write_config` его очистил, сеть упала) молча откатывал
+        бы стоимость run'а на цены из `svarog.yaml` для другой модели того
+        же провайдера — а approval-гейт — это всегда resume (задача 2).
         """
 
         async def action(db: AsyncSession) -> tuple[str | None, dict[str, object]]:
@@ -484,7 +527,11 @@ class GatewayService:
 
         workspace, meta = await self._read(action)
         override = RunOverride.from_meta(meta)
-        cfg = await self._derive(override) if not override.is_empty() else None
+        cfg = (
+            apply_override(self.cfg, override, prices=prices_from_meta(meta))
+            if not override.is_empty()
+            else None
+        )
         if not workspace:
             return self._runner if cfg is None else self._runner_for(self.workspace, cfg=cfg)
         return self._runner_for(Path(workspace), cfg=cfg)
@@ -740,7 +787,7 @@ class GatewayService:
         """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
-        cfg = await self._derive(override)  # OverrideError → 422
+        cfg, prices = await self._derive(override)  # OverrideError → 422
         external = cfg.executor.type == "external"
 
         async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:
@@ -783,9 +830,7 @@ class GatewayService:
         )
         mode = autonomy if autonomy is not None else cfg.runtime.autonomy
         # Тёплый sandbox сессии (ADR-0017): env/infra/MCP переживают сообщение.
-        run_meta: dict[str, object] | None = (
-            {OVERRIDE_META_KEY: override.to_meta()} if not override.is_empty() else None
-        )
+        run_meta = run_meta_for(override, prices)
         warm = await self._acquire_warm(session.id, workspace, mode, override)
         runner = (
             warm.runner
@@ -1082,6 +1127,7 @@ class GatewayService:
         # Тёплые слоты держат env/MCP, поднятые под прежним конфигом.
         await self.close_warm_sessions()
         self._catalog.clear()
+        self._catalog_failures.clear()
         return view
 
     async def _any_run_live(self) -> bool:

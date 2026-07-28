@@ -6,6 +6,7 @@
 ошибку здесь, а не загадочное молчание при запуске.
 """
 
+import math
 from dataclasses import dataclass
 
 import httpx
@@ -31,12 +32,28 @@ class ModelCard:
 
 
 def _price(raw: object) -> float | None:
-    """USD за токен (OpenRouter отдаёт строкой) → USD за миллион токенов."""
+    """USD за токен (OpenRouter отдаёт строкой) → USD за миллион токенов.
+
+    `None` для отрицательных и не-конечных (NaN/inf) значений: цена уходит
+    в `ProviderConfig.model_copy(update=...)` в обход `ge=0` схемы (v2 не
+    ревалидирует `model_copy`), а отрицательная цена уменьшает `cost_usd`
+    на каждом вызове — потолок `max_cost_usd_per_run` молча перестаёт
+    срабатывать (runtime/loop.py). OpenRouter отдаёт "-1" для
+    router pseudo-моделей вроде `openrouter/auto`.
+
+    `bool` исключён явно: это подкласс `int` в Python, и `"prompt": true`
+    без проверки стал бы $1,000,000/Mtok.
+    """
+    if isinstance(raw, bool):
+        return None
     if isinstance(raw, str | int | float):
         try:
-            return float(raw) * 1_000_000
+            value = float(raw)
         except ValueError:
             return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        return value * 1_000_000
     return None
 
 

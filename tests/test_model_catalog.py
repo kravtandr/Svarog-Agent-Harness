@@ -51,6 +51,46 @@ def test_parses_bare_openai_shape() -> None:
     ]
 
 
+def test_negative_pricing_yields_none_instead_of_negative_rate() -> None:
+    """OpenRouter отдаёт "-1" для router pseudo-моделей (`openrouter/auto`) —
+    отрицательная цена не должна пройти дальше: иначе она попадёт в
+    ProviderConfig в обход `ge=0` (model_copy не валидирует) и учёт стоимости
+    run'а будет уменьшаться на каждом вызове вместо роста (потолок cost cap
+    молча отключается, runtime/loop.py:1071)."""
+    cards = parse_models(
+        {
+            "data": [
+                {
+                    "id": "openrouter/auto",
+                    "pricing": {"prompt": "-1", "completion": "-1"},
+                }
+            ]
+        }
+    )
+    assert len(cards) == 1
+    assert cards[0].input_usd_per_mtok is None
+    assert cards[0].output_usd_per_mtok is None
+
+
+def test_boolean_pricing_yields_none_instead_of_treating_as_number() -> None:
+    """`bool` — подкласс `int` в Python: `isinstance(True, int)` истинно, и
+    без явного исключения `"prompt": true` тихо превратился бы в
+    $1,000,000/Mtok."""
+    cards = parse_models({"data": [{"id": "m1", "pricing": {"prompt": True, "completion": False}}]})
+    assert len(cards) == 1
+    assert cards[0].input_usd_per_mtok is None
+    assert cards[0].output_usd_per_mtok is None
+
+
+def test_nan_and_inf_pricing_yields_none() -> None:
+    cards = parse_models(
+        {"data": [{"id": "m1", "pricing": {"prompt": "nan", "completion": "inf"}}]}
+    )
+    assert len(cards) == 1
+    assert cards[0].input_usd_per_mtok is None
+    assert cards[0].output_usd_per_mtok is None
+
+
 def test_skips_entries_without_id_instead_of_failing() -> None:
     cards = parse_models({"data": [{"name": "без id"}, {"id": "ok"}, "мусор"]})
     assert [c.id for c in cards] == ["ok"]
@@ -177,6 +217,33 @@ async def test_models_endpoint_caches_second_call(service, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_is_negatively_cached(service, monkeypatch) -> None:
+    """Второй вызов в пределах отрицательного TTL не должен бить по сети.
+
+    Регрессия: `provider_models` кэшировал только успех. `send_message`
+    вызывает `_derive` дважды на сообщение (сам, вне `_warm_lock`, и снова
+    внутри него через `_acquire_warm`) — при недоступном провайдере вторая
+    попытка не находит хита и ждёт полный `CATALOG_TIMEOUT_SEC` под
+    глобальным локом, сериализуя все чат-сессии процесса на каждое
+    сообщение, пока провайдер не поднимется (финал ревью, задача 3).
+    """
+    calls = {"n": 0}
+
+    async def boom(provider, api_key, **kwargs):
+        calls["n"] += 1
+        raise CatalogError("провайдер лёг")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", boom)
+
+    with pytest.raises(CatalogError):
+        await service.provider_models("router")
+    with pytest.raises(CatalogError):
+        await service.provider_models("router")
+
+    assert calls["n"] == 1, "второй вызов должен быть обслужен отрицательным кэшем, не сетью"
+
+
+@pytest.mark.asyncio
 async def test_unknown_provider_is_404(service) -> None:
     client = TestClient(create_app(service=service))
     assert client.get("/models/нет-такого").status_code == 404
@@ -260,3 +327,39 @@ async def test_warm_session_start_and_resume_agree_on_priced_config(service, mon
     # Инвариант, который и защищает ADR-0015 §0.4: то, что пересчитает resume,
     # обязано дать тот же дайджест, что записан при реальном старте run'а.
     assert config_digest(resumed_runner.cfg, service.workspace) == meta[CONFIG_HASH_META_KEY]
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_prices_when_catalog_becomes_unavailable(service, monkeypatch) -> None:
+    """Резолвленные цены обязаны пережить resume как есть.
+
+    Регрессия: без persist'а в Run.meta resume пересчитывал цены заново через
+    `_derive` → `_model_prices` → `provider_models`. Если к моменту resume TTL
+    кэша истёк, `write_config` очистил `self._catalog` или провайдер просто
+    недоступен — `_model_prices` тихо возвращает `None`, и resume считает
+    стоимость run'а по цене из `svarog.yaml` для другой модели того же
+    провайдера. Approval-гейт — это всегда resume, так что это не крайний
+    случай, а типичный путь (финал ревью, задача 2).
+    """
+
+    async def fake_fetch(provider, api_key, **kwargs):
+        return [ModelCard(id="x/y", input_usd_per_mtok=0.25, output_usd_per_mtok=0.75)]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    session = await service.create_session(title="цены переживают resume")
+    run_id = await service.send_message(
+        session.session_id, "задача", None, RunOverride(provider="router", model="x/y")
+    )
+
+    # Каталог "недоступен": TTL-кэш очищен (как после write_config), и любой
+    # новый запрос к провайдеру падает.
+    service._catalog.clear()
+
+    async def boom(provider, api_key, **kwargs):
+        raise CatalogError("провайдер недоступен")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", boom)
+
+    runner = await service._runner_for_run(run_id)
+    assert runner.cfg.models.providers["router"].input_usd_per_mtok == 0.25
+    assert runner.cfg.models.providers["router"].output_usd_per_mtok == 0.75
