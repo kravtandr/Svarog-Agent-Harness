@@ -187,7 +187,13 @@ class GatewayService:
         своя, производная конфигурация (override сообщения, задача 1).
         """
         ws = workspace.expanduser().resolve()
-        if cfg is None and run_meta is None and ws == self.workspace.expanduser().resolve():
+        # apply_override возвращает тот же объект, если override пуст (overrides.py):
+        # cfg is self.cfg означает «производной конфигурации нет», как и cfg is None.
+        if (
+            (cfg is None or cfg is self.cfg)
+            and run_meta is None
+            and ws == self.workspace.expanduser().resolve()
+        ):
             return self._runner
         return TaskRunner(cfg or self.cfg, ws, role=self.role, run_meta=run_meta)
 

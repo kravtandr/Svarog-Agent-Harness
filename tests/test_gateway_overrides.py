@@ -374,3 +374,43 @@ async def test_warm_slot_not_reused_with_other_override(
     again = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride(provider="router"))
     assert again is second, "тот же override — тот же слот"
     await service.close_warm_sessions()
+
+
+@pytest.mark.asyncio
+async def test_warm_slot_without_override_shares_service_runner(
+    service: GatewayService,
+) -> None:
+    """Пустой override — не производная конфигурация: тёплый слот берёт общий runner.
+
+    `apply_override` возвращает тот же объект `self.cfg`, когда override пуст,
+    и `_runner_for` обязан узнавать это по identity, а не строить новый
+    `TaskRunner` (со своими `SecretStore`/host-store/`FileLockBackend`) на
+    каждую тёплую сессию с конфигом по умолчанию.
+    """
+    ws = service.workspace
+    slot = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride())
+    assert slot is not None
+    assert slot.runner is service._runner, "общий runner не переиспользован для пустого override"
+    await service.close_warm_sessions()
+
+
+@pytest.mark.asyncio
+async def test_warm_slot_not_reused_with_other_executor_or_model_override(
+    service: GatewayService,
+) -> None:
+    """Смена не только provider'а, но и executor/model тоже рвёт тёплый слот."""
+    ws = service.workspace
+    base = await service._acquire_warm("s1", ws, AutonomyMode.YOLO, RunOverride())
+
+    executor_override = await service._acquire_warm(
+        "s1", ws, AutonomyMode.YOLO, RunOverride(executor="native")
+    )
+    assert executor_override is not base
+
+    model_override = await service._acquire_warm(
+        "s1", ws, AutonomyMode.YOLO, RunOverride(model="qwen3")
+    )
+    assert model_override is not executor_override
+    assert model_override.runner.cfg.models.providers["local"].model == "qwen3"
+
+    await service.close_warm_sessions()
