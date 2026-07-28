@@ -130,19 +130,8 @@ export interface MemoryFile {
 /** Значения AutonomyMode сервера (config/schema.py). */
 export type Autonomy = "supervised" | "auto" | "yolo";
 
-export const AUTONOMY_LABELS: Record<Autonomy, string> = {
-  supervised: "под надзором",
-  auto: "авто",
-  yolo: "без тормозов",
-};
-
 /** Значения executor.type сервера (config/schema.py). */
 export type ExecutorKind = "native" | "external";
-
-export const EXECUTOR_LABELS: Record<ExecutorKind, string> = {
-  native: "нативный цикл",
-  external: "внешний агент",
-};
 
 /** Выбор в поле ввода: свойство сообщения, конфиг не меняется. */
 export interface RunOverride {

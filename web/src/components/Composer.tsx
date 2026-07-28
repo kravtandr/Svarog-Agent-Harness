@@ -1,21 +1,36 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import {
-  AUTONOMY_LABELS,
-  EXECUTOR_LABELS,
-  type Autonomy,
-  type ExecutorKind,
-  type ModelCard,
-  type ProviderCard,
+import type {
+  Attachment,
+  Autonomy,
+  ExecutorOption,
+  FileSuggestion,
+  ModelCard,
+  ProviderCard,
+  SlashCommand,
 } from "../api/types";
+import {
+  detectCompletion,
+  replaceToken,
+  type CompletionQuery,
+} from "../model/completion";
+import { Attachments } from "./Attachments";
+import { Completion, type CompletionItem } from "./Completion";
 import { ModelPicker } from "./ModelPicker";
 import "./Composer.css";
+
+/** Автономия — конечный список из схемы конфига (config/schema.py); тот же
+    список рисуют настройки через field.choices. Отдельного справочника
+    русских подписей больше нет: значение показывается как есть. */
+const AUTONOMY_MODES: Autonomy[] = ["supervised", "auto", "yolo"];
+
+const UNAVAILABLE_HINT = "CLI этого агента не найден в PATH";
 
 export function Composer({
   onSend,
   autonomy,
   onAutonomyChange,
-  executor,
+  executors,
   onExecutorChange,
   providers,
   provider,
@@ -24,12 +39,19 @@ export function Composer({
   models,
   modelsError,
   onModelChange,
+  commands,
+  onFileQuery,
+  attachments,
+  onAttach,
+  onRemoveAttachment,
 }: {
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: string[]) => void;
   autonomy: Autonomy;
   onAutonomyChange: (autonomy: Autonomy) => void;
-  executor: ExecutorKind | null;
-  onExecutorChange: (executor: ExecutorKind) => void;
+  /** GET /executors: нативный цикл плюс по одной записи на адаптер;
+      is_active помечает текущий выбор, available — установлен ли его CLI. */
+  executors: ExecutorOption[];
+  onExecutorChange: (value: string) => void;
   providers: ProviderCard[];
   provider: string;
   onProviderChange: (name: string) => void;
@@ -37,16 +59,118 @@ export function Composer({
   models: ModelCard[];
   modelsError: string | null;
   onModelChange: (id: string) => void;
+  /** GET /commands — список для «/»-автодополнения, фильтруется на клиенте. */
+  commands: SlashCommand[];
+  /** GET /sessions/{id}/files?q= — «@»-автодополнение просит сервер на
+      каждый токен, локального списка файлов у композера нет. */
+  onFileQuery: (query: string) => Promise<FileSuggestion[]>;
+  attachments: Attachment[];
+  onAttach: (file: File) => void;
+  onRemoveAttachment: (path: string) => void;
 }) {
   const [text, setText] = useState("");
   const [picking, setPicking] = useState(false);
-  const external = executor === "external";
+  const [query, setQuery] = useState<CompletionQuery>({
+    mode: "idle",
+    token: "",
+  });
+  const [active, setActive] = useState(0);
+  // Закрыто Escape'ом — до следующего изменения поля или сдвига курсора:
+  // они же сбрасывают этот флаг, так что меню не может застрять скрытым.
+  const [dismissed, setDismissed] = useState(false);
+  const [files, setFiles] = useState<FileSuggestion[]>([]);
+  const field = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  // Курсор, который нужно выставить после следующего рендера (setSelectionRange
+  // на контролируемом textarea имеет смысл только после того, как React
+  // применит новое value — раньше вызов просто не найдёт нужной позиции).
+  const pendingCaret = useRef<number | null>(null);
+  const fileRequest = useRef(0);
+
+  const activeExecutor = executors.find((option) => option.is_active);
+  const external = activeExecutor?.kind === "external";
+
+  // «@»-подсказки — сетевой запрос на каждый токен: список файлов рабочей
+  // копии не тащим на клиент целиком. Более поздний ответ на устаревший
+  // запрос игнорируется через тикет — иначе медленный ответ на "@a" мог бы
+  // перезаписать уже показанные подсказки для "@ab".
+  useEffect(() => {
+    if (query.mode !== "at") {
+      setFiles([]);
+      return;
+    }
+    const ticket = ++fileRequest.current;
+    onFileQuery(query.token.slice(1))
+      .then((result) => {
+        if (fileRequest.current === ticket) setFiles(result);
+      })
+      .catch(() => {
+        if (fileRequest.current === ticket) setFiles([]);
+      });
+  }, [query.mode, query.token, onFileQuery]);
+
+  useEffect(() => {
+    if (pendingCaret.current === null) return;
+    field.current?.setSelectionRange(
+      pendingCaret.current,
+      pendingCaret.current,
+    );
+    pendingCaret.current = null;
+  }, [text]);
+
+  const items: CompletionItem[] =
+    dismissed || query.mode === "idle"
+      ? []
+      : query.mode === "slash"
+        ? commands
+            .filter((c) => `/${c.name}`.startsWith(query.token))
+            .map((c) => ({
+              value: `/${c.name}`,
+              label: `/${c.name}`,
+              description: c.help,
+            }))
+        : files.map((f) => ({
+            value: `@${f.path}`,
+            label: f.path,
+            description: "файл",
+          }));
+
+  // Общая точка для «поле изменилось» и «курсор сдвинулся без изменения
+  // текста» (стрелки, клик в середину строки) — оба случая должны заново
+  // определить режим подсказок и открыть меню, если оно было закрыто Escape.
+  function detect(value: string, caret: number) {
+    setQuery(detectCompletion(value.slice(0, caret)));
+    setDismissed(false);
+    setActive(0);
+  }
+
+  function pick(value: string) {
+    const caret = field.current?.selectionStart ?? text.length;
+    const result = replaceToken(text, caret, value);
+    setText(result.text);
+    // replaceToken дописывает пробел — detectCompletion на новом тексте сам
+    // вернёт idle, и меню закроется без отдельного вызова setDismissed.
+    setQuery(detectCompletion(result.text.slice(0, result.caret)));
+    setActive(0);
+    pendingCaret.current = result.caret;
+  }
+
+  function attach(list: FileList | null | undefined) {
+    if (list === null || list === undefined) return;
+    // Не Array.from(list).forEach(onAttach) — forEach зовёт колбэк с
+    // (элемент, индекс, массив), и onAttach получил бы лишние аргументы.
+    Array.from(list).forEach((file) => onAttach(file));
+  }
 
   function send() {
     const trimmed = text.trim();
     if (!trimmed) return;
-    onSend(trimmed);
+    onSend(
+      trimmed,
+      attachments.map((item) => item.path),
+    );
     setText("");
+    setQuery({ mode: "idle", token: "" });
   }
 
   return (
@@ -66,15 +190,72 @@ export function Composer({
             />
           </div>
         )}
+        {/* Completion сама ничего не рисует для пустого списка и сама себя
+            позиционирует над полем — обёртка ей не нужна. */}
+        <Completion items={items} active={active} onPick={pick} />
         <div className="composer__box">
+          {/* Attachments точно так же сама скрывается, когда вложений нет. */}
+          <Attachments items={attachments} onRemove={onRemoveAttachment} />
           <textarea
+            ref={field}
             className="composer__field"
             aria-label="Написать Сварогу"
             placeholder="Написать Сварогу"
             rows={1}
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            aria-expanded={items.length > 0}
+            aria-activedescendant={
+              items.length > 0 ? `completion-option-${active}` : undefined
+            }
+            onChange={(event) => {
+              const value = event.target.value;
+              setText(value);
+              detect(value, event.target.selectionStart ?? value.length);
+            }}
+            onSelect={(event) => {
+              const el = event.currentTarget;
+              detect(el.value, el.selectionStart ?? el.value.length);
+            }}
+            onPaste={(event) => {
+              const pasted = event.clipboardData?.files;
+              if (pasted !== undefined && pasted.length > 0) {
+                // Иначе путь/имя файла заодно вставится как текст.
+                event.preventDefault();
+                attach(pasted);
+              }
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              if (event.dataTransfer.files.length > 0) {
+                event.preventDefault();
+                attach(event.dataTransfer.files);
+              }
+            }}
             onKeyDown={(event) => {
+              if (items.length > 0) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setActive((i) => (i + 1) % items.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActive((i) => (i - 1 + items.length) % items.length);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setDismissed(true);
+                  return;
+                }
+                if (event.key === "Enter" || event.key === "Tab") {
+                  // Пока меню открыто, Enter вставляет подсказку, а не отправляет:
+                  // иначе первое же дополнение улетит агенту недописанным.
+                  event.preventDefault();
+                  pick(items[active].value);
+                  return;
+                }
+              }
               // Enter отправляет, Shift+Enter — перенос строки: так ведёт
               // себя любой чат, и без этого поле кажется сломанным.
               if (event.key === "Enter" && !event.shiftKey) {
@@ -96,9 +277,9 @@ export function Composer({
                   onAutonomyChange(event.target.value as Autonomy)
                 }
               >
-                {(Object.keys(AUTONOMY_LABELS) as Autonomy[]).map((mode) => (
+                {AUTONOMY_MODES.map((mode) => (
                   <option key={mode} value={mode}>
-                    {AUTONOMY_LABELS[mode]}
+                    {mode}
                   </option>
                 ))}
               </select>
@@ -108,26 +289,29 @@ export function Composer({
               <select
                 className="composer__select"
                 aria-label="Исполнитель"
-                value={executor ?? ""}
-                // Пока /config не ответил, не знаем реальный executor.type —
-                // список закрыт для выбора: угаданное значение хуже пустого.
-                disabled={executor === null}
-                onChange={(event) =>
-                  onExecutorChange(event.target.value as ExecutorKind)
-                }
+                value={activeExecutor?.value ?? ""}
+                // Список ещё не пришёл от GET /executors — угаданный выбор
+                // хуже пустого, поэтому пока нечего показывать, кроме заглушки.
+                disabled={executors.length === 0}
+                onChange={(event) => onExecutorChange(event.target.value)}
               >
-                {executor === null && (
+                {executors.length === 0 && (
                   <option value="" disabled>
                     исполнитель…
                   </option>
                 )}
-                {(Object.keys(EXECUTOR_LABELS) as ExecutorKind[]).map(
-                  (kind) => (
-                    <option key={kind} value={kind}>
-                      {EXECUTOR_LABELS[kind]}
-                    </option>
-                  ),
-                )}
+                {executors.map((option) => (
+                  <option
+                    key={option.value}
+                    value={option.value}
+                    // Недоступный вариант виден и назван, а не спрятан: иначе
+                    // человек без codex в PATH решит, что Сварог его не умеет.
+                    disabled={!option.available}
+                    title={option.available ? undefined : UNAVAILABLE_HINT}
+                  >
+                    {option.value}
+                  </option>
+                ))}
               </select>
               <span className="composer__dot" aria-hidden="true">
                 ·
@@ -165,6 +349,29 @@ export function Composer({
               </button>
             </span>
             <span className="composer__spacer" />
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              className="composer__hidden"
+              // Управляется только кнопкой рядом: собственного имени ей не
+              // нужно, а видимой для скринридера — тем более, второй контрол
+              // с тем же смыслом только запутает.
+              aria-hidden="true"
+              tabIndex={-1}
+              onChange={(event) => {
+                attach(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="composer__icon"
+              aria-label="Прикрепить файл"
+              onClick={() => fileInput.current?.click()}
+            >
+              📎
+            </button>
             {/* Место под голос занято сразу: включение не потребует переверстки. */}
             <button
               type="button"

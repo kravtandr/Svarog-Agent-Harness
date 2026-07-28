@@ -5,6 +5,7 @@ import { subscribeRun } from "../api/stream";
 import type {
   Autonomy,
   ExecutorKind,
+  ExecutorOption,
   ModelCard,
   ProviderCard,
 } from "../api/types";
@@ -216,6 +217,22 @@ export function ChatScreen({
     [api, watch],
   );
 
+  // TODO(задача 15): заменить на настоящий список из GET /executors —
+  // сейчас это тот же единственный вариант из /config, обёрнутый в форму,
+  // которую ждёт новый Composer, чтобы не терять уже работающее поведение.
+  const executors: ExecutorOption[] =
+    executor === null
+      ? []
+      : [
+          {
+            value: executor,
+            kind: executor,
+            adapter: null,
+            available: true,
+            is_active: true,
+          },
+        ];
+
   const shown = error ?? threadError ?? sendError;
 
   return (
@@ -274,8 +291,8 @@ export function ChatScreen({
         onSend={(text) => void send(text)}
         autonomy={autonomy}
         onAutonomyChange={setAutonomy}
-        executor={executor}
-        onExecutorChange={setExecutor}
+        executors={executors}
+        onExecutorChange={(value) => setExecutor(value as ExecutorKind)}
         providers={providers}
         provider={provider}
         onProviderChange={pickProvider}
@@ -283,6 +300,14 @@ export function ChatScreen({
         models={models}
         modelsError={modelsError}
         onModelChange={setModel}
+        // TODO(задача 15): подключить GET /commands, @-файлы и загрузку
+        // вложений — здесь заглушки, чтобы Composer компилировался и работал
+        // как раньше, пока экран диалога не подключит остальной стек 10-14.
+        commands={[]}
+        onFileQuery={() => Promise.resolve([])}
+        attachments={[]}
+        onAttach={() => {}}
+        onRemoveAttachment={() => {}}
       />
     </div>
   );
