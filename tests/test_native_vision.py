@@ -4,13 +4,16 @@ import base64
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, RuntimeConfig
-from svarog_harness.llm.openai_compatible import _to_openai_messages
+from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, ProviderConfig, RuntimeConfig
+from svarog_harness.llm.openai_compatible import OpenAICompatibleProvider, _to_openai_messages
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
@@ -321,3 +324,63 @@ async def test_tool_message_precedes_the_image_message(
     assert roles[tool_at + 1] == ("user", True), (
         "за tool-сообщением должно сразу идти user-сообщение с непустыми images"
     )
+
+
+# --- Пояснение при отказе провайдера (задача 5) ------------------------------
+
+
+class _FailingClient:
+    """Дублирует client.chat.completions.create, но всегда бросает — по образцу
+    _FakeClient из test_llm.py, только имитирует отказ провайдера, а не ответ."""
+
+    def __init__(self, exc: Exception) -> None:
+        async def create(**kwargs: Any) -> Any:
+            raise exc
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+
+@pytest.mark.asyncio
+async def test_provider_error_gains_a_vision_hint_only_when_images_were_sent(
+    tmp_path: Path,
+) -> None:
+    """Без изображений пояснение вводило бы в заблуждение."""
+    cfg = ProviderConfig(base_url="http://localhost:8000/v1", model="test-model")
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG")
+
+    with_image = OpenAICompatibleProvider(
+        cfg,
+        client=cast(AsyncOpenAI, _FailingClient(ValueError("400 Bad Request"))),
+        workspace=tmp_path,
+    )
+    message_with_image = ChatMessage(
+        role="user", content="смотри:", images=(ImageRef(path="shot.png", mime="image/png"),)
+    )
+    with pytest.raises(RuntimeError, match="изображение") as with_image_exc:
+        await with_image.complete([message_with_image], [])
+    assert "400 Bad Request" in str(with_image_exc.value), "исходная ошибка не должна теряться"
+
+    text_only = OpenAICompatibleProvider(
+        cfg, client=cast(AsyncOpenAI, _FailingClient(ValueError("400 Bad Request")))
+    )
+    with pytest.raises(ValueError) as text_only_exc:
+        await text_only.complete([ChatMessage(role="user", content="привет")], [])
+    assert "изображение" not in str(text_only_exc.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_error_has_no_hint_when_image_degraded_to_text(tmp_path: Path) -> None:
+    """ChatMessage.images непуст, но без workspace часть вырождается в текст (§ провайдер
+    auxiliary): реального изображения в запросе нет, значит и подсказки быть не должно."""
+    cfg = ProviderConfig(base_url="http://localhost:8000/v1", model="test-model")
+    provider = OpenAICompatibleProvider(
+        cfg, client=cast(AsyncOpenAI, _FailingClient(ValueError("400 Bad Request")))
+    )
+    message = ChatMessage(
+        role="user", content="смотри:", images=(ImageRef(path="shot.png", mime="image/png"),)
+    )
+
+    with pytest.raises(ValueError) as exc:
+        await provider.complete([message], [])
+
+    assert "изображение" not in str(exc.value)

@@ -239,7 +239,28 @@ class OpenAICompatibleProvider(ModelProvider):
         if tools:
             kwargs["tools"] = _to_openai_tools(tools)
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        # По факту отрендеренных частей запроса, а не по исходным ChatMessage:
+        # только последние MAX_IMAGES_IN_CONTEXT переживают деградацию (задача 3),
+        # а отсутствующий файл или escaping пути вырождают часть в текст даже
+        # для "keep"-сообщения. Подсказка не должна вводить в заблуждение,
+        # если реального изображения в запросе не оказалось.
+        had_images = any(
+            isinstance(item.get("content"), list)
+            and any(part.get("type") == "image_url" for part in item["content"])
+            for item in kwargs["messages"]
+        )
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if had_images:
+                # Надёжного признака поддержки vision у произвольного
+                # openai-совместимого endpoint нет; гадать по имени модели
+                # хуже, чем честно объяснить отказ.
+                raise RuntimeError(
+                    f"{exc}. В запросе было изображение — возможно, модель его не принимает: "
+                    f"попробуйте другую модель или внешнего агента"
+                ) from exc
+            raise
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
