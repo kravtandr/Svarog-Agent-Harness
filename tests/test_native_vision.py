@@ -12,7 +12,13 @@ from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.schema import AutonomyMode, PoliciesConfig, ProviderConfig, RuntimeConfig
+from svarog_harness.config.schema import (
+    AutonomyMode,
+    PoliciesConfig,
+    ProviderConfig,
+    RuntimeConfig,
+    SvarogConfig,
+)
 from svarog_harness.llm.openai_compatible import OpenAICompatibleProvider, _to_openai_messages
 from svarog_harness.llm.provider import (
     ChatMessage,
@@ -26,6 +32,8 @@ from svarog_harness.llm.provider import (
 from svarog_harness.policy.engine import PolicyEngine
 from svarog_harness.runtime.checkpoint import LoopState, _message_from_dict, _message_to_dict
 from svarog_harness.runtime.loop import AgentLoop
+from svarog_harness.runtime.orchestrator import TaskRunner
+from svarog_harness.sandbox.local import LocalEnvironment
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Checkpoint, RunState
 from svarog_harness.tools.base import ToolResult
@@ -384,3 +392,53 @@ async def test_provider_error_has_no_hint_when_image_degraded_to_text(tmp_path: 
         await provider.complete([message], [])
 
     assert "изображение" not in str(exc.value)
+
+
+# --- регистрация в нативном цикле (задача 6) --------------------------------
+
+
+def _build_registry(tmp_path: Path) -> ToolRegistry:
+    """Собрать дефолтный реестр нативного цикла — оснастка по образцу
+    tests/test_dream_profile.py (`_runner`/`_names`)."""
+    cfg = SvarogConfig.model_validate(
+        {
+            "models": {
+                "default": "main",
+                "providers": {"main": {"base_url": "http://localhost", "model": "m"}},
+            },
+            "memory": {"path": str(tmp_path / "memory")},
+            "storage": {"db_path": str(tmp_path / "svarog.sqlite3")},
+        }
+    )
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    runner = TaskRunner(cfg, tmp_path)
+    # Сборка реестра живёт в RunAssembly (run_assembly.py); TaskRunner держит
+    # её в _assembly и наружу приватным методом не выставляет.
+    return runner._assembly._build_registry(
+        LocalEnvironment(tmp_path),
+        [],
+        [],
+        [],
+        [],
+        None,
+        None,
+        mem_dir=tmp_path / "memory",
+        memory_proposal_sink=[],
+    )
+
+
+def test_read_image_is_registered_in_the_native_loop(tmp_path: Path) -> None:
+    """Без этого весь путь вложений упирается в «нет инструмента для картинок»."""
+    registry = _build_registry(tmp_path)
+    assert "read_image" in registry.names()
+
+
+def test_read_document_registered_only_when_markitdown_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "svarog_harness.runtime.run_assembly.document_tools_available", lambda: False
+    )
+    registry = _build_registry(tmp_path)
+    assert "read_document" not in registry.names()
+    assert "read_image" in registry.names(), "картинки от markitdown не зависят"
