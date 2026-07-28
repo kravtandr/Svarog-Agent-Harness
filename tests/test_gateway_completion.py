@@ -67,6 +67,31 @@ async def test_file_suggestions_come_from_session_workspace(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_suggestions_use_named_workspace_not_service_workspace(service) -> None:
+    """Сессия на named workspace (ADR-0017) — подсказки не должны утекать из общего workspace.
+
+    В `test_file_suggestions_come_from_session_workspace` сессия без repo/workspace_name
+    получает `meta["workspace"] == self.workspace` (см. `_provision_workspace`), поэтому
+    тот тест не отличает чтение `session.meta["workspace"]` от бага "всегда self.workspace".
+    Здесь workspace сессии — заведомо другой каталог.
+    """
+    await service.create_workspace("proj")
+    session = await service.create_session(title="именованный", workspace_name="proj")
+    assert session.workspace is not None
+    session_ws = Path(session.workspace)
+    assert session_ws != service.workspace.expanduser().resolve()
+
+    (session_ws / "свой.md").write_text("текст", encoding="utf-8")
+    (service.workspace / "чужой.md").write_text("текст", encoding="utf-8")
+
+    found = await service.file_suggestions(session.session_id, "@")
+    paths = [s.value for s in found]
+
+    assert "@свой.md" in paths
+    assert "@чужой.md" not in paths
+
+
+@pytest.mark.asyncio
 async def test_files_endpoint_filters_by_query(service) -> None:
     session = await service.create_session(title="фильтр")
     (service.workspace / "readme.md").write_text("x", encoding="utf-8")
