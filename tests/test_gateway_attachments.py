@@ -11,6 +11,7 @@ from svarog_harness.gateway.api import _read_capped, create_app
 from svarog_harness.gateway.attachments import (
     ALLOWED_SUFFIXES,
     MAX_UPLOAD_BYTES,
+    AttachmentPathError,
     AttachmentTooLarge,
     AttachmentTypeError,
     ensure_git_excluded,
@@ -18,6 +19,7 @@ from svarog_harness.gateway.attachments import (
     store_attachment,
 )
 from svarog_harness.gitflow import GitRepo
+from svarog_harness.trace.lookup import find_run_by_prefix
 
 
 def _write_config(ws: Path, tmp_path: Path) -> None:
@@ -349,3 +351,40 @@ async def test_upload_unknown_session_gives_404(service: GatewayService) -> None
         files={"file": ("скрин.png", b"\x89PNG", "image/png")},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_attachment_paths_are_appended_to_task_text(service) -> None:
+    session = await service.create_session(title="с вложением")
+    stored = await service.store_attachment(session.session_id, "скрин.png", b"\x89PNG")
+
+    run_id = await service.send_message(
+        session.session_id, "посмотри баг", None, attachments=[stored.path]
+    )
+
+    async def read(db):
+        run = await find_run_by_prefix(db, run_id)
+        return run.task
+
+    task = await service._read(read)
+    assert "посмотри баг" in task
+    assert stored.path in task
+    assert "read_image" in task, "агенту сказано, чем это читать"
+
+
+@pytest.mark.asyncio
+async def test_path_outside_attachments_is_rejected(service) -> None:
+    session = await service.create_session(title="чужое")
+    with pytest.raises(AttachmentPathError):
+        await service.send_message(
+            session.session_id, "текст", None, attachments=["../../etc/passwd"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_attachment_is_rejected(service) -> None:
+    session = await service.create_session(title="нет файла")
+    with pytest.raises(AttachmentPathError):
+        await service.send_message(
+            session.session_id, "текст", None, attachments=[".attachments/нет.png"]
+        )

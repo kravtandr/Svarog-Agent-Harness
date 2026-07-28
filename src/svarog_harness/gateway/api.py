@@ -32,6 +32,7 @@ from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
 from svarog_harness.gateway.attachments import (
     MAX_UPLOAD_BYTES,
+    AttachmentPathError,
     AttachmentTooLarge,
     AttachmentTypeError,
 )
@@ -384,6 +385,7 @@ def create_app(
                 req.text,
                 req.autonomy,
                 RunOverride(executor=req.executor, provider=req.provider, model=req.model),
+                attachments=req.attachments,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -403,6 +405,8 @@ def create_app(
             # Выбор в поле ввода несовместим с конфигом — это ввод человека,
             # а не сбой сервера: 422 с текстом, который говорит, что делать.
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        except AttachmentPathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------

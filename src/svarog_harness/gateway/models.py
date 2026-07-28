@@ -155,6 +155,8 @@ class SendMessageRequest(BaseModel):
     executor: Literal["native", "external"] | None = None
     provider: str | None = None
     model: str | None = None
+    # Относительные пути из `.attachments/` этой сессии (задача 7).
+    attachments: list[str] = []
 
 
 class SessionView(BaseModel):

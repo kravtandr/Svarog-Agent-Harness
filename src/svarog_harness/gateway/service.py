@@ -13,7 +13,7 @@ import os
 import tarfile
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +28,12 @@ from svarog_harness.cli.chat_completion import Suggestion, at_suggestions
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
-from svarog_harness.gateway.attachments import StoredAttachment, store_attachment
+from svarog_harness.gateway.attachments import (
+    StoredAttachment,
+    attachments_note,
+    store_attachment,
+    verify_attachment,
+)
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.executors import ExecutorOption, executor_options
 from svarog_harness.gateway.models import (
@@ -780,6 +785,7 @@ class GatewayService:
         text: str,
         autonomy: AutonomyMode | None,
         override: RunOverride = RunOverride(),
+        attachments: Sequence[str] = (),
     ) -> str:
         """Сообщение чата → отдельный run в workspace сессии с её историей.
 
@@ -791,6 +797,10 @@ class GatewayService:
         `override` — выбор в поле ввода (задача 3), а не правка svarog.yaml:
         производный конфиг строится до проверок занятости workspace, чтобы
         негодный override отвечал 422 раньше, чем занятость — 409.
+
+        `attachments` — относительные пути из `.attachments/` этой сессии
+        (задача 7); проверяются сразу после резолва workspace, до захвата
+        lease — негодный путь отвечает 400 раньше, чем стоит занятость.
         """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
@@ -823,6 +833,10 @@ class GatewayService:
             raise UnknownWorkspaceError(
                 f"workspace сессии {session.id[:8]} больше не существует: {workspace}"
             )
+        if attachments:
+            for rel in attachments:
+                verify_attachment(workspace, rel)  # AttachmentPathError → 400
+            text = f"{text}\n\n{attachments_note(list(attachments))}"
         if await self._workspace_busy(workspace):
             raise WorkspaceBusyError(f"в сессии {session.id[:8]} ещё выполняется предыдущий run")
         history = (

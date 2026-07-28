@@ -31,6 +31,10 @@ class AttachmentTooLarge(ValueError):  # noqa: N818 — имя из интерф
     """Файл больше потолка; наружу — HTTP 413."""
 
 
+class AttachmentPathError(ValueError):
+    """Путь вложения не из `.attachments/` этой сессии; наружу — HTTP 400."""
+
+
 @dataclass(frozen=True)
 class StoredAttachment:
     path: str  # относительно workspace: ".attachments/ab12_скрин.png"
@@ -87,6 +91,27 @@ async def store_attachment(workspace: Path, name: str, data: bytes) -> StoredAtt
         mime=mime,
         too_large_for_vision=mime is not None and len(data) > _IMAGE_LIMIT_BYTES,
     )
+
+
+def attachments_note(paths: list[str]) -> str:
+    """Строка, которой сообщение сообщает агенту о вложениях.
+
+    Дописывается к тексту задачи и попадает в трассу — то есть в ленте
+    видно ровно то, что получил агент, без скрытых добавок.
+    """
+    listed = ", ".join(paths)
+    return f"Вложения (прочитай их read_image / read_document): {listed}"
+
+
+def verify_attachment(workspace: Path, rel: str) -> Path:
+    """Путь обязан лежать в `.attachments/` этой рабочей папки и существовать."""
+    root = (workspace / ATTACHMENTS_DIR).resolve()
+    candidate = (workspace / rel).resolve()
+    if not candidate.is_relative_to(root):
+        raise AttachmentPathError(f"вложение '{rel}' не из {ATTACHMENTS_DIR} этой сессии")
+    if not candidate.is_file():
+        raise AttachmentPathError(f"вложения '{rel}' нет на диске")
+    return candidate
 
 
 async def ensure_git_excluded(workspace: Path, pattern: str) -> None:
