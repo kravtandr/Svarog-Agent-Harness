@@ -274,6 +274,37 @@ async def test_upload_rejects_bad_suffix_with_415(service: GatewayService) -> No
 
 
 @pytest.mark.asyncio
+async def test_upload_rejects_over_long_name_with_415(service: GatewayService) -> None:
+    """Слишком длинное имя валит `write_bytes` в `OSError` (ENAMETOOLONG) —
+    проверяем, что это доходит до HTTP-слоя как чистый 415, а не утекает
+    как 500.
+
+    NUL-байт в имени (см. test_nul_byte_in_name_rejected_not_500 — тест на
+    чистой функции) был бы более прямой демонстрацией того же класса бага
+    через реальный эндпоинт, но `TestClient`/`httpx` percent-кодирует NUL в
+    значении `Content-Disposition` ещё на клиенте: сервер получает буквальный
+    текст `"%00"`, а не настоящий нулевой байт (проверено эмпирически —
+    `file.filename` на сервере оказывается `"...%00.png"`), так что через
+    этот путь ветку с NUL не воспроизвести без обращения к internals в
+    обход HTTP. Слишком длинное имя — тот же класс исключения (`OSError`,
+    не `ValueError`) и реально проходит через `TestClient` до сервера
+    (multipart-парсер не режет имя вплоть до нескольких тысяч символов, а
+    ENAMETOOLONG на файловой системе срабатывает уже на паре сотен байт),
+    так что именно оно годится как end-to-end представитель этого класса.
+    """
+    session = await service.create_session(title="длинное имя")
+    client = TestClient(create_app(service=service))
+
+    long_name = "a" * 300 + ".png"
+    response = client.post(
+        f"/sessions/{session.session_id}/attachments",
+        files={"file": (long_name, b"\x89PNG", "image/png")},
+    )
+
+    assert response.status_code == 415
+
+
+@pytest.mark.asyncio
 async def test_upload_refuses_while_run_is_live(service: GatewayService) -> None:
     """Прикреплять файл к сессии с идущим запуском нельзя — как и удалять
     её историю (ср. test_delete_session_refuses_while_run_is_live)."""
