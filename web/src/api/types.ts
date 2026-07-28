@@ -61,6 +61,9 @@ export interface ConfigDiff {
   path: string;
   lines: DiffLine[];
   changes: number;
+  // true, если правка легла в файл, но применится только после того, как
+  // текущие запуски закончатся (снимок конфига под живым run'ом не меняется).
+  restart_required: boolean;
 }
 
 export interface SecretView {

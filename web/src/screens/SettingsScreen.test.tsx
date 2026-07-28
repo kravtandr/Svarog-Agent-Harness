@@ -60,10 +60,14 @@ const fakeApi = (over: Partial<Api> = {}): Api =>
         { kind: "del", text: "  autonomy: yolo" },
         { kind: "add", text: "  autonomy: supervised" },
       ],
+      restart_required: false,
     }),
-    saveConfig: vi
-      .fn()
-      .mockResolvedValue({ path: config.path, changes: 0, lines: [] }),
+    saveConfig: vi.fn().mockResolvedValue({
+      path: config.path,
+      changes: 0,
+      lines: [],
+      restart_required: false,
+    }),
     secrets: vi.fn().mockResolvedValue([
       { name: "PROVIDER_API_KEY", present: true },
       { name: "GITHUB_TOKEN", present: false },
@@ -167,6 +171,62 @@ describe("экран настроек", () => {
       expect(screen.getByText(/должно быть > 0/)).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+  });
+
+  it("сообщает, что правка вступит в силу после текущих запусков", async () => {
+    const api = fakeApi({
+      saveConfig: vi.fn().mockResolvedValue({
+        path: config.path,
+        changes: 0,
+        lines: [],
+        restart_required: true,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Политики и автономия" }),
+      ).toBeInTheDocument(),
+    );
+
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /уровень автономии/i }),
+      "supervised",
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/2 изменения/)).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/вступит в силу.*текущ.*запуск/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("не показывает эту заметку, когда перезапуск не нужен", async () => {
+    const api = fakeApi();
+    render(<SettingsScreen api={api} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Политики и автономия" }),
+      ).toBeInTheDocument(),
+    );
+
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /уровень автономии/i }),
+      "supervised",
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/2 изменения/)).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/вступит в силу.*текущ.*запуск/i),
+    ).not.toBeInTheDocument();
   });
 
   it("показывает имена секретов без значений", async () => {

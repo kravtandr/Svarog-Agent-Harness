@@ -21,10 +21,18 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       .fn()
       .mockResolvedValue({ run_id: "r1", state: "running" }),
     config: vi.fn().mockResolvedValue({ path: "", sections: [] }),
-    previewConfig: vi
-      .fn()
-      .mockResolvedValue({ path: "", lines: [], changes: 0 }),
-    saveConfig: vi.fn().mockResolvedValue({ path: "", lines: [], changes: 0 }),
+    previewConfig: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
+    saveConfig: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
     secrets: vi.fn().mockResolvedValue([]),
     memoryTree: vi.fn().mockResolvedValue([]),
     memoryFile: vi.fn().mockResolvedValue({

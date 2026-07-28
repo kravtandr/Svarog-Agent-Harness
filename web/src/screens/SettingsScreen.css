@@ -45,6 +45,15 @@
   font-size: 12px;
   color: var(--faint);
 }
+.settings__notice {
+  max-width: 58ch;
+  margin: -12px 0 22px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12.8px;
+}
 
 .field {
   max-width: 620px;

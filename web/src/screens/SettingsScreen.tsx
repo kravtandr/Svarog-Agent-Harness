@@ -142,6 +142,7 @@ export function SettingsScreen({ api }: { api: Api }) {
   const [error, setError] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<SecretView[] | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [restartRequired, setRestartRequired] = useState(false);
 
   useEffect(() => {
     api.config().then((view) => {
@@ -189,7 +190,8 @@ export function SettingsScreen({ api }: { api: Api }) {
   }, [api, edits]);
 
   const save = useCallback(async () => {
-    await api.saveConfig(edits);
+    const result = await api.saveConfig(edits);
+    setRestartRequired(result.restart_required);
     setEdits({});
     setSheetOpen(false);
     setConfig(await api.config());
@@ -254,6 +256,12 @@ export function SettingsScreen({ api }: { api: Api }) {
             <>
               <h2 className="settings__title">{section.title}</h2>
               <p className="settings__path">{config.path}</p>
+              {restartRequired && (
+                <p className="settings__notice">
+                  Правка сохранена, но вступит в силу только после того, как
+                  завершатся текущие запуски.
+                </p>
+              )}
               {section.fields.map((field) => (
                 <div key={field.path}>
                   <Field
