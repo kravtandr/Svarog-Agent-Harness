@@ -31,6 +31,7 @@ from svarog_harness.gateway.models import (
     CreateSessionRequest,
     CreateWorkspaceRequest,
     DirListing,
+    ExecutorOptionView,
     FileEntry,
     MemoryFileView,
     MemoryHitView,
@@ -232,6 +233,12 @@ def create_app(
     @app.get("/whoami", response_model=WhoamiView)
     async def whoami(service: ServiceDep) -> WhoamiView:
         return await service.whoami()
+
+    # --- исполнители composer'а (задача 3) ---------------------------------
+
+    @app.get("/executors", response_model=list[ExecutorOptionView])
+    async def list_executors(service: ServiceDep) -> list[ExecutorOptionView]:
+        return [ExecutorOptionView(**vars(option)) for option in service.executor_options()]
 
     # --- каталог моделей (задача 6) ---------------------------------------
 

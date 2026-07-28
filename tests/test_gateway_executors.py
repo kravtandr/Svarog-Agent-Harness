@@ -3,8 +3,12 @@
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from svarog_harness.config.loader import load_config
+from svarog_harness.gateway import GatewayService
+from svarog_harness.gateway.api import create_app
+from svarog_harness.gateway.executors import executor_options
 from svarog_harness.gateway.overrides import OverrideError, RunOverride, apply_override
 from svarog_harness.runtime.agents import (
     ADAPTER_BINARIES,
@@ -107,3 +111,40 @@ def test_adapter_only_override_on_already_external_config(tmp_path: Path) -> Non
     derived = apply_override(cfg, RunOverride(adapter="opencode"))
     assert derived.executor.external.adapter == "opencode"
     assert derived.executor.external.image == DEFAULT_OPENCODE_IMAGE
+
+
+# --- список исполнителей для селекта (задача 3) ---------------------------
+
+
+@pytest.fixture
+def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = _config(tmp_path)
+    return GatewayService(cfg, tmp_path / "ws")
+
+
+def test_native_always_present_and_active_matches_config(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)  # executor.type = external, adapter = claude-code
+    options = executor_options(cfg)
+    by_value = {o.value: o for o in options}
+    assert by_value["native"].kind == "native"
+    assert by_value["native"].available is True
+    assert by_value["claude-code"].is_active is True
+    assert by_value["native"].is_active is False
+
+
+def test_configured_adapter_is_available_even_without_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("svarog_harness.gateway.executors.adapter_available", lambda _: False)
+    options = {o.value: o for o in executor_options(_config(tmp_path))}
+    assert options["claude-code"].available is True, "прописан в конфиге"
+    assert options["opencode"].available is False
+    assert "codex" in options, "недоступный адаптер показывается, а не прячется"
+
+
+def test_executors_endpoint(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+    body = client.get("/executors").json()
+    assert body[0]["value"] == "native"
+    assert all("available" in o and "is_active" in o for o in body)

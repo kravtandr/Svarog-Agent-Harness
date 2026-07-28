@@ -210,6 +210,16 @@ class SecretView(BaseModel):
     present: bool
 
 
+class ExecutorOptionView(BaseModel):
+    """Вариант исполнителя для селекта поля ввода (задача 3)."""
+
+    value: str
+    kind: Literal["native", "external"]
+    adapter: str | None = None
+    available: bool
+    is_active: bool
+
+
 class ThreadItemView(BaseModel):
     """Элемент ленты в той же форме, в какой его собирает живой поток.
 

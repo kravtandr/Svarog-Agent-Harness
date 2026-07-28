@@ -28,6 +28,7 @@ from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
+from svarog_harness.gateway.executors import ExecutorOption, executor_options
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
@@ -359,6 +360,10 @@ class GatewayService:
             )
             for name, provider in sorted(self.cfg.models.providers.items())
         ]
+
+    def executor_options(self) -> list[ExecutorOption]:
+        """Варианты исполнителя по текущему конфигу и наличию CLI адаптеров."""
+        return executor_options(self.cfg)
 
     async def provider_models(self, name: str) -> list[ModelCard]:
         """Список моделей провайдера с TTL-кэшем; CatalogError → 502.
