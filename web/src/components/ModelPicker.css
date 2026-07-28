@@ -1,0 +1,108 @@
+/* Плавающая панель: сама коробка + позиционирование задаёт обёртка
+   (композер в следующей задаче). Здесь — только вид и узкий экран. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100vw - 32px));
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    0 14px 40px rgba(0, 0, 0, 0.4);
+}
+
+.picker__search {
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+.picker__search::placeholder {
+  color: var(--faint);
+}
+
+.picker__error {
+  margin: 10px 2px 0;
+  font-size: 12.5px;
+  color: var(--bad);
+}
+
+.picker__empty {
+  margin: 10px 2px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.picker__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.picker__row:hover {
+  background: var(--raised);
+}
+/* Единственный акцент здесь — строка текущей модели. */
+.picker__row--current {
+  background: rgba(210, 98, 44, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(210, 98, 44, 0.35);
+}
+
+.picker__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker__meta {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* Узкий экран: лист снизу вместо плавающей панели. */
+@media (max-width: 899px) {
+  .picker {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 10;
+    width: auto;
+    max-height: 70vh;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -14px 40px rgba(0, 0, 0, 0.5);
+  }
+  .picker__row {
+    min-height: 44px;
+  }
+}
