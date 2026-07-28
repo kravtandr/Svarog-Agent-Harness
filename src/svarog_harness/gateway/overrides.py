@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Literal, Self
 
 from svarog_harness.config.schema import SvarogConfig
+from svarog_harness.runtime.agents import EXTERNAL_ADAPTERS
+from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
 
 # Ключ поддерева override в Run.meta.
 OVERRIDE_META_KEY = "override"
@@ -35,13 +37,24 @@ class RunOverride:
     executor: ExecutorKind | None = None
     provider: str | None = None
     model: str | None = None
+    adapter: str | None = None
 
     def is_empty(self) -> bool:
-        return self.executor is None and self.provider is None and self.model is None
+        return (
+            self.executor is None
+            and self.provider is None
+            and self.model is None
+            and self.adapter is None
+        )
 
     def to_meta(self) -> dict[str, str]:
         """Только заданные поля: пустые ключи в meta ничего не значат."""
-        raw = {"executor": self.executor, "provider": self.provider, "model": self.model}
+        raw = {
+            "executor": self.executor,
+            "provider": self.provider,
+            "model": self.model,
+            "adapter": self.adapter,
+        }
         return {key: value for key, value in raw.items() if value is not None}
 
     @classmethod
@@ -57,11 +70,23 @@ class RunOverride:
         executor = raw.get("executor")
         provider = raw.get("provider")
         model = raw.get("model")
+        adapter = raw.get("adapter")
         return cls(
             executor=executor if executor in ("native", "external") else None,
             provider=provider if isinstance(provider, str) else None,
             model=model if isinstance(model, str) else None,
+            adapter=adapter if adapter in EXTERNAL_ADAPTERS else None,
         )
+
+
+# Образы per-adapter: те же дефолты, что пишет `svarog init`. Подменяем
+# образ вместе с адаптером, иначе в sandbox остаётся CLI прежнего агента и
+# запуск падает `command not found`. Кастомный образ не трогаем — его
+# поставили руками, и подмена молча увела бы запуск в другой контейнер.
+_ADAPTER_IMAGES: dict[str, str] = {
+    "claude-code": DEFAULT_CLAUDE_IMAGE,
+    "opencode": DEFAULT_OPENCODE_IMAGE,
+}
 
 
 def prices_to_meta(prices: tuple[float, float] | None) -> dict[str, float] | None:
@@ -123,6 +148,34 @@ def apply_override(
 
     update: dict[str, object] = {}
 
+    if ov.adapter is not None:
+        kind = ov.executor if ov.executor is not None else cfg.executor.type
+        if kind != "external":
+            raise OverrideError(
+                f"адаптер '{ov.adapter}' имеет смысл только с внешним агентом; "
+                f"сейчас исполнитель native"
+            )
+        if cfg.executor.external is None:
+            raise OverrideError(
+                "внешний агент требует секцию executor.external в svarog.yaml "
+                "(адаптер и образ sandbox, ADR-0016)"
+            )
+        update_external: dict[str, object] = {"adapter": ov.adapter}
+        current_image = cfg.executor.external.image
+        if current_image in _ADAPTER_IMAGES.values():
+            wanted = _ADAPTER_IMAGES.get(ov.adapter)
+            if wanted is None:
+                raise OverrideError(
+                    f"под адаптер '{ov.adapter}' в проекте нет готового образа: "
+                    f"соберите свой и укажите его в executor.external.image — "
+                    f"иначе запуск пойдёт в контейнер другого агента"
+                )
+            update_external["image"] = wanted
+        external = cfg.executor.external.model_copy(update=update_external)
+        update["executor"] = cfg.executor.model_copy(
+            update={"type": "external", "external": external}
+        )
+
     if ov.executor == "external":
         if cfg.executor.external is None:
             raise OverrideError(
@@ -134,7 +187,9 @@ def apply_override(
                 f"внешний агент требует sandbox.type='docker', сейчас "
                 f"'{cfg.sandbox.type}' (fail-closed, ADR-0016)"
             )
-    if ov.executor is not None:
+    # Ветка ov.executor ниже не должна затирать результат адаптера выше: если
+    # adapter задан, executor уже учтён в update["executor"].
+    if ov.executor is not None and ov.adapter is None:
         update["executor"] = cfg.executor.model_copy(update={"type": ov.executor})
 
     target = ov.provider if ov.provider is not None else cfg.models.default
