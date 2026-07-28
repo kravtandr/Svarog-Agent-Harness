@@ -40,8 +40,9 @@ from svarog_harness.runtime.refuel import (
     segment_progress,
     task_state_path,
 )
+from svarog_harness.runtime.summaries import short_result
 from svarog_harness.secrets import redact
-from svarog_harness.storage.models import ApprovalStatus, Run, RunState, utcnow
+from svarog_harness.storage.models import Approval, ApprovalStatus, Run, RunState, utcnow
 from svarog_harness.tools.base import Tool, ToolResult, truncate_text
 from svarog_harness.tools.guidance import BoundaryKind, note_for
 from svarog_harness.tools.registry import ToolRegistry, UnknownToolError
@@ -195,10 +196,13 @@ class AgentLoop:
         plan_update_sink: list[dict[str, object]] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, object]], None] | None = None,
+        on_tool_result: Callable[[str, str, str], None] | None = None,
+        on_approval_created: Callable[[Approval], None] | None = None,
         on_notify: Callable[[str, str], None] | None = None,
         on_run_started: Callable[[Run], None] | None = None,
         on_progress: Callable[[int, int, float, float, int], None] | None = None,
         parent_run_id: str | None = None,
+        extra_run_meta: dict[str, object] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -225,6 +229,8 @@ class AgentLoop:
         self._plan_update_sink = plan_update_sink if plan_update_sink is not None else []
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
+        self._on_tool_result = on_tool_result
+        self._on_approval_created = on_approval_created
         self._on_notify = on_notify
         # Cost/context-индикатор (ADR-0015 фаза 5): (итерация, токены за run,
         # стоимость, доля контекста 0..1) после каждого ответа провайдера.
@@ -235,6 +241,9 @@ class AgentLoop:
         self._on_run_started = on_run_started
         # Дочерний run (ADR-0015 фаза 3): ссылка на родителя в Run.parent_run_id.
         self._parent_run_id = parent_run_id
+        # Довесок вызывающей стороны (override сообщения чата) — прозрачно
+        # пробрасывается в Run.meta, loop его содержимое не читает.
+        self._extra_run_meta = extra_run_meta
         # Тайминги фаз хода (блок A §5): __init__ заводит пустой таймер на
         # случай использования без resume(). run() всегда стартует свежий Run
         # без phases (start_run) — там таймер переинициализируется, а не
@@ -278,6 +287,7 @@ class AgentLoop:
             config_hash=self._config_hash,
             workspace=str(self._workspace),
             parent_run_id=self._parent_run_id,
+            extra_meta=self._extra_run_meta,
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
@@ -595,6 +605,17 @@ class AgentLoop:
             await self._recorder.finish_tool_call(
                 record, ok=result.ok, output=result.output, error=result.error
             )
+            if self._on_tool_result is not None:
+                # Сводка уходит в поток событий и в веб-ленту, поэтому секреты
+                # вырезаются здесь: redact применяется позже, при рендере для
+                # модели, — до потока он бы не дошёл.
+                self._on_tool_result(
+                    prepared.call.name,
+                    record.status.value,
+                    self._redact_text(
+                        short_result(ok=result.ok, output=result.output, error=result.error)
+                    ),
+                )
             rendered = self._render_tool_result(run, prepared.call, result)
             state.messages.append(
                 ChatMessage(role="tool", content=rendered, tool_call_id=prepared.call.id)
@@ -927,11 +948,15 @@ class AgentLoop:
                     options = question_options(approval.arguments)
                     if options:
                         payload["options"] = options
-                await self._recorder.create_approval(
+                created = await self._recorder.create_approval(
                     run,
                     action_type=approval.decision.action_type,
                     payload=payload,
                 )
+                # Интерфейс показывает гейт сразу: без этого веб-клиент узнал
+                # бы о нём только опросом /approvals.
+                if self._on_approval_created is not None:
+                    self._on_approval_created(created)
             await self._save_checkpoint(run, state)
             await self._recorder.set_run_state(
                 run, RunState.WAITING_APPROVAL, error=approval.decision.reason
@@ -1119,6 +1144,14 @@ class AgentLoop:
         await self._recorder.finish_tool_call(
             record, ok=result.ok, output=result.output, error=result.error
         )
+        if self._on_tool_result is not None:
+            self._on_tool_result(
+                call.name,
+                record.status.value,
+                self._redact_text(
+                    short_result(ok=result.ok, output=result.output, error=result.error)
+                ),
+            )
         return result
 
     def _render_tool_result(self, run: Run, call: ToolCallRequest, result: ToolResult) -> str:

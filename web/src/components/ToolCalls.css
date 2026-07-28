@@ -1,0 +1,105 @@
+/* Группа вызовов: общий фон, волосяные разделители, ни одной карточки. */
+.calls {
+  margin: 14px 0 6px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1e1d1a;
+}
+
+.call {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 12.8px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.call + .call,
+.call-detail + .call {
+  box-shadow: inset 0 1px 0 var(--line-soft);
+}
+
+.call__mark {
+  flex: 0 0 13px;
+  text-align: center;
+  color: var(--faint);
+}
+.call__server {
+  color: var(--faint);
+}
+.call__slash {
+  color: #4a4640;
+}
+.call__name {
+  color: #d8d1c6;
+}
+.call__arg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call__result {
+  white-space: nowrap;
+  color: var(--faint);
+}
+
+.call--run .call__mark,
+.call--run .call__result {
+  color: var(--ember);
+}
+.call--error .call__mark,
+.call--error .call__result {
+  color: var(--bad);
+}
+
+.call-detail {
+  padding: 0 12px 12px 36px;
+  background: #1b1a17;
+}
+.call-detail pre {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border-radius: 7px;
+  background: #141311;
+  font-family: var(--mono);
+  font-size: 12.2px;
+  line-height: 1.7;
+  color: #d6cfc4;
+  overflow-x: auto;
+}
+.call-detail__label {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+/* Узкий экран: две строки. Результат не обрезается ради аргумента. */
+@media (max-width: 899px) {
+  .call {
+    flex-wrap: wrap;
+    row-gap: 2px;
+    min-height: 44px;
+  }
+  .call__arg {
+    order: 5;
+    flex: 1 0 100%;
+    padding-left: 23px;
+    font-size: 11.8px;
+    color: var(--faint);
+  }
+  .call__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}

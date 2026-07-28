@@ -67,12 +67,19 @@ class TraceRecorder:
         config_hash: str | None = None,
         workspace: str | None = None,
         parent_run_id: str | None = None,
+        extra_meta: dict[str, object] | None = None,
     ) -> Run:
         # config_hash — снимок security-конфига run'а (ADR-0015 §0.4): resume
         # сверяет с ним текущий конфиг и fail-closed при расхождении.
         meta: dict[str, object] = {"model": model}
         if config_hash is not None:
             meta[CONFIG_HASH_META_KEY] = config_hash
+        # extra_meta — непрозрачный довесок вызывающей стороны (override
+        # сообщения чата). Кладём после штатных ключей, но своими именами:
+        # затирать model/config_hash он не должен.
+        for key, value in (extra_meta or {}).items():
+            if key not in meta:
+                meta[key] = value
         now = utcnow()
         # chat переиспользует одну Session на серию runs (§10.1, ADR-0008).
         if session_id is None:

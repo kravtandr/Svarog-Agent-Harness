@@ -93,6 +93,10 @@ class RunHooks:
     on_run_started: Callable[[Run], None] | None = None
     on_text_delta: Callable[[str], None] | None = None
     on_tool_call: Callable[[str, dict[str, object]], None] | None = None
+    # Результат вызова: (tool_name, status, короткая сводка). Нужен интерфейсам,
+    # которые показывают исход рядом с вызовом, — в БД он есть (ToolCall.result),
+    # но по ходу прогона наблюдателю недоступен.
+    on_tool_result: Callable[[str, str, str], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
     on_progress: Callable[[int, int, float, float, int], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
@@ -107,6 +111,11 @@ class RunHooks:
     # в БД — poll-цикл гейта подхватит его без suspend. None — только notify,
     # решение асинхронно через `svarog approvals` или suspend→resume.
     on_approval_requested: Callable[[Approval], None] | None = None
+    # Уведомление «approval записан» — в отличие от on_approval_requested не
+    # блокирует и не решает: нативный цикл зовёт его сразу после записи, чтобы
+    # интерфейсы (веб) показали гейт, не опрашивая /approvals. CLI его не
+    # подключает: там решение принимает блокирующий промпт выше.
+    on_approval_created: Callable[[Approval], None] | None = None
 
 
 def _approval_prompt_async(
@@ -144,11 +153,15 @@ class RunAssembly:
         *,
         store: SecretStore,
         host_store: SecretStore,
+        run_meta: dict[str, object] | None = None,
     ) -> None:
         self._cfg = cfg
         self._workspace = workspace
         self._store = store
         self._host_store = host_store
+        # Довесок вызывающей стороны (override сообщения чата, задача 1) —
+        # прозрачно уходит в Run.meta через AgentLoop/ExternalAgentExecutor.
+        self._run_meta = run_meta
         # Ленивая read-фабрика к runtime-БД (связка B): создаётся при первом
         # обращении и живёт до конца процесса — держат её только read-only
         # потребители FTS (search_memory, авто-инъекция).
@@ -342,10 +355,13 @@ class RunAssembly:
             secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
+            on_tool_result=hooks.on_tool_result,
+            on_approval_created=hooks.on_approval_created,
             on_notify=hooks.on_notify,
             on_run_started=hooks.on_run_started,
             on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,
+            extra_run_meta=self._run_meta,
         )
 
     def build_external_executor(
@@ -388,6 +404,7 @@ class RunAssembly:
             mcp_config=infra.mcp_config_path if infra is not None else None,
             settings_file=infra.settings_path if infra is not None else None,
             suspend_signal=control,
+            extra_run_meta=self._run_meta,
         )
 
     def wire_bridge_control(

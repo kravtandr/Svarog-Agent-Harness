@@ -1,0 +1,140 @@
+.composer {
+  padding: 12px 24px 16px;
+}
+.composer__inner {
+  position: relative;
+  max-width: 700px;
+  margin: 0 auto;
+}
+/* Позиционирование панели — забота обёртки (см. комментарий в ModelPicker.css). */
+.composer__picker {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+}
+.composer__box {
+  padding: 12px 14px 9px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.composer__field {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  resize: none;
+}
+.composer__field::placeholder {
+  color: var(--faint);
+}
+.composer__field:focus {
+  outline: none;
+}
+.composer__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  /* gap-шорткат затирает предыдущий row-gap: обе оси заданы одним
+     свойством, иначе перенос строк на узком экране схлопывается без
+     вертикального зазора. */
+  gap: 4px 16px;
+  margin-top: 11px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.composer__icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: var(--raised);
+  color: var(--muted);
+  cursor: pointer;
+}
+.composer__icon:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.composer__icon--send {
+  background: var(--ember);
+  color: #1a1210;
+}
+.composer__modes {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.composer__dot {
+  display: none;
+  color: var(--faint);
+}
+/* Автономия — единственный переключатель здесь, поэтому только она
+   выглядит нажимаемой. */
+.composer__select {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 4px;
+  background: var(--raised);
+  color: #c6bfb4;
+  font-family: var(--sans);
+  font-size: inherit;
+  cursor: pointer;
+}
+/* Кнопка выбора модели: тот же приглушённый цвет, что был у статичного
+   текста — модель по-прежнему второстепенная деталь подвала, а не акцент. */
+.composer__model {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 4px;
+  background: none;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: inherit;
+  cursor: pointer;
+}
+.composer__model:hover:not(:disabled) {
+  background: var(--raised);
+}
+.composer__model:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.composer__spacer {
+  flex: 1;
+}
+.composer__hidden {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .composer {
+    padding: 10px 12px 14px;
+  }
+  .composer__icon {
+    width: 44px;
+    height: 44px;
+  }
+  .composer__foot {
+    gap: 8px;
+    font-size: 12px;
+  }
+  /* Раньше здесь был декоративный текст в одну строку с ellipsis. Теперь
+     это интерактивные контролы — обрезать их нельзя, поэтому на узком
+     экране группа сама переносится в две строки через разделитель. */
+  .composer__modes {
+    flex-wrap: wrap;
+    /* Тот же порядок, что в .composer__foot: обе оси одним gap, иначе
+       row-gap затирается шорткатом ниже. */
+    gap: 4px 5px;
+  }
+  .composer__dot {
+    display: inline;
+  }
+}

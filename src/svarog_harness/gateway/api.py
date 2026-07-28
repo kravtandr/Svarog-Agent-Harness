@@ -13,9 +13,14 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+from svarog_harness.config.loader import ConfigError
+from svarog_harness.config.paths import WorkspaceLayoutError
+from svarog_harness.gateway.catalog import CatalogError
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
@@ -27,17 +32,35 @@ from svarog_harness.gateway.models import (
     CreateWorkspaceRequest,
     DirListing,
     FileEntry,
+    MemoryFileView,
+    MemoryHitView,
+    MemoryPageView,
+    ModelCardView,
+    ProviderView,
     RunDetail,
     RunDiffView,
     RunRef,
     RunSummary,
+    SecretView,
     SendMessageRequest,
+    SessionSummary,
+    SessionThread,
     SessionView,
     SkillCard,
     WhoamiView,
     WorkspaceView,
 )
-from svarog_harness.gateway.service import CancelNotAllowedError, GatewayService
+from svarog_harness.gateway.overrides import OverrideError, RunOverride
+from svarog_harness.gateway.service import (
+    CancelNotAllowedError,
+    GatewayService,
+    MemoryDisabledError,
+    MemoryPathError,
+    SessionBusyError,
+    UnknownProviderError,
+)
+from svarog_harness.gateway.settings import ConfigDiffView, ConfigUpdateRequest, ConfigView
+from svarog_harness.gateway.static import web_dist_dir
 from svarog_harness.gitflow.provision import (
     CloneError,
     RepoUrlError,
@@ -46,6 +69,8 @@ from svarog_harness.gitflow.provision import (
     WorkspaceLimitError,
     WorkspaceNameError,
 )
+from svarog_harness.llm.openai_compatible import ApiKeyError
+from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.tenant.quota import QuotaExceededError
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
@@ -99,6 +124,26 @@ def create_app(
                 await resolver.shutdown()
 
     app = FastAPI(title="Svarog Gateway", version="0.1.0", lifespan=lifespan)
+
+    # CORS нужен только режиму раздельной разработки: в бою статика едет
+    # с того же origin, что и API, и заголовки не требуются.
+    #
+    # Имя переменной намеренно без префикса SVAROG_: pydantic-settings
+    # разбирает SVAROG_GATEWAY__* как поле секции gateway, а GatewayConfig —
+    # StrictModel, поэтому такая переменная роняла загрузку конфига целиком.
+    origins = [o for o in os.environ.get("GORN_CORS_ORIGINS", "").split(",") if o]
+    if "*" in origins:
+        # Звёздочка вместе с allow_credentials — заряженный footgun; лучше
+        # отказать явно, чем открыть API всему миру по опечатке.
+        raise ValueError("GORN_CORS_ORIGINS='*' не поддерживается: перечислите origin'ы явно")
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     def _require_service(
         authorization: Annotated[str | None, Header()] = None,
@@ -188,6 +233,24 @@ def create_app(
     async def whoami(service: ServiceDep) -> WhoamiView:
         return await service.whoami()
 
+    # --- каталог моделей (задача 6) ---------------------------------------
+
+    @app.get("/models", response_model=list[ProviderView])
+    async def list_providers(service: ServiceDep) -> list[ProviderView]:
+        return service.list_providers()
+
+    @app.get("/models/{provider}", response_model=list[ModelCardView])
+    async def provider_models(provider: str, service: ServiceDep) -> list[ModelCardView]:
+        try:
+            cards = await service.provider_models(provider)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (CatalogError, ApiKeyError) as exc:
+            # Провайдер недоступен или ключ не найден — это не сбой шлюза:
+            # 502 с причиной, чтобы человек увидел, что чинить.
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return [ModelCardView(**vars(card)) for card in cards]
+
     # --- сессии gateway-chat (ADR-0017 §2) --------------------------------
 
     @app.post("/sessions", response_model=SessionView, status_code=201)
@@ -205,6 +268,11 @@ def create_app(
         except CloneError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
 
+    # Раньше маршрута с параметром: иначе "/sessions" уедет в {session_id}.
+    @app.get("/sessions", response_model=list[SessionSummary])
+    async def list_sessions(service: ServiceDep, limit: int = 50) -> list[SessionSummary]:
+        return await service.list_sessions(limit=limit)
+
     @app.get("/sessions/{session_id}", response_model=SessionView)
     async def get_session(session_id: str, service: ServiceDep) -> SessionView:
         try:
@@ -212,10 +280,31 @@ def create_app(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
+    @app.delete("/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str, service: ServiceDep) -> None:
+        try:
+            await service.delete_session(session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.get("/sessions/{session_id}/messages", response_model=SessionThread)
+    async def session_messages(session_id: str, service: ServiceDep) -> SessionThread:
+        try:
+            return await service.session_thread(session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
         try:
-            run_id = await service.send_message(session_id, req.text, req.autonomy)
+            run_id = await service.send_message(
+                session_id,
+                req.text,
+                req.autonomy,
+                RunOverride(executor=req.executor, provider=req.provider, model=req.model),
+            )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except UnknownWorkspaceError as exc:
@@ -224,6 +313,16 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except QuotaExceededError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from None
+        except (SandboxError, WorkspaceLayoutError) as exc:
+            # Автономия, которую исполнитель не умеет (ADR-0016 §6), или
+            # workspace, пересекающийся с control-plane (ADR-0015 §0.3).
+            # И то и другое — конфигурация запуска, а не сбой сервера:
+            # 422 с текстом, а не 500 с трейсбеком в лог.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except OverrideError as exc:
+            # Выбор в поле ввода несовместим с конфигом — это ввод человека,
+            # а не сбой сервера: 422 с текстом, который говорит, что делать.
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------
@@ -342,5 +441,81 @@ def create_app(
         # Ответ на ask_user записан — возобновляем run (§6.5, ADR-0005).
         await service.resume_run(run_id)
         return RunRef(run_id=run_id, state="running")
+
+    # --- память (план 2026-07-27) ------------------------------------------
+
+    def _memory_error(exc: Exception) -> HTTPException:
+        # Память не настроена — 404 раздела, а не 500: это конфигурация, не сбой.
+        status_code = 404 if isinstance(exc, MemoryDisabledError) else 422
+        return HTTPException(status_code=status_code, detail=str(exc))
+
+    @app.get("/memory/tree", response_model=list[MemoryPageView])
+    async def memory_tree(service: ServiceDep) -> list[MemoryPageView]:
+        try:
+            return service.memory_tree()
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
+
+    @app.get("/memory/file", response_model=MemoryFileView)
+    async def memory_file(path: str, service: ServiceDep) -> MemoryFileView:
+        try:
+            return service.memory_file(path)
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
+
+    @app.get("/memory/search", response_model=list[MemoryHitView])
+    async def memory_search(q: str, service: ServiceDep, limit: int = 10) -> list[MemoryHitView]:
+        try:
+            return await service.memory_search(q, limit=limit)
+        except (MemoryDisabledError, MemoryPathError) as exc:
+            raise _memory_error(exc) from None
+
+    # --- конфигурация и секреты (план 2026-07-27) --------------------------
+
+    @app.get("/config", response_model=ConfigView)
+    async def get_config(service: ServiceDep) -> ConfigView:
+        return service.describe_config()
+
+    @app.post("/config/preview", response_model=ConfigDiffView)
+    async def preview_config(req: ConfigUpdateRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return service.preview_config(req.values)
+        except (ConfigError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/config", response_model=ConfigDiffView)
+    async def write_config(req: ConfigUpdateRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.write_config(req.values)
+        except (ConfigError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.get("/secrets", response_model=list[SecretView])
+    async def list_secrets(service: ServiceDep) -> list[SecretView]:
+        return service.list_secrets()
+
+    # --- собранный клиент (план 2026-07-27) --------------------------------
+    # Монтируется последним: маршруты API уже объявлены и в тень не уходят.
+    dist = web_dist_dir()
+    if dist is not None:
+        assets = dist / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> FileResponse:
+            return FileResponse(dist / "index.html")
+
+    else:
+
+        @app.get("/", include_in_schema=False)
+        async def index_missing() -> FileResponse:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Клиент не собран. Соберите его: "
+                    "npm --prefix web ci && npm --prefix web run build"
+                ),
+            )
 
     return app

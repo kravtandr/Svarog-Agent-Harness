@@ -1,7 +1,7 @@
 """Pydantic-схемы REST/WebSocket API (§10.4, cloud-режим — ADR-0017)."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -150,6 +150,11 @@ class CreateSessionRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1)
     autonomy: AutonomyMode | None = None
+    # Выбор в поле ввода — свойство сообщения, а не правка svarog.yaml.
+    # None во всех трёх — поведение по конфигу.
+    executor: Literal["native", "external"] | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class SessionView(BaseModel):
@@ -157,3 +162,86 @@ class SessionView(BaseModel):
     title: str
     workspace: str | None = None
     runs: list[RunSummary]
+
+
+class MemoryPageView(BaseModel):
+    """Страница памяти в дереве: путь относительно memory/ и размер."""
+
+    path: str
+    size_bytes: int
+    modified_at: datetime
+
+
+class MemoryHitView(BaseModel):
+    path: str
+    snippet: str
+
+
+class MemoryFileView(BaseModel):
+    path: str
+    text: str
+    size_bytes: int
+    modified_at: datetime
+
+
+class ProviderView(BaseModel):
+    """Запись models.providers для селектора модели, без api_key_ref (ADR-0006)."""
+
+    name: str
+    base_url: str
+    model: str
+    is_default: bool
+
+
+class ModelCardView(BaseModel):
+    """Модель из каталога провайдера — то же, что ModelCard, но для ответа API."""
+
+    id: str
+    name: str | None = None
+    context_length: int | None = None
+    input_usd_per_mtok: float | None = None
+    output_usd_per_mtok: float | None = None
+
+
+class SecretView(BaseModel):
+    """Секрет для экрана настроек: имя и факт наличия, без значения (ADR-0006)."""
+
+    name: str
+    present: bool
+
+
+class ThreadItemView(BaseModel):
+    """Элемент ленты в той же форме, в какой его собирает живой поток.
+
+    Один тип на реплику, речь агента и вызов инструмента: клиент рисует
+    историю и живые события одним компонентом, иначе они разойдутся.
+    """
+
+    kind: Literal["user", "say", "call"]
+    text: str = ""
+    server: str | None = None  # имя MCP-сервера; None — свой инструмент
+    name: str = ""
+    arg: str = ""
+    result: str = ""
+    status: str = ""
+
+
+class SessionThread(BaseModel):
+    session_id: str
+    title: str
+    items: list[ThreadItemView]
+
+
+class SessionSummary(BaseModel):
+    """Строка списка сессий для навигатора веб-клиента.
+
+    Отдельно от SessionView: там полный список runs, здесь только то, что
+    нужно левому столбцу, — иначе навигатор тянет весь трейс всех сессий.
+    """
+
+    session_id: str
+    title: str
+    workspace: str | None = None
+    updated_at: datetime
+    runs_count: int
+    last_state: str | None = None

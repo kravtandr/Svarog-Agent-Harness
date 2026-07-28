@@ -162,6 +162,7 @@ class TaskRunner:
         *,
         role: TenantRole = TenantRole.SUPERUSER,
         allow_layout_overlap: bool = False,
+        run_meta: dict[str, object] | None = None,
     ) -> None:
         # Роль фиксируется при старте (ADR-0010/0013) и заклампывает cfg
         # идемпотентно: standard → docker/hardened, superuser (по умолчанию) —
@@ -186,10 +187,18 @@ class TaskRunner:
         self._host_store: SecretStore = default_secret_store(cfg.secrets.path, env_fallback=True)
         # Межпроцессная сериализация memory-writer (ADR-0004/0007).
         self._lock: LockBackend = default_lock_backend(cfg.storage.db_path)
+        # Довесок вызывающей стороны (override сообщения чата, задача 1):
+        # сохраняем, чтобы передать в _runner_for_resume при resume в чужом
+        # workspace (свой runner переиспользуется как есть).
+        self._run_meta = run_meta
         # Сборка исполнителя вынесена (run_assembly.py): она не трогает
         # состояние run'а, только конструирует объекты из конфига.
         self._assembly = RunAssembly(
-            self._cfg, workspace, store=self._store, host_store=self._host_store
+            self._cfg,
+            workspace,
+            store=self._store,
+            host_store=self._host_store,
+            run_meta=run_meta,
         )
 
     @property
@@ -201,6 +210,11 @@ class TaskRunner:
     def host_store(self) -> SecretStore:
         """Host-скоуп секретов (provider/MCP/gateway; резолвится вне sandbox)."""
         return self._host_store
+
+    @property
+    def cfg(self) -> SvarogConfig:
+        """Конфиг runner'а после клампа по роли (и после override, если он был)."""
+        return self._cfg
 
     async def with_db[T](self, action: Callable[[AsyncSession], Awaitable[T]]) -> T:
         init_db(self._cfg.storage.db_path)
@@ -401,7 +415,10 @@ class TaskRunner:
             child_cfg = child_cfg.model_copy(
                 update={"executor": self._cfg.executor.model_copy(update={"type": "external"})}
             )
-        child_runner = TaskRunner(child_cfg, child_ws, role=self._role)
+        # Довесок родителя должен доехать до дочернего run'а: config_hash
+        # ребёнка уже несёт эффект override (child_cfg — model_copy от
+        # self._cfg), а без run_meta его Run.meta разошёлся бы с этим хэшем.
+        child_runner = TaskRunner(child_cfg, child_ws, role=self._role, run_meta=self._run_meta)
         child_infra: ExternalAgentInfra | None = None
         if delegate:
             # Fail-closed гейты (docker-only §2, supervised §6) возвращаются
@@ -709,6 +726,7 @@ class TaskRunner:
             workspace,
             role=self._role,
             allow_layout_overlap=self._allow_layout_overlap,
+            run_meta=self._run_meta,
         )
 
     async def resume(self, run_id: str, *, hooks: RunHooks) -> RunOutcome:

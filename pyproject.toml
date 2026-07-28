@@ -75,6 +75,12 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/svarog_harness"]
 
+# Бандл клиента собирается до сборки пакета (шаг CI) и едет внутри колеса,
+# чтобы запуск Сварога не требовал Node. Каталога может не быть — сборка
+# пакета без клиента остаётся возможной.
+[tool.hatch.build.targets.wheel.force-include]
+"web/dist" = "svarog_harness/gateway/web"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -101,6 +107,11 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/svarog_harness/storage/migrations/versions/*" = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# RunOverride — frozen dataclass (immutable): безопасен как default сообщения
+# по умолчанию (override сообщения чата, задача 3).
+extend-immutable-calls = ["svarog_harness.gateway.overrides.RunOverride"]
 
 [tool.ruff.lint.isort]
 # Явная классификация first-party: иначе isort зависит от того, как установлен

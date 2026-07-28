@@ -38,3 +38,21 @@ jobs:
 
       - name: Evals (MVP criteria §26)
         run: uv run pytest evals
+
+      # Клиент (план 2026-07-27): Node нужен только для сборки бандла,
+      # запуск Сварога его не требует.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Web install
+        run: npm --prefix web ci
+
+      - name: Web typecheck and tests
+        run: npm --prefix web test
+
+      - name: Web build
+        run: npm --prefix web run build

@@ -19,23 +19,49 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.paths import skills_dirs
+from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
+from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
+from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
+    MemoryFileView,
+    MemoryHitView,
+    MemoryPageView,
+    ProviderView,
     RepoSpec,
     RunDetail,
     RunDiffView,
     RunSummary,
+    SecretView,
+    SessionSummary,
+    SessionThread,
     SessionView,
     SkillCard,
+    ThreadItemView,
     ToolCallView,
     WhoamiView,
     WorkspaceView,
+)
+from svarog_harness.gateway.overrides import (
+    RunOverride,
+    apply_override,
+    prices_from_meta,
+    run_meta_for,
+)
+from svarog_harness.gateway.settings import (
+    ConfigDiffView,
+    ConfigView,
+    apply_values,
+    describe_config,
+    diff_lines,
+    patch_yaml_text,
 )
 from svarog_harness.gitflow.provision import (
     DEFAULT_GIT_CREDENTIALS_REF,
@@ -51,12 +77,15 @@ from svarog_harness.gitflow.provision import (
     task_workspace_dir,
 )
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.llm.openai_compatible import ApiKeyError, resolve_api_key
 from svarog_harness.llm.provider import ChatMessage
+from svarog_harness.memory.index import search as memory_search
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
+from svarog_harness.runtime.summaries import short_arg, short_result
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
-from svarog_harness.storage.models import Run, RunState, Session
+from svarog_harness.storage.models import Run, RunState, Session, ToolCall, ToolCallStatus
 from svarog_harness.tenant.quota import QuotaUsage
 from svarog_harness.trace.lookup import (
     ApprovalNotFoundError,
@@ -78,10 +107,37 @@ _LIVE_STATES = (RunState.PENDING, RunState.RUNNING, RunState.WAITING_APPROVAL, R
 _TERMINAL_STATES = (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED)
 # Сообщений истории сессии в контексте run'а (как _CHAT_HISTORY_LIMIT в CLI-chat).
 _SESSION_HISTORY_LIMIT = 24
+# TTL кэша каталога моделей провайдера: список моделей у провайдера меняется,
+# но не на каждый запрос — 10 минут достаточно, чтобы не дёргать сеть на
+# каждое открытие селектора модели.
+CATALOG_TTL_SEC = 600.0
+# TTL отрицательного кэша (неудачный fetch): короче успешного — недоступность
+# провайдера обычно временная (сеть, рестарт), и через минуту стоит попробовать
+# снова, а не ждать все 10 минут. Без него `send_message` (который зовёт
+# `_derive` дважды на сообщение: сам и снова внутри `_acquire_warm`) при
+# недоступном провайдере бьёт по сети под `_warm_lock` на каждое сообщение,
+# сериализуя все чат-сессии процесса за время его недоступности.
+CATALOG_NEGATIVE_TTL_SEC = 60.0
 
 
 class CancelNotAllowedError(Exception):
     """Run уже терминален — отменять нечего (ADR-0017 §2)."""
+
+
+class SessionBusyError(Exception):
+    """В сессии есть незавершённый run — удалять её нельзя."""
+
+
+class UnknownProviderError(Exception):
+    """Провайдер не описан в models.providers — наружу как HTTP 404."""
+
+
+class MemoryDisabledError(Exception):
+    """Память не настроена в конфиге — экрана памяти быть не может."""
+
+
+class MemoryPathError(Exception):
+    """Путь страницы вне memory/ или не markdown."""
 
 
 @dataclass
@@ -96,6 +152,7 @@ class _WarmSlot:
     runner: TaskRunner
     resources: SessionResources
     last_used: float
+    override: RunOverride = RunOverride()
 
 
 @dataclass
@@ -134,20 +191,40 @@ class GatewayService:
         # сериализовано локом (двойной слот = утёкший контейнер).
         self._warm: dict[str, _WarmSlot] = {}
         self._warm_lock = asyncio.Lock()
+        # Каталоги моделей: имя провайдера → (момент загрузки, карточки).
+        # TTL, а не вечный кэш: список моделей у провайдера меняется.
+        self._catalog: dict[str, tuple[float, list[ModelCard]]] = {}
+        # Отрицательный кэш: имя провайдера → (момент неудачи, текст ошибки).
+        # Короткий TTL (CATALOG_NEGATIVE_TTL_SEC) — см. его комментарий.
+        self._catalog_failures: dict[str, tuple[float, str]] = {}
 
     # --- per-run workspaces (ADR-0017) ------------------------------------
 
-    def _runner_for(self, workspace: Path) -> TaskRunner:
+    def _runner_for(
+        self,
+        workspace: Path,
+        *,
+        cfg: SvarogConfig | None = None,
+        run_meta: dict[str, object] | None = None,
+    ) -> TaskRunner:
         """Runner для workspace run'а; workspace сервиса — общий self._runner.
 
         Per-run runner делит с сервисом конфиг (та же БД/память/секреты
         тенанта) и отличается только рабочим деревом — изоляция путей ядра
-        уже параметризована по workspace (ADR-0012).
+        уже параметризована по workspace (ADR-0012). Общий runner переиспользуется
+        только когда нет ни override-конфига, ни run_meta — иначе у run'а
+        своя, производная конфигурация (override сообщения, задача 1).
         """
         ws = workspace.expanduser().resolve()
-        if ws == self.workspace.expanduser().resolve():
+        # apply_override возвращает тот же объект, если override пуст (overrides.py):
+        # cfg is self.cfg означает «производной конфигурации нет», как и cfg is None.
+        if (
+            (cfg is None or cfg is self.cfg)
+            and run_meta is None
+            and ws == self.workspace.expanduser().resolve()
+        ):
             return self._runner
-        return TaskRunner(self.cfg, ws, role=self.role)
+        return TaskRunner(cfg or self.cfg, ws, role=self.role, run_meta=run_meta)
 
     async def _provision_workspace(
         self, task: str, repo: RepoSpec | None, name: str | None
@@ -196,27 +273,47 @@ class GatewayService:
     # --- тёплые sandbox'ы сессий (ADR-0017) --------------------------------
 
     async def _acquire_warm(
-        self, session_id: str, workspace: Path, autonomy: AutonomyMode
+        self,
+        session_id: str,
+        workspace: Path,
+        autonomy: AutonomyMode,
+        override: RunOverride = RunOverride(),
     ) -> _WarmSlot | None:
         """Слот тёплого sandbox сессии; None — фича выключена (ttl=0).
 
         Первый вызов сессии поднимает env/infra/MCP один раз; дальнейшие
-        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s).
+        сообщения переиспользуют их, экономя старт контейнера (~1.5-3s). Слот
+        держит override, под которым он поднят: сообщение с тем же override
+        переиспользует слот, а с другим — получает свежий (старый закрывается,
+        иначе исполнитель или провайдер прошлого сообщения молча просочится
+        в новое).
         """
         if self.cfg.cloud.warm_session_ttl_sec <= 0:
             return None
         async with self._warm_lock:
             slot = self._warm.get(session_id)
-            if slot is not None:
+            if slot is not None and slot.override == override:
                 slot.last_used = time.monotonic()
                 return slot
-            runner = self._runner_for(workspace)
+            if slot is not None:
+                # Слот держит env/MCP, поднятые под прошлым конфигом: с другим
+                # исполнителем или провайдером это чужой sandbox.
+                await self._drop_warm(session_id)
+            # Через _derive, а не голый apply_override: этот слот держит
+            # runner, от cfg которого при старте посчитается config_hash —
+            # он обязан совпасть с тем, что при resume соберёт _runner_for_run
+            # (тоже через _derive), иначе _assert_config_unchanged откажет
+            # resume'у (ADR-0015 §0.4).
+            cfg, prices = await self._derive(override)
+            run_meta = run_meta_for(override, prices)
+            runner = self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
             resources = await runner.prepare_session_resources(autonomy)
             slot = _WarmSlot(
                 workspace=workspace,
                 runner=runner,
                 resources=resources,
                 last_used=time.monotonic(),
+                override=override,
             )
             self._warm[session_id] = slot
             return slot
@@ -248,6 +345,78 @@ class GatewayService:
             if await self._workspace_busy(slot.workspace):
                 continue
             await self._drop_warm(session_id)
+
+    # --- каталог моделей и цены (задача 6) ---------------------------------
+
+    def list_providers(self) -> list[ProviderView]:
+        """Записи models.providers. Наружу — без api_key_ref (ADR-0006)."""
+        return [
+            ProviderView(
+                name=name,
+                base_url=provider.base_url,
+                model=provider.model,
+                is_default=name == self.cfg.models.default,
+            )
+            for name, provider in sorted(self.cfg.models.providers.items())
+        ]
+
+    async def provider_models(self, name: str) -> list[ModelCard]:
+        """Список моделей провайдера с TTL-кэшем; CatalogError → 502.
+
+        Неудача кэшируется тоже (короткий TTL, `CATALOG_NEGATIVE_TTL_SEC`):
+        иначе повторный вызов при недоступном провайдере не находит хита и
+        бьёт по сети заново, под тем же `_warm_lock`, что и все остальные
+        сессии процесса (задача 3, финал ревью). Хит отрицательного кэша
+        поднимает тот же `CatalogError`, что и реальный fetch, — поведение
+        502 у эндпоинта не меняется, пустой список наружу не уходит.
+        """
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        now = time.monotonic()
+        cached = self._catalog.get(name)
+        if cached is not None and now - cached[0] < CATALOG_TTL_SEC:
+            return cached[1]
+        failed = self._catalog_failures.get(name)
+        if failed is not None and now - failed[0] < CATALOG_NEGATIVE_TTL_SEC:
+            raise CatalogError(failed[1])
+        api_key = resolve_api_key(provider, self._runner.host_store)
+        try:
+            cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        except CatalogError as exc:
+            self._catalog_failures[name] = (now, str(exc))
+            raise
+        self._catalog[name] = (now, cards)
+        self._catalog_failures.pop(name, None)
+        return cards
+
+    async def _model_prices(self, provider: str, model: str) -> tuple[float, float] | None:
+        """Цены модели из каталога; каталог недоступен — цены из конфига."""
+        try:
+            cards = await self.provider_models(provider)
+        except (UnknownProviderError, CatalogError, ApiKeyError):
+            return None
+        for card in cards:
+            if card.id == model:
+                if card.input_usd_per_mtok is None or card.output_usd_per_mtok is None:
+                    return None
+                return (card.input_usd_per_mtok, card.output_usd_per_mtok)
+        return None
+
+    async def _derive(
+        self, override: RunOverride
+    ) -> tuple[SvarogConfig, tuple[float, float] | None]:
+        """Производный конфиг сообщения вместе с ценами выбранной модели.
+
+        Цены возвращаются отдельно от cfg, чтобы вызывающая сторона могла
+        записать их в Run.meta (`run_meta_for`, задача 2) — resume обязан
+        пережить их как есть, а не пересчитывать через каталог заново.
+        """
+        prices = None
+        if override.model is not None:
+            target = override.provider or self.cfg.models.default
+            prices = await self._model_prices(target, override.model)
+        return apply_override(self.cfg, override, prices=prices), prices
 
     # --- запуск и возобновление runs -------------------------------------
 
@@ -339,16 +508,33 @@ class GatewayService:
             self._publish_error(holder, started, exc)
 
     async def _runner_for_run(self, run_id: str) -> TaskRunner:
-        """Runner, привязанный к workspace существующего run'а (для resume)."""
+        """Runner для resume: workspace, override и цены читаются из строки run'а.
 
-        async def action(db: AsyncSession) -> str | None:
+        Без восстановления override дайджест конфига разойдётся со снимком
+        старта, и `_assert_config_unchanged` отклонит resume (ADR-0015 §0.4).
+
+        Цены — из Run.meta, не из каталога: `_derive` здесь намеренно не
+        вызывается, чтобы resume не бил по сети провайдера. Если бы цены
+        пересчитывались заново, недоступный к моменту resume провайдер (TTL
+        кэша истёк, `write_config` его очистил, сеть упала) молча откатывал
+        бы стоимость run'а на цены из `svarog.yaml` для другой модели того
+        же провайдера — а approval-гейт — это всегда resume (задача 2).
+        """
+
+        async def action(db: AsyncSession) -> tuple[str | None, dict[str, object]]:
             run = await find_run_by_prefix(db, run_id)
-            return run.workspace
+            return run.workspace, dict(run.meta or {})
 
-        workspace = await self._read(action)
+        workspace, meta = await self._read(action)
+        override = RunOverride.from_meta(meta)
+        cfg = (
+            apply_override(self.cfg, override, prices=prices_from_meta(meta))
+            if not override.is_empty()
+            else None
+        )
         if not workspace:
-            return self._runner
-        return self._runner_for(Path(workspace))
+            return self._runner if cfg is None else self._runner_for(self.workspace, cfg=cfg)
+        return self._runner_for(Path(workspace), cfg=cfg)
 
     # --- события ----------------------------------------------------------
 
@@ -371,11 +557,35 @@ class GatewayService:
         return RunHooks(
             on_run_started=on_started,
             on_text_delta=lambda delta: emit({"type": "text", "delta": delta}),
-            on_tool_call=lambda name, args: emit({"type": "tool_call", "tool": name}),
+            on_tool_call=lambda name, args: emit(
+                {"type": "tool_call", "tool": name, "arg": short_arg(args)}
+            ),
+            on_tool_result=lambda name, status, summary: emit(
+                {"type": "tool_result", "tool": name, "status": status, "result": summary}
+            ),
             on_notify=lambda name, reason: emit({"type": "notify", "tool": name, "reason": reason}),
             on_check=on_check,
             on_commit=lambda sha, branch, push: emit(
                 {"type": "commit", "sha": sha, "branch": branch}
+            ),
+            # Гейт появляется в ленте сразу, а не по опросу /approvals.
+            # Нативный цикл зовёт on_approval_created, внешний агент —
+            # on_approval_requested: подключены оба, событие одно.
+            on_approval_created=lambda approval: emit(
+                {
+                    "type": "approval_required",
+                    "approval_id": approval.id,
+                    "action_type": approval.action_type,
+                    "payload": approval.payload or {},
+                }
+            ),
+            on_approval_requested=lambda approval: emit(
+                {
+                    "type": "approval_required",
+                    "approval_id": approval.id,
+                    "action_type": approval.action_type,
+                    "payload": approval.payload or {},
+                }
             ),
         )
 
@@ -557,17 +767,28 @@ class GatewayService:
             session_id=session.id, title=session.title or "", workspace=meta["workspace"], runs=[]
         )
 
-    async def send_message(self, session_id: str, text: str, autonomy: AutonomyMode | None) -> str:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        autonomy: AutonomyMode | None,
+        override: RunOverride = RunOverride(),
+    ) -> str:
         """Сообщение чата → отдельный run в workspace сессии с её историей.
 
         Контекст диалога — по типу executor'а (как в CLI-chat): нативному loop
         передаётся history из trace; внешний агент (ADR-0016) продолжает
         собственную сессию по agent_session_id, history ему не нужна —
         run_once сам резолвит agent_session по session_id.
+
+        `override` — выбор в поле ввода (задача 3), а не правка svarog.yaml:
+        производный конфиг строится до проверок занятости workspace, чтобы
+        негодный override отвечал 422 раньше, чем занятость — 409.
         """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
-        external = self.cfg.executor.type == "external"
+        cfg, prices = await self._derive(override)  # OverrideError → 422
+        external = cfg.executor.type == "external"
 
         async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:
             session = await find_session_by_prefix(db, session_id)
@@ -579,6 +800,17 @@ class GatewayService:
             return session, raw
 
         session, raw = await self._read(action)
+
+        async def touch(db: AsyncSession) -> None:
+            # updated_at меняется только при UPDATE строки Session, а run'ы её
+            # не трогают: без этого навигатор сортировал бы по времени
+            # создания, и вчерашняя сессия с сообщением минуту назад падала
+            # бы в «Ранее» с холодной шкалой накала.
+            found = await find_session_by_prefix(db, session.id)
+            found.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            await db.commit()
+
+        await self._read(touch)
         workspace = Path((session.meta or {}).get("workspace") or self.workspace)
         if not workspace.is_dir():
             raise UnknownWorkspaceError(
@@ -596,10 +828,19 @@ class GatewayService:
                 for m in raw
             ]
         )
-        mode = autonomy if autonomy is not None else self.cfg.runtime.autonomy
+        mode = autonomy if autonomy is not None else cfg.runtime.autonomy
         # Тёплый sandbox сессии (ADR-0017): env/infra/MCP переживают сообщение.
-        warm = await self._acquire_warm(session.id, workspace, mode)
-        runner = warm.runner if warm is not None else self._runner_for(workspace)
+        run_meta = run_meta_for(override, prices)
+        warm = await self._acquire_warm(session.id, workspace, mode, override)
+        runner = (
+            warm.runner
+            if warm is not None
+            else self._runner_for(
+                workspace,
+                cfg=cfg if not override.is_empty() else None,
+                run_meta=run_meta,
+            )
+        )
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(
             self._run_bg(
@@ -629,6 +870,279 @@ class GatewayService:
             )
 
         return await self._read(action)
+
+    async def list_sessions(self, limit: int = 50) -> list[SessionSummary]:
+        """Сессии для навигатора: свежие сверху, без полного трейса."""
+
+        async def action(db: AsyncSession) -> list[SessionSummary]:
+            found = await db.execute(
+                select(Session).order_by(Session.updated_at.desc()).limit(limit)
+            )
+            summaries: list[SessionSummary] = []
+            for session in found.scalars():
+                runs = (
+                    (
+                        await db.execute(
+                            select(Run).where(Run.session_id == session.id).order_by(Run.created_at)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                summaries.append(
+                    SessionSummary(
+                        session_id=session.id,
+                        title=session.title or "",
+                        workspace=(session.meta or {}).get("workspace"),
+                        updated_at=session.updated_at,
+                        runs_count=len(runs),
+                        last_state=runs[-1].state.value if runs else None,
+                    )
+                )
+            return summaries
+
+        return await self._read(action)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Удалить сессию вместе с её runs (каскад в схеме, ADR-0015).
+
+        Живую сессию не трогаем: удалить историю запуска, который прямо
+        сейчас правит рабочее дерево, — способ потерять след того, что
+        уже сделано.
+        """
+
+        async def action(db: AsyncSession) -> None:
+            session = await find_session_by_prefix(db, session_id)
+            live = (
+                await db.execute(
+                    select(Run)
+                    .where(Run.session_id == session.id, Run.state.in_(_LIVE_STATES))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if live is not None:
+                raise SessionBusyError(
+                    "в этом чате ещё идёт запуск — дождитесь конца или прервите его"
+                )
+            await db.delete(session)
+            await db.commit()
+
+        await self._read(action)
+
+    async def session_thread(self, session_id: str) -> SessionThread:
+        """История сессии как лента: задача, вызовы, финальный ответ по каждому run."""
+
+        async def action(db: AsyncSession) -> SessionThread:
+            session = await find_session_by_prefix(db, session_id)
+            runs = (
+                (
+                    await db.execute(
+                        select(Run).where(Run.session_id == session.id).order_by(Run.created_at)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            recorder = TraceRecorder(db)
+            items: list[ThreadItemView] = []
+            for run in runs:
+                items.append(ThreadItemView(kind="user", text=run.task))
+                calls = (
+                    (
+                        await db.execute(
+                            select(ToolCall)
+                            .where(ToolCall.run_id == run.id)
+                            .order_by(ToolCall.started_at)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for call in calls:
+                    server, _, bare = call.tool_name.rpartition("/")
+                    items.append(
+                        ThreadItemView(
+                            kind="call",
+                            server=server or None,
+                            name=bare,
+                            arg=short_arg(call.arguments or {}),
+                            result=short_result(
+                                ok=call.status is ToolCallStatus.SUCCEEDED,
+                                output=str((call.result or {}).get("output", "")),
+                                error=call.error,
+                            ),
+                            status=call.status.value,
+                        )
+                    )
+                answer = await recorder.last_assistant_text(run)
+                if answer:
+                    items.append(ThreadItemView(kind="say", text=answer))
+            return SessionThread(session_id=session.id, title=session.title or "", items=items)
+
+        return await self._read(action)
+
+    # --- память (план 2026-07-27) ------------------------------------------
+
+    def _memory_root(self) -> Path:
+        root = memory_dir(self.cfg)
+        if root is None or not root.is_dir():
+            raise MemoryDisabledError("память не настроена: в конфиге нет memory.path")
+        return root
+
+    def _memory_file(self, rel_path: str) -> Path:
+        """Абсолютный путь страницы; выход за пределы memory/ — отказ.
+
+        Путь приходит от клиента, поэтому проверяется, а не склеивается:
+        `../../.ssh/id_rsa` не должен читаться через веб (ADR-0012).
+        """
+        root = self._memory_root()
+        target = (root / rel_path).resolve()
+        if not target.is_relative_to(root) or target.suffix != ".md":
+            raise MemoryPathError(f"недопустимый путь страницы памяти: {rel_path}")
+        return target
+
+    def memory_tree(self) -> list[MemoryPageView]:
+        """Страницы памяти как они лежат в Git — markdown, отсортированные по пути."""
+        root = self._memory_root()
+        pages: list[MemoryPageView] = []
+        for path in sorted(root.rglob("*.md")):
+            stat = path.stat()
+            pages.append(
+                MemoryPageView(
+                    path=str(path.relative_to(root)),
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                )
+            )
+        return pages
+
+    def memory_file(self, rel_path: str) -> MemoryFileView:
+        target = self._memory_file(rel_path)
+        if not target.is_file():
+            raise MemoryPathError(f"страницы памяти нет: {rel_path}")
+        stat = target.stat()
+        return MemoryFileView(
+            path=rel_path,
+            text=target.read_text(encoding="utf-8"),
+            size_bytes=stat.st_size,
+            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+        )
+
+    async def memory_search(self, query: str, limit: int = 10) -> list[MemoryHitView]:
+        """Поиск тем же механизмом, что у агента: search_memory поверх FTS5."""
+        self._memory_root()  # проверка, что память вообще настроена
+
+        async def action(db: AsyncSession) -> list[MemoryHitView]:
+            hits = await memory_search(db, query, limit=limit)
+            return [MemoryHitView(path=hit.path, snippet=hit.snippet) for hit in hits]
+
+        return await self._read(action)
+
+    # --- конфигурация и секреты (план 2026-07-27) --------------------------
+
+    @property
+    def config_path(self) -> Path:
+        """Файл, который правит интерфейс: project-уровень рядом с workspace."""
+        return self.workspace / PROJECT_CONFIG_NAME
+
+    def _config_yaml(self) -> tuple[dict[str, Any], str]:
+        """Сырой mapping файла и его текст (для диффа). Нет файла — пусто."""
+        path = self.config_path
+        if not path.is_file():
+            return {}, ""
+        text = path.read_text(encoding="utf-8")
+        raw = yaml.safe_load(text) or {}
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: верхний уровень должен быть mapping")
+        return raw, text
+
+    def describe_config(self) -> ConfigView:
+        """Форма показывает то, что лежит в файле, а не снимок при старте.
+
+        `self.cfg` зафиксирован в конструкторе и не перечитывается: если
+        показывать его, после «Сохранить» форма откатит значение на глазах
+        у человека, хотя на диске уже новое.
+        """
+        try:
+            current = load_config(project_dir=self.workspace)
+        except ConfigError:
+            # Файл поломан снаружи — показываем снимок, с которым идут run'ы.
+            current = self.cfg
+        return describe_config(current, str(self.config_path))
+
+    def _updated_config_text(self, values: dict[str, Any]) -> tuple[str, str]:
+        """Текст файла до и после правки; заодно проверяет результат схемой."""
+        raw, before = self._config_yaml()
+        # apply_values проверяет, что путь вообще разрешён форме.
+        merged = apply_values(raw, values)
+        try:
+            SvarogConfig(**merged)
+        except ValidationError as exc:
+            raise ConfigError(str(exc)) from exc
+        # Правим текст построчно, а не пересобираем: иначе из файла пропадут
+        # комментарии и пустые строки, которые человек ведёт руками.
+        after = patch_yaml_text(before, values)
+        # Патчер работает по строкам и не понимает flow-style (`{a: b}`) и
+        # прочую экзотику. Проверять надо именно результат записи, а не
+        # merged-словарь: иначе на диск ляжет файл, который больше не читается.
+        try:
+            written = yaml.safe_load(after) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"правка сломала бы {self.config_path}: {exc}") from exc
+        if written != merged:
+            raise ConfigError(
+                f"не удалось безопасно отредактировать {self.config_path}: "
+                "файл написан в форме, которую построчная правка не поддерживает. "
+                "Отредактируйте его вручную."
+            )
+        return before, after
+
+    def preview_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Что будет записано — без записи. Валидация та же, что при чтении."""
+        before, after = self._updated_config_text(values)
+        lines = diff_lines(before, after)
+        return ConfigDiffView(
+            path=str(self.config_path),
+            lines=lines,
+            changes=sum(1 for line in lines if line.kind != "same"),
+        )
+
+    async def write_config(self, values: dict[str, Any]) -> ConfigDiffView:
+        """Записать правку и, если ни один запуск не жив, перечитать конфиг.
+
+        Конфиг под работающим run не меняется (ADR-0015 §0.4), поэтому при
+        живом запуске снимок остаётся прежним, а ответ честно говорит, что
+        правка вступит в силу позже.
+        """
+        view = self.preview_config(values)
+        _, after = self._updated_config_text(values)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(after, encoding="utf-8")
+
+        if await self._any_run_live():
+            return view.model_copy(update={"restart_required": True})
+
+        self.cfg = load_config(project_dir=self.workspace)
+        self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
+        # Тёплые слоты держат env/MCP, поднятые под прежним конфигом.
+        await self.close_warm_sessions()
+        self._catalog.clear()
+        self._catalog_failures.clear()
+        return view
+
+    async def _any_run_live(self) -> bool:
+        async def action(db: AsyncSession) -> bool:
+            found = await db.execute(select(Run).where(Run.state.in_(_LIVE_STATES)).limit(1))
+            return found.scalar_one_or_none() is not None
+
+        return await self._read(action)
+
+    def list_secrets(self) -> list[SecretView]:
+        """Имена секретов и найдено ли значение. Значения не возвращаются никогда."""
+        store = self._runner.store
+        return [
+            SecretView(name=name, present=bool(store.get(name))) for name in sorted(store.names())
+        ]
 
     # --- named workspaces и артефакты (ADR-0017) ---------------------------
 
