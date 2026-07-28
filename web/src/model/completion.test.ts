@@ -32,6 +32,21 @@ describe("detectCompletion", () => {
   it("пустой ввод — покой", () => {
     expect(detectCompletion("")).toEqual({ mode: "idle", token: "" });
   });
+
+  it("видит голый слэш", () => {
+    expect(detectCompletion("/")).toEqual({ mode: "slash", token: "/" });
+  });
+
+  it("видит голый @", () => {
+    expect(detectCompletion("@")).toEqual({ mode: "at", token: "@" });
+  });
+
+  it("не видит слэш-команду со словом после", () => {
+    expect(detectCompletion("/help extra")).toEqual({
+      mode: "idle",
+      token: "",
+    });
+  });
 });
 
 describe("replaceToken", () => {

@@ -23,7 +23,10 @@ export function detectCompletion(textBeforeCursor: string): CompletionQuery {
   if (token.startsWith("@")) return { mode: "at", token };
 
   // Слэш-команда — только если строка начинается с / и курсор в первом токене.
-  const stripped = text.replace(/^[ \t\n]+/, "");
+  // Примечание: tokenScan выше использует узкий набор пробелов " \t\n",
+  // а здесь мы используем \s+ чтобы подменять все Unicode пробелы (как Python lstrip).
+  // Асимметрия намеренна: приём @ работает только со стандартными пробелами.
+  const stripped = text.replace(/^\s+/, "");
   if (
     stripped.startsWith("/") &&
     !text.includes("\n") &&
