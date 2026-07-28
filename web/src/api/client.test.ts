@@ -203,6 +203,26 @@ describe("клиент API", () => {
     ]);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.attachments).toEqual([".attachments/a_скрин.png"]);
+    expect(body).toEqual({
+      text: "смотри",
+      autonomy: "yolo",
+      attachments: [".attachments/a_скрин.png"],
+    });
+  });
+
+  it("не отправляет attachments, если список пуст", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run_id: "r1", state: "running" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.sendMessage("s1", "смотри", "yolo", {}, []);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body).toEqual({ text: "смотри", autonomy: "yolo" });
   });
 });
