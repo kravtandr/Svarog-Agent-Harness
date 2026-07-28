@@ -388,3 +388,18 @@ async def test_missing_attachment_is_rejected(service) -> None:
         await service.send_message(
             session.session_id, "текст", None, attachments=[".attachments/нет.png"]
         )
+
+
+@pytest.mark.asyncio
+async def test_attachment_leaves_working_tree_clean(service) -> None:
+    """Скриншот не должен уехать в историю task-ветки автокоммитом (Flow C)."""
+    repo = GitRepo(service.workspace)
+    await repo.init()
+    await repo.ensure_identity(name="тест", email="тест@example.com")
+
+    session = await service.create_session(title="чистое дерево")
+    await service.store_attachment(session.session_id, "скрин.png", b"\x89PNG")
+
+    dirty = await repo.status_porcelain()
+
+    assert not any(".attachments" in line for line in dirty), f"вложение видно git: {dirty!r}"
