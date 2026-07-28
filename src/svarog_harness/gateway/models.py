@@ -270,3 +270,13 @@ class FileSuggestionView(BaseModel):
 
     path: str
     label: str
+
+
+class AttachmentView(BaseModel):
+    """Ответ на загрузку вложения (задача 7)."""
+
+    path: str
+    name: str
+    size_bytes: int
+    mime: str | None = None
+    too_large_for_vision: bool = False

@@ -28,6 +28,7 @@ from svarog_harness.cli.chat_completion import Suggestion, at_suggestions
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
+from svarog_harness.gateway.attachments import StoredAttachment, store_attachment
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.executors import ExecutorOption, executor_options
 from svarog_harness.gateway.models import (
@@ -1003,6 +1004,28 @@ class GatewayService:
         workspace = Path(str(meta.get("workspace") or self.workspace))
         token = query if query.startswith("@") else f"@{query}"
         return at_suggestions(workspace, token)
+
+    async def store_attachment(self, session_id: str, name: str, data: bytes) -> StoredAttachment:
+        """Положить вложение в workspace сессии; под живой запуск — отказ."""
+
+        async def action(db: AsyncSession) -> tuple[str, dict[str, object]]:
+            session = await find_session_by_prefix(db, session_id)
+            live = (
+                await db.execute(
+                    select(Run)
+                    .where(Run.session_id == session.id, Run.state.in_(_LIVE_STATES))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if live is not None:
+                raise SessionBusyError(
+                    "в этом чате идёт запуск — дождитесь конца, прежде чем прикреплять файлы"
+                )
+            return session.id, dict(session.meta or {})
+
+        _, meta = await self._read(action)
+        workspace = Path(str(meta.get("workspace") or self.workspace))
+        return await store_attachment(workspace, name, data)
 
     # --- память (план 2026-07-27) ------------------------------------------
 

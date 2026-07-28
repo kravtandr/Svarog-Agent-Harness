@@ -12,7 +12,17 @@ import os
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +30,7 @@ from starlette.background import BackgroundTask
 
 from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
+from svarog_harness.gateway.attachments import AttachmentTooLarge, AttachmentTypeError
 from svarog_harness.gateway.catalog import CatalogError
 from svarog_harness.gateway.commands import WEB_COMMANDS
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
@@ -27,6 +38,7 @@ from svarog_harness.gateway.models import (
     AnswerRequest,
     ApprovalDecisionRequest,
     ApprovalView,
+    AttachmentView,
     CancelView,
     CreateRunRequest,
     CreateSessionRequest,
@@ -319,6 +331,27 @@ def create_app(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return [FileSuggestionView(path=s.value.removeprefix("@"), label=s.label) for s in found]
+
+    @app.post(
+        "/sessions/{session_id}/attachments",
+        response_model=AttachmentView,
+        status_code=201,
+    )
+    async def upload_attachment(
+        session_id: str, service: ServiceDep, file: Annotated[UploadFile, File()]
+    ) -> AttachmentView:
+        data = await file.read()
+        try:
+            stored = await service.store_attachment(session_id, file.filename or "файл", data)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except AttachmentTypeError as exc:
+            raise HTTPException(status_code=415, detail=str(exc)) from None
+        except AttachmentTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from None
+        return AttachmentView(**vars(stored))
 
     @app.post("/sessions/{session_id}/messages", response_model=RunRef, status_code=201)
     async def send_message(session_id: str, req: SendMessageRequest, service: ServiceDep) -> RunRef:
