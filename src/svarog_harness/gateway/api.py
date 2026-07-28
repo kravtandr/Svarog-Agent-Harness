@@ -20,6 +20,7 @@ from starlette.background import BackgroundTask
 
 from svarog_harness.config.loader import ConfigError
 from svarog_harness.config.paths import WorkspaceLayoutError
+from svarog_harness.gateway.catalog import CatalogError
 from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
 from svarog_harness.gateway.models import (
     AnswerRequest,
@@ -34,6 +35,8 @@ from svarog_harness.gateway.models import (
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
+    ModelCardView,
+    ProviderView,
     RunDetail,
     RunDiffView,
     RunRef,
@@ -54,6 +57,7 @@ from svarog_harness.gateway.service import (
     MemoryDisabledError,
     MemoryPathError,
     SessionBusyError,
+    UnknownProviderError,
 )
 from svarog_harness.gateway.settings import ConfigDiffView, ConfigUpdateRequest, ConfigView
 from svarog_harness.gateway.static import web_dist_dir
@@ -65,6 +69,7 @@ from svarog_harness.gitflow.provision import (
     WorkspaceLimitError,
     WorkspaceNameError,
 )
+from svarog_harness.llm.openai_compatible import ApiKeyError
 from svarog_harness.sandbox.base import SandboxError
 from svarog_harness.tenant.quota import QuotaExceededError
 from svarog_harness.trace.lookup import (
@@ -227,6 +232,24 @@ def create_app(
     @app.get("/whoami", response_model=WhoamiView)
     async def whoami(service: ServiceDep) -> WhoamiView:
         return await service.whoami()
+
+    # --- каталог моделей (задача 6) ---------------------------------------
+
+    @app.get("/models", response_model=list[ProviderView])
+    async def list_providers(service: ServiceDep) -> list[ProviderView]:
+        return service.list_providers()
+
+    @app.get("/models/{provider}", response_model=list[ModelCardView])
+    async def provider_models(provider: str, service: ServiceDep) -> list[ModelCardView]:
+        try:
+            cards = await service.provider_models(provider)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except (CatalogError, ApiKeyError) as exc:
+            # Провайдер недоступен или ключ не найден — это не сбой шлюза:
+            # 502 с причиной, чтобы человек увидел, что чинить.
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return [ModelCardView(**vars(card)) for card in cards]
 
     # --- сессии gateway-chat (ADR-0017 §2) --------------------------------
 

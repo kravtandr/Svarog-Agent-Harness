@@ -27,12 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
+from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
+    ProviderView,
     RepoSpec,
     RunDetail,
     RunDiffView,
@@ -70,6 +72,7 @@ from svarog_harness.gitflow.provision import (
     task_workspace_dir,
 )
 from svarog_harness.gitflow.repo import GitRepo
+from svarog_harness.llm.openai_compatible import ApiKeyError, resolve_api_key
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.memory.index import search as memory_search
 from svarog_harness.runtime.loop import RunOutcome
@@ -99,6 +102,10 @@ _LIVE_STATES = (RunState.PENDING, RunState.RUNNING, RunState.WAITING_APPROVAL, R
 _TERMINAL_STATES = (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED)
 # Сообщений истории сессии в контексте run'а (как _CHAT_HISTORY_LIMIT в CLI-chat).
 _SESSION_HISTORY_LIMIT = 24
+# TTL кэша каталога моделей провайдера: список моделей у провайдера меняется,
+# но не на каждый запрос — 10 минут достаточно, чтобы не дёргать сеть на
+# каждое открытие селектора модели.
+CATALOG_TTL_SEC = 600.0
 
 
 class CancelNotAllowedError(Exception):
@@ -107,6 +114,10 @@ class CancelNotAllowedError(Exception):
 
 class SessionBusyError(Exception):
     """В сессии есть незавершённый run — удалять её нельзя."""
+
+
+class UnknownProviderError(Exception):
+    """Провайдер не описан в models.providers — наружу как HTTP 404."""
 
 
 class MemoryDisabledError(Exception):
@@ -168,6 +179,9 @@ class GatewayService:
         # сериализовано локом (двойной слот = утёкший контейнер).
         self._warm: dict[str, _WarmSlot] = {}
         self._warm_lock = asyncio.Lock()
+        # Каталоги моделей: имя провайдера → (момент загрузки, карточки).
+        # TTL, а не вечный кэш: список моделей у провайдера меняется.
+        self._catalog: dict[str, tuple[float, list[ModelCard]]] = {}
 
     # --- per-run workspaces (ADR-0017) ------------------------------------
 
@@ -314,6 +328,55 @@ class GatewayService:
                 continue
             await self._drop_warm(session_id)
 
+    # --- каталог моделей и цены (задача 6) ---------------------------------
+
+    def list_providers(self) -> list[ProviderView]:
+        """Записи models.providers. Наружу — без api_key_ref (ADR-0006)."""
+        return [
+            ProviderView(
+                name=name,
+                base_url=provider.base_url,
+                model=provider.model,
+                is_default=name == self.cfg.models.default,
+            )
+            for name, provider in sorted(self.cfg.models.providers.items())
+        ]
+
+    async def provider_models(self, name: str) -> list[ModelCard]:
+        """Список моделей провайдера с TTL-кэшем; CatalogError → 502."""
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        cached = self._catalog.get(name)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < CATALOG_TTL_SEC:
+            return cached[1]
+        api_key = resolve_api_key(provider, self._runner.host_store)
+        cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        self._catalog[name] = (now, cards)
+        return cards
+
+    async def _model_prices(self, provider: str, model: str) -> tuple[float, float] | None:
+        """Цены модели из каталога; каталог недоступен — цены из конфига."""
+        try:
+            cards = await self.provider_models(provider)
+        except (UnknownProviderError, CatalogError, ApiKeyError):
+            return None
+        for card in cards:
+            if card.id == model:
+                if card.input_usd_per_mtok is None or card.output_usd_per_mtok is None:
+                    return None
+                return (card.input_usd_per_mtok, card.output_usd_per_mtok)
+        return None
+
+    async def _derive(self, override: RunOverride) -> SvarogConfig:
+        """Производный конфиг сообщения вместе с ценами выбранной модели."""
+        prices = None
+        if override.model is not None:
+            target = override.provider or self.cfg.models.default
+            prices = await self._model_prices(target, override.model)
+        return apply_override(self.cfg, override, prices=prices)
+
     # --- запуск и возобновление runs -------------------------------------
 
     async def usage(self) -> QuotaUsage:
@@ -416,16 +479,10 @@ class GatewayService:
 
         workspace, meta = await self._read(action)
         override = RunOverride.from_meta(meta)
+        cfg = await self._derive(override) if not override.is_empty() else None
         if not workspace:
-            return (
-                self._runner
-                if override.is_empty()
-                else self._runner_for(self.workspace, cfg=apply_override(self.cfg, override))
-            )
-        return self._runner_for(
-            Path(workspace),
-            cfg=apply_override(self.cfg, override) if not override.is_empty() else None,
-        )
+            return self._runner if cfg is None else self._runner_for(self.workspace, cfg=cfg)
+        return self._runner_for(Path(workspace), cfg=cfg)
 
     # --- события ----------------------------------------------------------
 
@@ -678,7 +735,7 @@ class GatewayService:
         """
         if self.quota_guard is not None:
             await self.quota_guard()  # QuotaExceededError → 429
-        cfg = apply_override(self.cfg, override)  # OverrideError → 422
+        cfg = await self._derive(override)  # OverrideError → 422
         external = cfg.executor.type == "external"
 
         async def action(db: AsyncSession) -> tuple[Session, list[dict[str, str]]]:

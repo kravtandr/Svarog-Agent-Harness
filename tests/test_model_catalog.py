@@ -1,10 +1,17 @@
 """Каталог моделей провайдера (план 2026-07-28)."""
 
+from pathlib import Path
+
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from svarog_harness.config.loader import load_config
 from svarog_harness.config.schema import ProviderConfig
-from svarog_harness.gateway.catalog import CatalogError, fetch_models, parse_models
+from svarog_harness.gateway import GatewayService
+from svarog_harness.gateway.api import create_app
+from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models, parse_models
+from svarog_harness.gateway.overrides import RunOverride
 
 
 def test_parses_openrouter_shape_with_pricing() -> None:
@@ -109,3 +116,92 @@ async def test_network_failure_becomes_catalog_error() -> None:
 
     with pytest.raises(CatalogError, match="нет связи"):
         await fetch_models(_provider("https://x/v1"), None, transport=httpx.MockTransport(handler))
+
+
+# --- эндпоинты, кэш и цены (задача 6) --------------------------------------
+
+
+@pytest.fixture
+def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db_path = tmp_path / "state" / "svarog.db"
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    router:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: router-model\n"
+        "sandbox:\n  type: local-trusted\n"
+        "cloud:\n  warm_session_ttl_sec: 60\n"
+        f"storage:\n  db_path: {db_path}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return GatewayService(load_config(project_dir=ws), ws)
+
+
+@pytest.mark.asyncio
+async def test_providers_endpoint_lists_config_entries(service) -> None:
+    client = TestClient(create_app(service=service))
+    body = client.get("/models").json()
+    assert [p["name"] for p in body] == ["local", "router"]
+    assert [p["is_default"] for p in body] == [True, False]
+    assert body[0]["model"] == "fake-model"
+
+
+@pytest.mark.asyncio
+async def test_models_endpoint_caches_second_call(service, monkeypatch) -> None:
+    calls = {"n": 0}
+
+    async def fake_fetch(provider, api_key, **kwargs):
+        calls["n"] += 1
+        return [ModelCard(id="m1", name="M1")]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    client = TestClient(create_app(service=service))
+
+    first = client.get("/models/router")
+    second = client.get("/models/router")
+
+    assert first.status_code == 200
+    assert [m["id"] for m in first.json()] == ["m1"]
+    assert second.json() == first.json()
+    assert calls["n"] == 1, "второй вызов обслужен кэшем"
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_is_404(service) -> None:
+    client = TestClient(create_app(service=service))
+    assert client.get("/models/нет-такого").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_is_502_with_reason(service, monkeypatch) -> None:
+    async def boom(provider, api_key, **kwargs):
+        raise CatalogError("https://x/models: провайдер ответил 401")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", boom)
+    client = TestClient(create_app(service=service))
+    response = client.get("/models/router")
+    assert response.status_code == 502
+    assert "401" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_model_override_takes_prices_from_catalog(service, monkeypatch) -> None:
+    async def fake_fetch(provider, api_key, **kwargs):
+        return [ModelCard(id="x/y", input_usd_per_mtok=0.25, output_usd_per_mtok=0.75)]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    session = await service.create_session(title="цены")
+    run_id = await service.send_message(
+        session.session_id, "задача", None, RunOverride(provider="router", model="x/y")
+    )
+    runner = await service._runner_for_run(run_id)
+    # При resume цены восстанавливаются из того же каталога.
+    assert runner.cfg.models.providers["router"].input_usd_per_mtok == 0.25

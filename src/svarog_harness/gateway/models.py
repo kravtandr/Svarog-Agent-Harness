@@ -184,6 +184,25 @@ class MemoryFileView(BaseModel):
     modified_at: datetime
 
 
+class ProviderView(BaseModel):
+    """Запись models.providers для селектора модели, без api_key_ref (ADR-0006)."""
+
+    name: str
+    base_url: str
+    model: str
+    is_default: bool
+
+
+class ModelCardView(BaseModel):
+    """Модель из каталога провайдера — то же, что ModelCard, но для ответа API."""
+
+    id: str
+    name: str | None = None
+    context_length: int | None = None
+    input_usd_per_mtok: float | None = None
+    output_usd_per_mtok: float | None = None
+
+
 class SecretView(BaseModel):
     """Секрет для экрана настроек: имя и факт наличия, без значения (ADR-0006)."""
 
