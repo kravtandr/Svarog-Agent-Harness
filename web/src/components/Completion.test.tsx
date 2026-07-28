@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -29,6 +29,16 @@ describe("Completion", () => {
     render(<Completion items={ITEMS} active={0} onPick={onPick} />);
     await userEvent.click(screen.getByText("/new"));
     expect(onPick).toHaveBeenCalledWith("/new");
+  });
+
+  it("гасит mousedown по умолчанию, чтобы клик не уводил фокус с поля ввода", () => {
+    render(<Completion items={ITEMS} active={0} onPick={vi.fn()} />);
+    const row = screen.getByText("/new").closest("li");
+    if (row === null) throw new Error("строка подсказки не найдена");
+    const event = fireEvent.mouseDown(row);
+    // fireEvent.* возвращает false, если хотя бы один обработчик позвал
+    // preventDefault() — так и проверяем сам факт вызова, не только эффект.
+    expect(event).toBe(false);
   });
 
   it("ничего не рисует на пустом списке", () => {

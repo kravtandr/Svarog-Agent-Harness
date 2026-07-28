@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -41,7 +47,7 @@ describe("поле ввода", () => {
     const onSend = vi.fn();
     render(<Composer {...base} onSend={onSend} />);
 
-    const field = screen.getByRole("textbox", { name: /написать/i });
+    const field = screen.getByRole("combobox", { name: /написать/i });
     await userEvent.type(field, "прогони тесты");
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
@@ -253,6 +259,22 @@ describe("поле ввода", () => {
     expect(field).toHaveValue("/help ");
   });
 
+  it("подсказки команд ищутся без учёта регистра, как в chat_completion.py", async () => {
+    // chat_completion.py:86 (сервер CLI) сравнивает без учёта регистра —
+    // "/HE" там находит "/help". Веб обязан вести себя так же.
+    render(
+      <Composer
+        {...base}
+        commands={[{ name: "help", usage: "/help", help: "показать команды" }]}
+      />,
+    );
+    const field = screen.getByLabelText("Написать Сварогу");
+
+    await userEvent.type(field, "/HE");
+
+    expect(screen.getByText("показать команды")).toBeInTheDocument();
+  });
+
   it("Enter при открытом меню не отправляет сообщение", async () => {
     const onSend = vi.fn();
     render(
@@ -365,6 +387,89 @@ describe("поле ввода", () => {
     expect(field).toHaveValue("глянь @src/app.py ");
     expect(onFileQuery).toHaveBeenCalledWith("sr");
   });
+
+  it("дебaунсит запрос файловых подсказок, а не шлёт его на каждую букву", async () => {
+    const onFileQuery = vi.fn().mockResolvedValue([]);
+    render(<Composer {...base} onFileQuery={onFileQuery} />);
+    const field = screen.getByLabelText("Написать Сварогу");
+
+    fireEvent.change(field, { target: { value: "@a" } });
+    expect(onFileQuery).not.toHaveBeenCalled();
+
+    // Вторая буква приходит раньше, чем истёк дебаунс первой — предыдущий
+    // таймер обязан быть снят, а не выстрелить запросом на "a".
+    await new Promise((r) => setTimeout(r, 60));
+    fireEvent.change(field, { target: { value: "@ab" } });
+    expect(onFileQuery).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(onFileQuery).toHaveBeenCalledTimes(1));
+    expect(onFileQuery).toHaveBeenCalledWith("ab");
+  });
+
+  it("поле ввода — комбобокс со ссылкой на список подсказок, а не голый textbox", async () => {
+    const onFileQuery = vi
+      .fn()
+      .mockResolvedValue([{ path: "src/app.py", label: "src/app.py" }]);
+    render(<Composer {...base} onFileQuery={onFileQuery} />);
+    const field = screen.getByLabelText("Написать Сварогу");
+
+    expect(field).toHaveAttribute("role", "combobox");
+    expect(field).toHaveAttribute("aria-autocomplete", "list");
+    expect(field).toHaveAttribute("aria-expanded", "false");
+    expect(field).not.toHaveAttribute("aria-controls");
+
+    await userEvent.type(field, "@sr");
+    const list = await screen.findByRole("listbox");
+
+    expect(field).toHaveAttribute("aria-expanded", "true");
+    expect(field).toHaveAttribute("aria-controls", list.id);
+  });
+
+  it("клик по подсказке не уводит фокус с поля", async () => {
+    render(
+      <Composer
+        {...base}
+        commands={[{ name: "help", usage: "/help", help: "показать команды" }]}
+      />,
+    );
+    const field = screen.getByLabelText("Написать Сварогу");
+    await userEvent.type(field, "/he");
+    const suggestion = screen.getByText("показать команды");
+
+    await userEvent.click(suggestion);
+
+    expect(field).toHaveValue("/help ");
+    expect(document.activeElement).toBe(field);
+  });
+});
+
+describe("блокировка отправки во время загрузки", () => {
+  it("не отправляет по Enter и гасит кнопку отправки, пока uploading=true", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...base} onSend={onSend} uploading />);
+    const field = screen.getByLabelText("Написать Сварогу");
+    const sendButton = screen.getByRole("button", { name: "Отправить" });
+
+    expect(sendButton).toBeDisabled();
+
+    await userEvent.type(field, "текст{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+
+    await userEvent.click(sendButton);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("отправляет как обычно, когда uploading=false", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...base} onSend={onSend} uploading={false} />);
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "текст{Enter}",
+    );
+
+    expect(onSend).toHaveBeenCalledWith("текст", []);
+  });
 });
 
 describe("клавиатура", () => {
@@ -372,7 +477,7 @@ describe("клавиатура", () => {
     const onSend = vi.fn();
     render(<Composer {...base} onSend={onSend} />);
 
-    const field = screen.getByRole("textbox", { name: /написать/i });
+    const field = screen.getByRole("combobox", { name: /написать/i });
     await userEvent.type(field, "прогони тесты{Enter}");
 
     expect(onSend).toHaveBeenCalledWith("прогони тесты", []);
@@ -383,7 +488,7 @@ describe("клавиатура", () => {
     const onSend = vi.fn();
     render(<Composer {...base} onSend={onSend} />);
 
-    const field = screen.getByRole("textbox", { name: /написать/i });
+    const field = screen.getByRole("combobox", { name: /написать/i });
     await userEvent.type(field, "первая{Shift>}{Enter}{/Shift}вторая");
 
     expect(onSend).not.toHaveBeenCalled();

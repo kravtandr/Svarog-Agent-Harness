@@ -15,7 +15,11 @@ import {
   type CompletionQuery,
 } from "../model/completion";
 import { Attachments } from "./Attachments";
-import { Completion, type CompletionItem } from "./Completion";
+import {
+  Completion,
+  COMPLETION_LISTBOX_ID,
+  type CompletionItem,
+} from "./Completion";
 import { ModelPicker } from "./ModelPicker";
 import "./Composer.css";
 
@@ -28,6 +32,7 @@ const UNAVAILABLE_HINT = "CLI этого агента не найден в PATH"
 
 export function Composer({
   onSend,
+  uploading = false,
   autonomy,
   onAutonomyChange,
   executors,
@@ -46,6 +51,11 @@ export function Composer({
   onRemoveAttachment,
 }: {
   onSend: (text: string, attachments: string[]) => void;
+  /** Пока хоть одна загрузка вложения не ответила — сервер ещё не отдал
+      путь для неё, и отправка сообщения без него ушла бы молча без файла
+      (Finding 8 обзора). По умолчанию false — экраны без вложений (если
+      такие появятся) не обязаны про это думать. */
+  uploading?: boolean;
   autonomy: Autonomy;
   onAutonomyChange: (autonomy: Autonomy) => void;
   /** GET /executors: нативный цикл плюс по одной записи на адаптер;
@@ -91,8 +101,12 @@ export function Composer({
   const external = activeExecutor?.kind === "external";
 
   // «@»-подсказки — сетевой запрос на каждый токен: список файлов рабочей
-  // копии не тащим на клиент целиком. Более поздний ответ на устаревший
-  // запрос игнорируется через тикет — иначе медленный ответ на "@a" мог бы
+  // копии не тащим на клиент целиком (см. комментарий к решению в §3
+  // 2026-07-28-composer-completion-and-uploads-design.md — при лимите
+  // at_suggestions в 12 файлов кешировать и фильтровать на клиенте смысла
+  // нет). Дебаунс — иначе быстрый набор "@скрин" шлёт запрос на каждую
+  // нажатую букву. Более поздний ответ на устаревший запрос
+  // игнорируется через тикет — иначе медленный ответ на "@a" мог бы
   // перезаписать уже показанные подсказки для "@ab".
   useEffect(() => {
     if (query.mode !== "at") {
@@ -100,13 +114,16 @@ export function Composer({
       return;
     }
     const ticket = ++fileRequest.current;
-    onFileQuery(query.token.slice(1))
-      .then((result) => {
-        if (fileRequest.current === ticket) setFiles(result);
-      })
-      .catch(() => {
-        if (fileRequest.current === ticket) setFiles([]);
-      });
+    const timer = window.setTimeout(() => {
+      onFileQuery(query.token.slice(1))
+        .then((result) => {
+          if (fileRequest.current === ticket) setFiles(result);
+        })
+        .catch(() => {
+          if (fileRequest.current === ticket) setFiles([]);
+        });
+    }, 180);
+    return () => window.clearTimeout(timer);
   }, [query.mode, query.token, onFileQuery]);
 
   useEffect(() => {
@@ -123,7 +140,12 @@ export function Composer({
       ? []
       : query.mode === "slash"
         ? commands
-            .filter((c) => `/${c.name}`.startsWith(query.token))
+            // chat_completion.py:86 (сервер CLI) сравнивает без учёта
+            // регистра — "/HE" там находит "/help". Без .toLowerCase() тут
+            // тот же ввод в вебе не находил ничего.
+            .filter((c) =>
+              `/${c.name}`.toLowerCase().startsWith(query.token.toLowerCase()),
+            )
             .map((c) => ({
               value: `/${c.name}`,
               label: `/${c.name}`,
@@ -163,6 +185,10 @@ export function Composer({
   }
 
   function send() {
+    // Хоть одна загрузка ещё не ответила — путь для неё ещё не существует.
+    // Отправить сейчас значит молча уйти без этого файла (Finding 8
+    // обзора); правильнее подождать ответа, будь он успехом или ошибкой.
+    if (uploading) return;
     const trimmed = text.trim();
     if (!trimmed) return;
     onSend(
@@ -203,7 +229,14 @@ export function Composer({
             placeholder="Написать Сварогу"
             rows={1}
             value={text}
+            // Комбобокс, а не голый textbox: без role="combobox" aria-expanded
+            // не имеет смысла на textarea, а без aria-controls
+            // role="listbox" у Completion — сирота, с которым программа
+            // чтения с экрана эту подсказку никак не связывает.
+            role="combobox"
+            aria-autocomplete="list"
             aria-expanded={items.length > 0}
+            aria-controls={items.length > 0 ? COMPLETION_LISTBOX_ID : undefined}
             aria-activedescendant={
               items.length > 0 ? `completion-option-${active}` : undefined
             }
@@ -389,6 +422,8 @@ export function Composer({
               type="button"
               className="composer__icon composer__icon--send"
               aria-label="Отправить"
+              disabled={uploading}
+              title={uploading ? "Дождитесь загрузки файла" : undefined}
               onClick={send}
             >
               ↑

@@ -138,9 +138,11 @@ export interface RunOverride {
   executor?: ExecutorKind;
   provider?: string;
   model?: string;
-  // Адаптер внешнего агента ("claude-code" | "codex" | "opencode"); null для
-  // native — сервер трактует отсутствие поля как «взять из конфига».
-  adapter?: string;
+  // Адаптер внешнего агента; null для native — сервер трактует отсутствие
+  // поля как «взять из конфига». Три варианта, а не string: сервер сам
+  // сузил их до Literal (gateway/models.py), молчаливое расхождение здесь
+  // было бы багом.
+  adapter?: "claude-code" | "codex" | "opencode";
 }
 
 export interface ProviderCard {

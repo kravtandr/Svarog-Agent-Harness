@@ -8,6 +8,11 @@ export interface CompletionItem {
   description: string;
 }
 
+/** Тот же id связывает `role="listbox"` здесь с `aria-controls` у
+    `<textarea role="combobox">` в Composer.tsx — константа в одном месте,
+    чтобы строки не разошлись при правке одного файла без другого. */
+export const COMPLETION_LISTBOX_ID = "composer-completion-listbox";
+
 export function Completion({
   items,
   active,
@@ -32,7 +37,12 @@ export function Completion({
   if (items.length === 0) return null;
 
   return (
-    <ul className="completion" role="listbox" aria-label="Подсказки ввода">
+    <ul
+      id={COMPLETION_LISTBOX_ID}
+      className="completion"
+      role="listbox"
+      aria-label="Подсказки ввода"
+    >
       {items.map((item, index) => (
         <li
           key={item.value}
@@ -41,6 +51,11 @@ export function Completion({
           role="option"
           aria-selected={index === active}
           className={`completion__row${index === active ? " completion__row--active" : ""}`}
+          // Без preventDefault на mousedown клик сначала уводит фокус с
+          // textarea (mousedown — до click), и последующий
+          // field.current?.setSelectionRange в pick() промахивается мимо
+          // уже небрежно расфокусированного поля.
+          onMouseDown={(event) => event.preventDefault()}
           onClick={() => onPick(item.value)}
         >
           <span className="completion__label">{item.label}</span>

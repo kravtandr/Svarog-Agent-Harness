@@ -24,7 +24,7 @@ describe("оболочка приложения", () => {
       await screen.findByRole("button", { name: "FTS-поиск по памяти" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
     ).toBeInTheDocument();
   });
 
@@ -89,7 +89,7 @@ describe("оболочка приложения", () => {
     await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "/new{Enter}",
     );
 
@@ -104,7 +104,7 @@ describe("оболочка приложения", () => {
     await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "/sessions{Enter}",
     );
 
