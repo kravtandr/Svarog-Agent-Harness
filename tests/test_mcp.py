@@ -127,7 +127,9 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
             return self.turns.pop(0)
 
     provider = ScriptedProvider()
-    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(
+        run_assembly, "default_provider", lambda models_cfg, store=None, workspace=None: provider
+    )
 
 
 async def test_run_mcp_tool_gated_by_approval(
@@ -227,7 +229,9 @@ def _wire_deferred_run(
     provider = _DefsCapturingProvider(
         [CompletionResult(content="готово", usage=Usage(10, 5), finish_reason="stop")]
     )
-    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(
+        run_assembly, "default_provider", lambda models_cfg, store=None, workspace=None: provider
+    )
     return TaskRunner(load_config(project_dir=ws), ws), provider
 
 

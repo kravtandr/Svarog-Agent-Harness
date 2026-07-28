@@ -67,7 +67,9 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResult]) -> None:
     provider = ScriptedProvider(turns)
 
-    def fake_default_provider(models_cfg: ModelsConfig, store: object = None) -> ModelProvider:
+    def fake_default_provider(
+        models_cfg: ModelsConfig, store: object = None, workspace: object = None
+    ) -> ModelProvider:
         return provider
 
     # Оркестрация прогона (и с ней default_provider) вынесена в runtime.orchestrator;

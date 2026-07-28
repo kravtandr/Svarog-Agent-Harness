@@ -79,7 +79,9 @@ def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
 def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResult]) -> None:
     provider = ScriptedProvider(turns)
 
-    def fake_default_provider(models_cfg: ModelsConfig, store: object = None) -> ModelProvider:
+    def fake_default_provider(
+        models_cfg: ModelsConfig, store: object = None, workspace: object = None
+    ) -> ModelProvider:
         return provider
 
     monkeypatch.setattr(run_assembly, "default_provider", fake_default_provider)

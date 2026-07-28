@@ -1,7 +1,11 @@
 """Изображения в нативном цикле: ссылки, рендер, лимит (план 2026-07-28)."""
 
+import base64
+from pathlib import Path
+
 import pytest
 
+from svarog_harness.llm.openai_compatible import _to_openai_messages
 from svarog_harness.llm.provider import ChatMessage, ImageRef
 from svarog_harness.runtime.checkpoint import _message_from_dict, _message_to_dict
 from svarog_harness.tools.document_tools import ReadImageArgs, ReadImageTool
@@ -55,3 +59,65 @@ def test_bridge_strips_path_from_mcp_blocks() -> None:
     )
 
     assert cleaned == [{"type": "image", "data": "AA", "mimeType": "image/png"}]
+
+
+def test_message_without_images_stays_a_plain_string(tmp_path: Path) -> None:
+    """Обратная совместимость: все существующие вызовы не должны измениться."""
+    rendered = _to_openai_messages([ChatMessage(role="user", content="привет")], tmp_path)
+    assert rendered == [{"role": "user", "content": "привет"}]
+
+
+def test_image_becomes_a_data_uri_part(tmp_path: Path) -> None:
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG")
+    message = ChatMessage(
+        role="user",
+        content="смотри:",
+        images=(ImageRef(path="shot.png", mime="image/png"),),
+    )
+
+    rendered = _to_openai_messages([message], tmp_path)
+
+    parts = rendered[0]["content"]
+    assert parts[0] == {"type": "text", "text": "смотри:"}
+    expected = base64.b64encode(b"\x89PNG").decode("ascii")
+    assert parts[1] == {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{expected}"},
+    }
+
+
+def test_missing_file_degrades_to_text_instead_of_raising(tmp_path: Path) -> None:
+    message = ChatMessage(
+        role="user", content="смотри:", images=(ImageRef(path="нет.png", mime="image/png"),)
+    )
+
+    parts = _to_openai_messages([message], tmp_path)[0]["content"]
+
+    assert all(p["type"] == "text" for p in parts)
+    assert "недоступно" in parts[1]["text"]
+
+
+def test_only_two_newest_images_are_sent(tmp_path: Path) -> None:
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG")
+    messages = [
+        ChatMessage(role="user", content=f"{n}:", images=(ImageRef(path=n, mime="image/png"),))
+        for n in ("a.png", "b.png", "c.png")
+    ]
+
+    rendered = _to_openai_messages(messages, tmp_path)
+
+    kinds = [[p["type"] for p in item["content"]] for item in rendered]
+    assert kinds[0] == ["text", "text"], "самое старое выродилось в текст"
+    assert kinds[1] == ["text", "image_url"]
+    assert kinds[2] == ["text", "image_url"]
+    assert "показано ранее" in rendered[0]["content"][1]["text"]
+
+
+def test_without_workspace_images_degrade_to_text() -> None:
+    """Вызов без workspace (внешние потребители) не должен падать."""
+    message = ChatMessage(
+        role="user", content="x", images=(ImageRef(path="a.png", mime="image/png"),)
+    )
+    parts = _to_openai_messages([message], None)[0]["content"]
+    assert all(p["type"] == "text" for p in parts)

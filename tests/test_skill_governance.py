@@ -258,7 +258,9 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResul
             return self.turns.pop(0)
 
     provider = ScriptedProvider()
-    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(
+        run_assembly, "default_provider", lambda models_cfg, store=None, workspace=None: provider
+    )
 
 
 async def test_run_creates_skill_proposal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

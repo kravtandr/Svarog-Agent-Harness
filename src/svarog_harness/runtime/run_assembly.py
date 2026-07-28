@@ -336,7 +336,9 @@ class RunAssembly:
             profile=profile,
         )
         return AgentLoop(
-            default_provider(cfg.models, self._host_store),  # host-скоуп (ADR-0014 #2)
+            default_provider(
+                cfg.models, self._host_store, workspace
+            ),  # host-скоуп (ADR-0014 #2); workspace — для рендера image_url
             registry,
             recorder,
             cfg.runtime,

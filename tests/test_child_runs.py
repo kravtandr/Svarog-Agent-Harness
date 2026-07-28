@@ -50,7 +50,9 @@ def _patch_provider(
     monkeypatch: pytest.MonkeyPatch, turns: list[CompletionResult]
 ) -> ScriptedProvider:
     provider = ScriptedProvider(turns)
-    monkeypatch.setattr(run_assembly, "default_provider", lambda models_cfg, store=None: provider)
+    monkeypatch.setattr(
+        run_assembly, "default_provider", lambda models_cfg, store=None, workspace=None: provider
+    )
     return provider
 
 

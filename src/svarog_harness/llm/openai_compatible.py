@@ -5,8 +5,10 @@ vLLM, llama.cpp, LiteLLM, OpenRouter, сам OpenAI. Всегда использ
 streaming; retries и timeouts делегированы openai SDK.
 """
 
+import base64
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -15,6 +17,7 @@ from svarog_harness.config.schema import ModelsConfig, ProviderConfig
 from svarog_harness.llm.provider import (
     ChatMessage,
     CompletionResult,
+    ImageRef,
     ModelProvider,
     ToolCallRequest,
     ToolDefinition,
@@ -49,25 +52,75 @@ def resolve_api_key(cfg: ProviderConfig, store: SecretStore | None = None) -> st
 
 
 def default_provider(
-    models_cfg: ModelsConfig, store: SecretStore | None = None
+    models_cfg: ModelsConfig, store: SecretStore | None = None, workspace: Path | None = None
 ) -> "OpenAICompatibleProvider":
-    """Провайдер для default-модели из конфигурации (валидность ссылки проверена схемой)."""
-    return OpenAICompatibleProvider(models_cfg.providers[models_cfg.default], store=store)
+    """Провайдер для default-модели из конфигурации (валидность ссылки проверена схемой).
+
+    `workspace` нужен, чтобы рендерить `ChatMessage.images` в части запроса
+    (§3.10 native vision) — это провайдер основного agent loop.
+    """
+    return OpenAICompatibleProvider(
+        models_cfg.providers[models_cfg.default], store=store, workspace=workspace
+    )
 
 
 def auxiliary_provider(
     models_cfg: ModelsConfig, store: SecretStore | None = None
 ) -> "OpenAICompatibleProvider":
-    """Провайдер для auxiliary-модели: служебные задачи (curator слой 2, §13)."""
+    """Провайдер для auxiliary-модели: служебные задачи (curator слой 2, §13).
+
+    Без workspace: служебные проходы (автозахват, curator) работают с текстом
+    транскрипта, изображений не видят — при их появлении части image_url
+    просто выродятся в текст «недоступно».
+    """
     return OpenAICompatibleProvider(
         models_cfg.providers[models_cfg.auxiliary_or_default], store=store
     )
 
 
-def _to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+# Изображение стоит на порядок дороже своего описания, а история растёт.
+# В запрос уходят только последние; более ранние вырождаются в текст —
+# файл на месте, агент может перечитать (то же соображение, что за
+# runtime.tool_output_context_chars).
+MAX_IMAGES_IN_CONTEXT = 2
+
+
+def _image_part(workspace: Path | None, ref: ImageRef) -> dict[str, Any]:
+    """Часть запроса для изображения; недоступный файл — текстом, не исключением."""
+    if workspace is None:
+        return {"type": "text", "text": f"изображение {ref.path} недоступно"}
+    path = workspace / ref.path
+    try:
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return {"type": "text", "text": f"изображение {ref.path} недоступно"}
+    return {"type": "image_url", "image_url": {"url": f"data:{ref.mime};base64,{data}"}}
+
+
+def _to_openai_messages(
+    messages: list[ChatMessage], workspace: Path | None = None
+) -> list[dict[str, Any]]:
+    # Индексы сообщений, чьи изображения ещё попадут в запрос: считаем с
+    # конца, чтобы вырождались старые, а не свежие.
+    keep: set[int] = set()
+    budget = MAX_IMAGES_IN_CONTEXT
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].images and budget > 0:
+            keep.add(index)
+            budget -= 1
+
     result: list[dict[str, Any]] = []
-    for msg in messages:
+    for index, msg in enumerate(messages):
         item: dict[str, Any] = {"role": msg.role, "content": msg.content}
+        if msg.images:
+            parts: list[dict[str, Any]] = [{"type": "text", "text": msg.content}]
+            for ref in msg.images:
+                parts.append(
+                    _image_part(workspace, ref)
+                    if index in keep
+                    else {"type": "text", "text": f"изображение {ref.path} (показано ранее)"}
+                )
+            item["content"] = parts
         if msg.tool_calls:
             item["tool_calls"] = [
                 {
@@ -142,8 +195,12 @@ class OpenAICompatibleProvider(ModelProvider):
         *,
         client: AsyncOpenAI | None = None,
         store: SecretStore | None = None,
+        workspace: Path | None = None,
     ) -> None:
         self._cfg = cfg
+        # Корень для разрешения ImageRef.path в запросе (native vision);
+        # без него изображения вырождаются в текст «недоступно».
+        self._workspace = workspace
         # Инжекция клиента — для тестов; в бою собираем сами.
         self._client = client or AsyncOpenAI(
             base_url=cfg.base_url,
@@ -161,7 +218,7 @@ class OpenAICompatibleProvider(ModelProvider):
     ) -> CompletionResult:
         kwargs: dict[str, Any] = {
             "model": self._cfg.model,
-            "messages": _to_openai_messages(messages),
+            "messages": _to_openai_messages(messages, self._workspace),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
