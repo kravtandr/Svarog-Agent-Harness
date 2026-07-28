@@ -165,3 +165,34 @@ export interface ModelCard {
   input_usd_per_mtok: number | null;
   output_usd_per_mtok: number | null;
 }
+
+/** Одна запись из GET /executors: значение выбора исполнителя в композере. */
+export interface ExecutorOption {
+  value: string;
+  kind: ExecutorKind;
+  adapter: string | null;
+  available: boolean;
+  is_active: boolean;
+}
+
+/** Слэш-команда из GET /commands (автодополнение композера). */
+export interface SlashCommand {
+  name: string;
+  usage: string;
+  help: string;
+}
+
+/** Подсказка файла из GET /sessions/{id}/files для «@file»-автодополнения. */
+export interface FileSuggestion {
+  path: string;
+  label: string;
+}
+
+/** Результат загрузки вложения через POST /sessions/{id}/attachments. */
+export interface Attachment {
+  path: string;
+  name: string;
+  size_bytes: number;
+  mime: string | null;
+  too_large_for_vision: boolean;
+}

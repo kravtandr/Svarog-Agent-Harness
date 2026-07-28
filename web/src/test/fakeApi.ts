@@ -52,6 +52,16 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     }),
     providers: vi.fn().mockResolvedValue([]),
     providerModels: vi.fn().mockResolvedValue([]),
+    executors: vi.fn().mockResolvedValue([]),
+    commands: vi.fn().mockResolvedValue([]),
+    sessionFiles: vi.fn().mockResolvedValue([]),
+    uploadAttachment: vi.fn().mockResolvedValue({
+      path: ".attachments/stub.png",
+      name: "stub.png",
+      size_bytes: 0,
+      mime: null,
+      too_large_for_vision: false,
+    }),
     ...over,
   };
 }

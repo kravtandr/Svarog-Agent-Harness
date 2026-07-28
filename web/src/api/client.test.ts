@@ -160,4 +160,49 @@ describe("клиент API", () => {
       },
     ]);
   });
+
+  it("загружает вложение как multipart и возвращает путь", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          path: ".attachments/ab12_скрин.png",
+          name: "скрин.png",
+          size_bytes: 4,
+          mime: "image/png",
+          too_large_for_vision: false,
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    const file = new File([new Uint8Array([1, 2, 3, 4])], "скрин.png", {
+      type: "image/png",
+    });
+    const stored = await api.uploadAttachment("s1", file);
+
+    expect(stored.path).toBe(".attachments/ab12_скрин.png");
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(init.headers?.["content-type"]).toBeUndefined();
+  });
+
+  it("передаёт пути вложений вместе с текстом", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run_id: "r1", state: "running" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.sendMessage("s1", "смотри", "yolo", {}, [
+      ".attachments/a_скрин.png",
+    ]);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.attachments).toEqual([".attachments/a_скрин.png"]);
+  });
 });
