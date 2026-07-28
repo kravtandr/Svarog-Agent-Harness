@@ -1,6 +1,14 @@
 import { useState } from "react";
 
-import { AUTONOMY_LABELS, type Autonomy } from "../api/types";
+import {
+  AUTONOMY_LABELS,
+  EXECUTOR_LABELS,
+  type Autonomy,
+  type ExecutorKind,
+  type ModelCard,
+  type ProviderCard,
+} from "../api/types";
+import { ModelPicker } from "./ModelPicker";
 import "./Composer.css";
 
 export function Composer({
@@ -8,15 +16,31 @@ export function Composer({
   autonomy,
   onAutonomyChange,
   executor,
+  onExecutorChange,
+  providers,
+  provider,
+  onProviderChange,
   model,
+  models,
+  modelsError,
+  onModelChange,
 }: {
   onSend: (text: string) => void;
   autonomy: Autonomy;
   onAutonomyChange: (autonomy: Autonomy) => void;
-  executor: string;
+  executor: ExecutorKind;
+  onExecutorChange: (executor: ExecutorKind) => void;
+  providers: ProviderCard[];
+  provider: string;
+  onProviderChange: (name: string) => void;
   model: string;
+  models: ModelCard[];
+  modelsError: string | null;
+  onModelChange: (id: string) => void;
 }) {
   const [text, setText] = useState("");
+  const [picking, setPicking] = useState(false);
+  const external = executor === "external";
 
   function send() {
     const trimmed = text.trim();
@@ -28,6 +52,20 @@ export function Composer({
   return (
     <div className="composer">
       <div className="composer__inner">
+        {picking && (
+          <div className="composer__picker">
+            <ModelPicker
+              models={models}
+              current={model}
+              error={modelsError}
+              onPick={(id) => {
+                onModelChange(id);
+                setPicking(false);
+              }}
+              onClose={() => setPicking(false)}
+            />
+          </div>
+        )}
         <div className="composer__box">
           <textarea
             className="composer__field"
@@ -47,7 +85,8 @@ export function Composer({
           />
           <div className="composer__foot">
             {/* Автономия — свойство сообщения, её принимает POST /sessions/{id}/messages.
-                Исполнитель и модель живут в svarog.yaml и меняются в настройках. */}
+                Исполнитель, провайдер и модель — тоже свойство сообщения (override):
+                конфиг остаётся значением по умолчанию, а не единственным вариантом. */}
             <span className="composer__modes">
               <select
                 className="composer__select"
@@ -66,15 +105,56 @@ export function Composer({
               <span className="composer__dot" aria-hidden="true">
                 ·
               </span>
-              <span className="composer__fixed" title="Меняется в настройках">
-                {executor}
-              </span>
+              <select
+                className="composer__select"
+                aria-label="Исполнитель"
+                value={executor}
+                onChange={(event) =>
+                  onExecutorChange(event.target.value as ExecutorKind)
+                }
+              >
+                {(Object.keys(EXECUTOR_LABELS) as ExecutorKind[]).map(
+                  (kind) => (
+                    <option key={kind} value={kind}>
+                      {EXECUTOR_LABELS[kind]}
+                    </option>
+                  ),
+                )}
+              </select>
               <span className="composer__dot" aria-hidden="true">
                 ·
               </span>
-              <span className="composer__fixed" title="Меняется в настройках">
-                {model}
-              </span>
+              {providers.length > 1 && (
+                <select
+                  className="composer__select"
+                  aria-label="Провайдер"
+                  value={provider}
+                  disabled={external}
+                  onChange={(event) => onProviderChange(event.target.value)}
+                >
+                  {providers.map((card) => (
+                    <option key={card.name} value={card.name}>
+                      {card.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                className="composer__model"
+                aria-label="Выбрать модель"
+                disabled={external}
+                // Внешний агент ходит к своему провайдеру
+                // (executor.external.base_url) — модель отсюда на него не влияет.
+                title={
+                  external
+                    ? "Внешний агент ходит к своему провайдеру"
+                    : "Выбрать модель"
+                }
+                onClick={() => setPicking(true)}
+              >
+                {model === "" ? "модель…" : model}
+              </button>
             </span>
             <span className="composer__spacer" />
             {/* Место под голос занято сразу: включение не потребует переверстки. */}

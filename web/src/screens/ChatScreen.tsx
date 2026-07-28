@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, type Api } from "../api/client";
 import { subscribeRun } from "../api/stream";
-import type { Autonomy } from "../api/types";
+import type {
+  Autonomy,
+  ExecutorKind,
+  ModelCard,
+  ProviderCard,
+} from "../api/types";
 import { Composer } from "../components/Composer";
 import { Gate } from "../components/Gate";
 import { ToolCalls } from "../components/ToolCalls";
@@ -51,10 +56,58 @@ export function ChatScreen({
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<Autonomy>("supervised");
+  const [executor, setExecutor] = useState<ExecutorKind>("native");
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [providers, setProviders] = useState<ProviderCard[]>([]);
+  const [models, setModels] = useState<ModelCard[]>([]);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [, setRunId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
+
+  useEffect(() => {
+    api
+      .providers()
+      .then((cards) => {
+        setProviders(cards);
+        const active = cards.find((card) => card.is_default) ?? cards[0];
+        if (active === undefined) return;
+        setProvider(active.name);
+        // Модель из конфига, а не литерал: подвал не должен врать про то,
+        // какая модель на самом деле отвечает.
+        setModel(active.model);
+      })
+      .catch(() => setProviders([]));
+  }, [api]);
+
+  useEffect(() => {
+    if (provider === "") return;
+    setModelsError(null);
+    api
+      .providerModels(provider)
+      .then(setModels)
+      .catch((exc: unknown) => {
+        setModels([]);
+        setModelsError(
+          exc instanceof ApiError
+            ? exc.message
+            : "Не удалось получить список моделей у провайдера.",
+        );
+      });
+  }, [api, provider]);
+
+  // Смена провайдера подставляет его модель из конфига: список моделей
+  // подгрузится следующим эффектом, но текущее значение не должно повиснуть
+  // моделью чужого провайдера.
+  const pickProvider = useCallback(
+    (name: string) => {
+      setProvider(name);
+      setModel(providers.find((card) => card.name === name)?.model ?? "");
+    },
+    [providers],
+  );
 
   const watch = useCallback(
     (runId: string) => {
@@ -97,7 +150,11 @@ export function ChatScreen({
         // На чистой установке сессий нет. Молча ничего не делать — худший
         // вариант: первое действие нового пользователя уходит в тишину.
         const target = sessionId ?? (await ensureSession());
-        const ref = await api.sendMessage(target, text, autonomy);
+        const ref = await api.sendMessage(target, text, autonomy, {
+          executor,
+          provider,
+          model,
+        });
         setRunId(ref.run_id);
         watch(ref.run_id);
       } catch (exc: unknown) {
@@ -113,7 +170,7 @@ export function ChatScreen({
         );
       }
     },
-    [api, sessionId, ensureSession, autonomy, watch],
+    [api, sessionId, ensureSession, autonomy, executor, provider, model, watch],
   );
 
   const decide = useCallback(
@@ -191,8 +248,15 @@ export function ChatScreen({
         onSend={(text) => void send(text)}
         autonomy={autonomy}
         onAutonomyChange={setAutonomy}
-        executor="нативный цикл"
-        model="qwen3-coder"
+        executor={executor}
+        onExecutorChange={setExecutor}
+        providers={providers}
+        provider={provider}
+        onProviderChange={pickProvider}
+        model={model}
+        models={models}
+        modelsError={modelsError}
+        onModelChange={setModel}
       />
     </div>
   );

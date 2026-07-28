@@ -2,8 +2,16 @@
   padding: 12px 24px 16px;
 }
 .composer__inner {
+  position: relative;
   max-width: 700px;
   margin: 0 auto;
+}
+/* Позиционирование панели — забота обёртки (см. комментарий в ModelPicker.css). */
+.composer__picker {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% + 8px);
+  z-index: 20;
 }
 .composer__box {
   padding: 12px 14px 9px;
@@ -28,7 +36,9 @@
 }
 .composer__foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  row-gap: 4px;
   gap: 16px;
   margin-top: 11px;
   font-size: 12.5px;
@@ -75,10 +85,24 @@
   font-size: inherit;
   cursor: pointer;
 }
-/* Исполнитель и модель — конфиг, не свойство сообщения: обычный текст. */
-.composer__fixed {
+/* Кнопка выбора модели: тот же приглушённый цвет, что был у статичного
+   текста — модель по-прежнему второстепенная деталь подвала, а не акцент. */
+.composer__model {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 4px;
+  background: none;
   color: var(--faint);
-  cursor: default;
+  font-family: var(--sans);
+  font-size: inherit;
+  cursor: pointer;
+}
+.composer__model:hover:not(:disabled) {
+  background: var(--raised);
+}
+.composer__model:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .composer__spacer {
   flex: 1;
@@ -99,13 +123,13 @@
     gap: 8px;
     font-size: 12px;
   }
-  /* Одна строка через разделитель: перенос режимов в столбик съедает
-     высоту, которая нужна ленте. */
+  /* Раньше здесь был декоративный текст в одну строку с ellipsis. Теперь
+     это интерактивные контролы — обрезать их нельзя, поэтому на узком
+     экране группа сама переносится в две строки через разделитель. */
   .composer__modes {
+    flex-wrap: wrap;
+    row-gap: 4px;
     gap: 5px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
   }
   .composer__dot {
     display: inline;

@@ -74,6 +74,7 @@ describe("экран диалога", () => {
       "s1",
       "прогони тесты",
       "supervised",
+      { executor: "native", provider: "", model: "" },
     );
     await waitFor(() =>
       expect(screen.getByText("прогони тесты")).toBeInTheDocument(),
@@ -103,10 +104,14 @@ describe("экран диалога", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
-    expect(client.sendMessage).toHaveBeenCalledWith("s1", "жги", "yolo");
+    expect(client.sendMessage).toHaveBeenCalledWith("s1", "жги", "yolo", {
+      executor: "native",
+      provider: "",
+      model: "",
+    });
   });
 
-  it("показывает ошибку загрузки сессий, пришедшую сверху", () => {
+  it("показывает ошибку загрузки сессий, пришедшую сверху", async () => {
     render(
       <ChatScreen
         api={api()}
@@ -115,8 +120,10 @@ describe("экран диалога", () => {
         error="Не удалось загрузить сессии."
       />,
     );
+    // findByText, а не getByText: рендер запускает загрузку провайдеров,
+    // и её промис должен успеть разрешиться внутри act до конца теста.
     expect(
-      screen.getByText("Не удалось загрузить сессии."),
+      await screen.findByText("Не удалось загрузить сессии."),
     ).toBeInTheDocument();
   });
 
@@ -137,7 +144,7 @@ describe("экран диалога", () => {
     ).toBeInTheDocument();
   });
 
-  it("пока грузится — говорит об этом, а не показывает пустоту", () => {
+  it("пока грузится — говорит об этом, а не показывает пустоту", async () => {
     render(
       <ChatScreen
         api={api()}
@@ -146,7 +153,7 @@ describe("экран диалога", () => {
         loading
       />,
     );
-    expect(screen.getByText(/загружаем/i)).toBeInTheDocument();
+    expect(await screen.findByText(/загружаем/i)).toBeInTheDocument();
   });
 
   it("пустая сессия приглашает к действию, а не сообщает «нет данных»", async () => {
@@ -318,6 +325,112 @@ describe("чистая установка", () => {
       "s-new",
       "первая задача",
       "supervised",
+      { executor: "native", provider: "", model: "" },
+    );
+  });
+});
+
+describe("исполнитель, провайдер и модель", () => {
+  it("отправляет выбранные исполнителя и модель", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "router",
+          base_url: "https://x/v1",
+          model: "m0",
+          is_default: true,
+        },
+      ]),
+      providerModels: vi.fn().mockResolvedValue([
+        {
+          id: "x/y",
+          name: "X Y",
+          context_length: null,
+          input_usd_per_mtok: null,
+          output_usd_per_mtok: null,
+        },
+      ]),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    await userEvent.click(await screen.findByLabelText("Выбрать модель"));
+    await userEvent.click(await screen.findByText("X Y"));
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "привет{Enter}",
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith("s1", "привет", "supervised", {
+      executor: "native",
+      provider: "router",
+      model: "x/y",
+    });
+  });
+
+  it("сохраняет выбор между сообщениями", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "router",
+          base_url: "https://x/v1",
+          model: "m0",
+          is_default: true,
+        },
+      ]),
+      providerModels: vi.fn().mockResolvedValue([
+        {
+          id: "x/y",
+          name: "X Y",
+          context_length: null,
+          input_usd_per_mtok: null,
+          output_usd_per_mtok: null,
+        },
+      ]),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    await userEvent.click(await screen.findByLabelText("Выбрать модель"));
+    await userEvent.click(await screen.findByText("X Y"));
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "привет{Enter}",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "ещё раз{Enter}",
+    );
+
+    // Второй вызов sendMessage несёт тот же override, что и первый: выбор
+    // провайдера и модели не сбрасывается между сообщениями.
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      "s1",
+      "привет",
+      "supervised",
+      {
+        executor: "native",
+        provider: "router",
+        model: "x/y",
+      },
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      "s1",
+      "ещё раз",
+      "supervised",
+      {
+        executor: "native",
+        provider: "router",
+        model: "x/y",
+      },
     );
   });
 });
