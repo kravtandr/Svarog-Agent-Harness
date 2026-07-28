@@ -9,13 +9,19 @@ from svarog_harness.config.loader import load_config
 from svarog_harness.gateway import GatewayService
 from svarog_harness.gateway.api import create_app
 from svarog_harness.gateway.executors import executor_options
-from svarog_harness.gateway.overrides import OverrideError, RunOverride, apply_override
+from svarog_harness.gateway.overrides import (
+    OVERRIDE_META_KEY,
+    OverrideError,
+    RunOverride,
+    apply_override,
+)
 from svarog_harness.runtime.agents import (
     ADAPTER_BINARIES,
     EXTERNAL_ADAPTERS,
     adapter_available,
 )
 from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
+from svarog_harness.trace.lookup import find_run_by_prefix
 
 
 def test_registry_lists_every_adapter_with_its_binary() -> None:
@@ -148,3 +154,53 @@ def test_executors_endpoint(service: GatewayService) -> None:
     body = client.get("/executors").json()
     assert body[0]["value"] == "native"
     assert all("available" in o and "is_active" in o for o in body)
+
+
+# --- adapter из composer'а должен доходить до запуска (2026-07-27) --------
+
+
+@pytest.mark.asyncio
+async def test_message_adapter_reaches_run_meta_and_config(
+    service: GatewayService,
+) -> None:
+    """Выбор 'opencode' в композере — это RunOverride.adapter, а не только
+    executor='external'. Фикстура `_config` держит образ claude-code (это
+    известный дефолт `svarog init`), так что производный конфиг обязан
+    подхватить и адаптер, и его дефолтный образ."""
+    session = await service.create_session(title="adapter из composer'а")
+    client = TestClient(create_app(service=service))
+
+    response = client.post(
+        f"/sessions/{session.session_id}/messages",
+        json={"text": "задача", "executor": "external", "adapter": "opencode"},
+    )
+    assert response.status_code == 201
+    run_id = response.json()["run_id"]
+
+    async def read(db):
+        run = await find_run_by_prefix(db, run_id)
+        return dict(run.meta or {})
+
+    meta = await service._read(read)
+    assert meta[OVERRIDE_META_KEY] == {"executor": "external", "adapter": "opencode"}
+
+    runner = await service._runner_for_run(run_id)
+    assert runner.cfg.executor.external.adapter == "opencode"
+    assert runner.cfg.executor.external.image == DEFAULT_OPENCODE_IMAGE
+
+
+@pytest.mark.asyncio
+async def test_message_adapter_with_native_executor_returns_422(
+    service: GatewayService,
+) -> None:
+    """Адаптер и native-исполнитель несовместимы (apply_override это уже
+    проверяет) — HTTP-путь обязан довести отказ до 422, а не 500."""
+    session = await service.create_session(title="adapter+native")
+    client = TestClient(create_app(service=service))
+
+    response = client.post(
+        f"/sessions/{session.session_id}/messages",
+        json={"text": "задача", "executor": "native", "adapter": "opencode"},
+    )
+    assert response.status_code == 422
+    assert "native" in response.json()["detail"]

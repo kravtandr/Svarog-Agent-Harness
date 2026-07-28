@@ -99,6 +99,30 @@ describe("клиент API", () => {
     });
   });
 
+  it("кладёт adapter override в тело запроса", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run_id: "r1", state: "running" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.sendMessage("s1", "привет", "yolo", {
+      executor: "external",
+      adapter: "opencode",
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body).toEqual({
+      text: "привет",
+      autonomy: "yolo",
+      executor: "external",
+      adapter: "opencode",
+    });
+  });
+
   it("запрашивает список провайдеров", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

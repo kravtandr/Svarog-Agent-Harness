@@ -155,6 +155,9 @@ class SendMessageRequest(BaseModel):
     executor: Literal["native", "external"] | None = None
     provider: str | None = None
     model: str | None = None
+    # Адаптер внешнего агента — тоже выбор в поле ввода, а не правка
+    # svarog.yaml; None — взять адаптер из конфига (см. RunOverride.adapter).
+    adapter: Literal["claude-code", "codex", "opencode"] | None = None
     # Относительные пути из `.attachments/` этой сессии (задача 7).
     attachments: list[str] = []
 

@@ -138,6 +138,9 @@ export interface RunOverride {
   executor?: ExecutorKind;
   provider?: string;
   model?: string;
+  // Адаптер внешнего агента ("claude-code" | "codex" | "opencode"); null для
+  // native — сервер трактует отсутствие поля как «взять из конфига».
+  adapter?: string;
 }
 
 export interface ProviderCard {

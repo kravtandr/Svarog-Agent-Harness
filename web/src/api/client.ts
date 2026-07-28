@@ -139,6 +139,7 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
           ...(override?.executor ? { executor: override.executor } : {}),
           ...(override?.provider ? { provider: override.provider } : {}),
           ...(override?.model ? { model: override.model } : {}),
+          ...(override?.adapter ? { adapter: override.adapter } : {}),
           ...(attachments?.length ? { attachments } : {}),
         }),
       }),

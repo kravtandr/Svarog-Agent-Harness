@@ -350,18 +350,25 @@ export function ChatScreen({
         // На чистой установке сессий нет. Молча ничего не делать — худший
         // вариант: первое действие нового пользователя уходит в тишину.
         const target = sessionId ?? (await ensureSession());
-        const executorKind = executorOptions.find(
+        const selectedExecutor = executorOptions.find(
           (option) => option.value === executorValue,
-        )?.kind;
+        );
         const ref = await api.sendMessage(
           target,
           text,
           autonomy,
           {
-            // executor опускаем, если ещё не известен из /executors: пустое
-            // поле сервер трактует как «взять из конфига», а угаданное
-            // значение — как настоящий override, который переживёт конфиг.
-            ...(executorKind === undefined ? {} : { executor: executorKind }),
+            // executor/adapter опускаем, если вариант ещё не известен из
+            // /executors: пустое поле сервер трактует как «взять из
+            // конфига», а угаданное значение — как настоящий override,
+            // который переживёт конфиг. adapter у native всё равно null —
+            // client.ts опускает его наравне с undefined.
+            ...(selectedExecutor === undefined
+              ? {}
+              : {
+                  executor: selectedExecutor.kind,
+                  adapter: selectedExecutor.adapter ?? undefined,
+                }),
             provider,
             model,
           },

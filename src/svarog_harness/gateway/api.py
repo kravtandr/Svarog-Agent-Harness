@@ -403,7 +403,12 @@ def create_app(
                 session_id,
                 req.text,
                 req.autonomy,
-                RunOverride(executor=req.executor, provider=req.provider, model=req.model),
+                RunOverride(
+                    executor=req.executor,
+                    provider=req.provider,
+                    model=req.model,
+                    adapter=req.adapter,
+                ),
                 attachments=req.attachments,
             )
         except SessionNotFoundError as exc:

@@ -538,7 +538,60 @@ describe("исполнитель из /executors", () => {
       "s1",
       "старт",
       "supervised",
-      { executor: "external", provider: "", model: "" },
+      { executor: "external", adapter: "codex", provider: "", model: "" },
+      [],
+    );
+  });
+
+  it("выбор 'opencode' в композере уходит в override сообщения", async () => {
+    // Это тест, который должен был поймать пропажу: ChatScreen раньше
+    // отбрасывал option.adapter и слал только option.kind, так что выбор
+    // конкретного внешнего агента был декоративным. Селект приводится в
+    // движение через userEvent, а не подстановкой callback'а напрямую —
+    // иначе тест не увидел бы именно этот путь данных.
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = api({
+      sendMessage,
+      executors: vi.fn().mockResolvedValue([
+        {
+          value: "native",
+          kind: "native",
+          adapter: null,
+          available: true,
+          is_active: true,
+        },
+        {
+          value: "opencode",
+          kind: "external",
+          adapter: "opencode",
+          available: true,
+          is_active: false,
+        },
+      ]),
+    });
+    render(<ChatScreen api={client} sessionId="s1" ensureSession={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Исполнитель")).toHaveValue("native"),
+    );
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Исполнитель"),
+      "opencode",
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "старт{Enter}",
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "старт",
+      "supervised",
+      { executor: "external", adapter: "opencode", provider: "", model: "" },
       [],
     );
   });
