@@ -1152,6 +1152,55 @@ describe("гонки идентичности сессии между attach() �
     );
   });
 
+  it("после отклонённого ensureSession следующая отправка пробует снова, а не наследует ту же ошибку", async () => {
+    // На чистой установке первый ensureSession() падает (svarog serve ещё не
+    // поднялся), а resolveTarget() кладёт этот rejected promise в кеш и
+    // никогда его не чистит — эффект на sessionId!==null здесь не сработает,
+    // сессия так и не появилась. Каждая следующая отправка ждёт тот же
+    // отклонённый promise и падает с той же ошибкой, хотя сервер уже отвечает.
+    const ensureSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("svarog serve недоступен"))
+      .mockResolvedValueOnce("s-new");
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = fakeApi({ sendMessage });
+    render(
+      <ChatScreen
+        api={client}
+        sessionId={null}
+        ensureSession={ensureSession}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "первое{Enter}",
+    );
+    expect(
+      await screen.findByText(
+        "Не удалось отправить сообщение. Проверьте, что svarog serve запущен.",
+      ),
+    ).toBeInTheDocument();
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "второе{Enter}",
+    );
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(ensureSession).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s-new",
+      "второе",
+      expect.anything(),
+      expect.anything(),
+      [],
+    );
+  });
+
   it("загрузка, ответившая после настоящего переключения чата, не попадает в attachments новой сессии", async () => {
     // В отличие от теста "переключение сессии сбрасывает незавершённое
     // вложение прошлого чата" выше (там upload уже успел ответить ДО

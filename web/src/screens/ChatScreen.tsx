@@ -369,13 +369,21 @@ export function ChatScreen({
   const resolveTarget = useCallback(async (): Promise<string> => {
     if (sessionId !== null) return sessionId;
     if (pendingSession.current === null) {
-      pendingSession.current = ensureSession().then((id) => {
+      const promise = ensureSession().then((id) => {
         // Помечаем сразу после получения id, а не после того, как отработает
         // вызвавший resolveTarget() код: эффект смены сессии может сработать
         // в любой момент между этими двумя строками, и метка обязана стоять
         // раньше.
         justCreatedSessionId.current = id;
         return id;
+      });
+      // Отклонённый promise чистим сами: эффект на sessionId!==null (см.
+      // выше) здесь не сработает — сессия так и не появилась. Без этого
+      // каждая следующая отправка ждала бы тот же отклонённый promise и
+      // падала бы с той же ошибкой, даже когда сервер уже отвечает.
+      pendingSession.current = promise.catch((error) => {
+        pendingSession.current = null;
+        throw error;
       });
     }
     return pendingSession.current;
