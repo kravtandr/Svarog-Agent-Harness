@@ -85,6 +85,16 @@
   padding: 0 24px;
 }
 
+/* Тот же прямоугольник, что у .chat__upload-error (лента вложений сидит
+   прямо над композером, а не в потоке .chat__thread с его 26px-отступами
+   для реплик) — приглушённый цвет вместо тревожного, это не ошибка. */
+.chat__upload-pending {
+  max-width: 700px;
+  margin: 0 auto 12px;
+  padding: 0 24px;
+  color: var(--muted);
+}
+
 @media (max-width: 899px) {
   .chat__col {
     padding: 0 14px;

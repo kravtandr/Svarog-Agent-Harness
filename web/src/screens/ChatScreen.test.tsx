@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, type Api } from "../api/client";
+import type { Attachment } from "../api/types";
 import { fakeApi } from "../test/fakeApi";
 import { ChatScreen } from "./ChatScreen";
 
@@ -82,7 +83,7 @@ describe("экран диалога", () => {
     );
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "прогони тесты",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -119,7 +120,7 @@ describe("экран диалога", () => {
       "yolo",
     );
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "жги",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -223,7 +224,7 @@ describe("подписка на поток", () => {
     );
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "поехали",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -275,7 +276,7 @@ describe("подписка на поток", () => {
     );
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "поехали",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -312,7 +313,7 @@ describe("ошибки отправки", () => {
     );
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "поехали",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -336,7 +337,7 @@ describe("чистая установка", () => {
     );
 
     await userEvent.type(
-      screen.getByRole("textbox", { name: /написать/i }),
+      screen.getByRole("combobox", { name: /написать/i }),
       "первая задача",
     );
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -975,6 +976,281 @@ describe("вложения в композере", () => {
     );
     expect(screen.getByText("скрин.png")).toBeInTheDocument();
   });
+
+  it("баннер ошибки загрузки исчезает после успешной отправки", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockRejectedValue(new ApiError(415, "расширение '.exe' не поддержано"));
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ uploadAttachment, sendMessage })}
+        sessionId="s1"
+      />,
+    );
+
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [new File([], "вирус.exe")], items: [] },
+    });
+    expect(await screen.findByText(/не поддержано/)).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "текст{Enter}",
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText(/не поддержано/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("убрать чип тоже закрывает баннер ошибки загрузки прошлого файла", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockResolvedValueOnce({
+        path: ".attachments/ab_a.png",
+        name: "a.png",
+        size_bytes: 1,
+        mime: "image/png",
+        too_large_for_vision: false,
+      })
+      .mockRejectedValueOnce(
+        new ApiError(415, "расширение '.exe' не поддержано"),
+      );
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ uploadAttachment })}
+        sessionId="s1"
+      />,
+    );
+
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+        ],
+        items: [],
+      },
+    });
+    await screen.findByText("a.png");
+
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [new File([], "вирус.exe")], items: [] },
+    });
+    expect(await screen.findByText(/не поддержано/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Убрать a.png" }));
+
+    expect(screen.queryByText(/не поддержано/)).not.toBeInTheDocument();
+  });
+});
+
+describe("гонки идентичности сессии между attach() и send()", () => {
+  it("два файла, брошенные разом на чистой установке, заводят одну сессию, а не две", async () => {
+    // Без общего резолвера каждый attach() из forEach в Composer видит
+    // sessionId===null в один и тот же тик и зовёт ensureSession()
+    // отдельно — здесь это было бы видно как второй, отличный от первого,
+    // id сессии.
+    let calls = 0;
+    const ensureSession = vi
+      .fn()
+      .mockImplementation(async () => `s-${++calls}`);
+    const uploadAttachment = vi
+      .fn()
+      .mockImplementation((_sessionId: string, file: File) =>
+        Promise.resolve({
+          path: `.attachments/${file.name}`,
+          name: file.name,
+          size_bytes: 1,
+          mime: "image/png",
+          too_large_for_vision: false,
+        }),
+      );
+    const client = fakeApi({ uploadAttachment });
+    render(
+      <ChatScreen
+        api={client}
+        sessionId={null}
+        ensureSession={ensureSession}
+      />,
+    );
+
+    const fileA = new File([new Uint8Array([1])], "a.png", {
+      type: "image/png",
+    });
+    const fileB = new File([new Uint8Array([1])], "b.png", {
+      type: "image/png",
+    });
+    fireEvent.drop(screen.getByLabelText("Написать Сварогу"), {
+      dataTransfer: { files: [fileA, fileB] },
+    });
+
+    await screen.findByText("a.png");
+    await screen.findByText("b.png");
+
+    expect(ensureSession).toHaveBeenCalledTimes(1);
+    expect(uploadAttachment).toHaveBeenNthCalledWith(1, "s-1", fileA);
+    expect(uploadAttachment).toHaveBeenNthCalledWith(2, "s-1", fileB);
+  });
+
+  it("Enter, отправленный раньше перерисовки с новым sessionId, не заводит вторую сессию", async () => {
+    // attach() уже создал сессию и получил её id, но родитель (App) ещё не
+    // перерисовал экран с новым sessionId-пропом — тот же порядок, что и в
+    // тесте про переживающий чип выше, но здесь ещё и Enter до перерисовки.
+    // Без общего резолвера send() увидел бы sessionId===null и завёл вторую
+    // сессию, отправив путь вложения из workspace первой в чужую сессию.
+    let calls = 0;
+    const ensureSession = vi
+      .fn()
+      .mockImplementation(async () => `s-${++calls}`);
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    const client = fakeApi({ uploadAttachment, sendMessage });
+    render(
+      <ChatScreen
+        api={client}
+        sessionId={null}
+        ensureSession={ensureSession}
+      />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+    await screen.findByText("скрин.png");
+
+    // Намеренно без rerender(): родитель ещё не успел прислать новый
+    // sessionId-проп.
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "смотри{Enter}",
+    );
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalled());
+    expect(ensureSession).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s-1",
+      "смотри",
+      expect.anything(),
+      expect.anything(),
+      [".attachments/ab_скрин.png"],
+    );
+  });
+
+  it("загрузка, ответившая после настоящего переключения чата, не попадает в attachments новой сессии", async () => {
+    // В отличие от теста "переключение сессии сбрасывает незавершённое
+    // вложение прошлого чата" выше (там upload уже успел ответить ДО
+    // переключения), здесь переключение случается, пока запрос ещё в
+    // полёте — и только потом он отвечает.
+    let resolveUpload: (value: Attachment) => void = () => {};
+    const uploadAttachment = vi.fn(
+      () =>
+        new Promise<Attachment>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    const client = fakeApi({ uploadAttachment });
+    const { rerender } = render(
+      <ChatScreen {...base} api={client} sessionId="s1" />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+
+    // Переключаем чат, пока запрос загрузки ещё не ответил.
+    rerender(<ChatScreen {...base} api={client} sessionId="s2" />);
+
+    // Теперь запрос отвечает — уже после того, как сессия сменилась.
+    resolveUpload({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+
+    // Даём микрозадачам отработать и убеждаемся, что чип не появился в s2.
+    await waitFor(() =>
+      expect(client.sessionThread).toHaveBeenCalledWith("s2"),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(screen.queryByText("скрин.png")).not.toBeInTheDocument();
+  });
+});
+
+describe("блокировка отправки во время загрузки вложения", () => {
+  it("Enter не отправляет сообщение, пока загрузка вложения не ответила", async () => {
+    let resolveUpload: (value: Attachment) => void = () => {};
+    const uploadAttachment = vi.fn(
+      () =>
+        new Promise<Attachment>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValue({ run_id: "r1", state: "running" });
+    render(
+      <ChatScreen
+        {...base}
+        api={fakeApi({ uploadAttachment, sendMessage })}
+        sessionId="s1"
+      />,
+    );
+
+    const file = new File([new Uint8Array([1])], "скрин.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(screen.getByLabelText("Написать Сварогу"), {
+      clipboardData: { files: [file], items: [] },
+    });
+
+    await userEvent.type(
+      screen.getByLabelText("Написать Сварогу"),
+      "смотри{Enter}",
+    );
+    // Загрузка ещё не ответила — отправка должна быть заблокирована,
+    // иначе сообщение уходит без пути, которого пока не существует.
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(await screen.findByText(/загружаем файл/i)).toBeInTheDocument();
+
+    resolveUpload({
+      path: ".attachments/ab_скрин.png",
+      name: "скрин.png",
+      size_bytes: 4,
+      mime: "image/png",
+      too_large_for_vision: false,
+    });
+    await screen.findByText("скрин.png");
+
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    expect(sendMessage).toHaveBeenCalledWith(
+      "s1",
+      "смотри",
+      expect.anything(),
+      expect.anything(),
+      [".attachments/ab_скрин.png"],
+    );
+  });
 });
 
 describe("миниатюры вложений в ленте", () => {
@@ -1015,6 +1291,44 @@ describe("миниатюры вложений в ленте", () => {
     // Строка "Вложения (...)" остаётся видна — спека прямо требует, чтобы
     // человек видел ровно то, что получил агент, миниатюра только вдобавок.
     expect(screen.getByText(/Вложения \(/)).toBeInTheDocument();
+  });
+
+  it("кодирует id сессии в пути к вложению, как и остальные пути client.ts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Blob([new Uint8Array([1])], { type: "image/png" }), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <ChatScreen
+        api={fakeApi({
+          sessionThread: vi.fn().mockResolvedValue({
+            session_id: "s 1",
+            title: "",
+            items: [
+              {
+                kind: "user" as const,
+                text: "смотри\n\nВложения (прочитай их read_image / read_document): .attachments/ab_скрин.png",
+                server: null,
+                name: "",
+                arg: "",
+                result: "",
+                status: "",
+              },
+            ],
+          }),
+        })}
+        sessionId="s 1"
+        ensureSession={async () => "s 1"}
+      />,
+    );
+
+    await screen.findByRole("img", { name: /скрин\.png/ });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/sessions/s%201/attachments/"),
+      expect.anything(),
+    );
   });
 
   it("документ без inline-раздачи рисуется именованным чипом, а не сломанной картинкой", async () => {

@@ -9,6 +9,7 @@ import type {
   FileSuggestion,
   ModelCard,
   ProviderCard,
+  RunOverride,
   SlashCommand,
 } from "../api/types";
 import { Composer } from "../components/Composer";
@@ -155,6 +156,13 @@ export function ChatScreen({
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Число загрузок вложений, которые ещё не ответили (успехом или
+  // ошибкой) — пока оно больше нуля, отправка заблокирована: иначе Enter,
+  // нажатый раньше ответа сервера, уносит сообщение без пути, которого
+  // ещё не существует (Finding 8 обзора). Счётчик, а не флаг: несколько
+  // файлов, брошенных разом, должны разблокировать отправку только когда
+  // ответил последний.
+  const [pendingUploads, setPendingUploads] = useState(0);
   const [, setRunId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const unsubscribe = useRef<(() => void) | null>(null);
@@ -167,6 +175,19 @@ export function ChatScreen({
   // не гарантирован (React не обязан прогонять их в каком-то одном
   // порядке) — сравнение по id, а не расчёт на конкретную гонку.
   const justCreatedSessionId = useRef<string | null>(null);
+  // Общая точка резолва сессии для attach() и send(): без неё оба метода
+  // независимо видят sessionId===null в одном и том же тике (N файлов,
+  // брошенных разом; Enter раньше, чем родитель перерисовался с id от
+  // attach()) и зовут ensureSession() порознь, заводя не одну сессию, а
+  // несколько (Finding 7 обзора). Кешируем сам промис, а не готовый id —
+  // конкурентные вызовы подписываются на него, ещё не зная результата.
+  const pendingSession = useRef<Promise<string> | null>(null);
+  // Метка "эпохи" активной сессии — растёт при настоящем переключении чата
+  // (не при первом появлении сессии, которую только что создал сам
+  // attach()). Загрузка, начатая до переключения и ответившая после,
+  // сверяет эпоху и не кладёт путь из workspace прошлой сессии в
+  // attachments уже новой.
+  const sessionEpoch = useRef(0);
 
   useEffect(() => {
     api
@@ -251,9 +272,14 @@ export function ChatScreen({
     setItems([]);
     setThreadError(null);
     setSendError(null);
+    // Эта сессия теперь известна родителю — общему резолверу больше не за
+    // что держаться. Следующий раз, когда sessionId снова станет null
+    // (например, после "/new"), resolveTarget() обязан позвать
+    // ensureSession() заново, а не отдать кеш от этой сессии.
+    pendingSession.current = null;
     if (justCreatedSessionId.current === sessionId) {
-      // Эта сессия только что создана самим attach() (см. ниже) — вложение,
-      // ради которого она появилась, должно пережить это переключение.
+      // Эта сессия только что создана самим resolveTarget() (см. ниже) —
+      // вложение, ради которого она появилась, должно пережить это переключение.
       justCreatedSessionId.current = null;
     } else {
       // Непрочитанное вложение из прошлого чата принадлежит его workspace:
@@ -261,6 +287,10 @@ export function ChatScreen({
       // честнее сбросить, чем молча тащить путь чужой сессии дальше.
       setAttachments([]);
       setUploadError(null);
+      // Настоящее переключение чата (а не первое появление только что
+      // созданной сессии) — гасим загрузки, начатые для прошлой сессии:
+      // их результат не должен долететь до attachments уже новой.
+      sessionEpoch.current += 1;
     }
     api
       .sessionThread(sessionId)
@@ -331,6 +361,26 @@ export function ChatScreen({
     [commands, items, onNew, onSessions, pushStatus],
   );
 
+  // Единственное место, где sessionId===null превращается в настоящий id.
+  // send() и attach() зовут это, а не ensureSession() напрямую — иначе на
+  // чистой установке они (или несколько attach() подряд, см. attach())
+  // видят один и тот же null в один и тот же тик и заводят по сессии на
+  // каждого вместо одной общей (Finding 7 обзора).
+  const resolveTarget = useCallback(async (): Promise<string> => {
+    if (sessionId !== null) return sessionId;
+    if (pendingSession.current === null) {
+      pendingSession.current = ensureSession().then((id) => {
+        // Помечаем сразу после получения id, а не после того, как отработает
+        // вызвавший resolveTarget() код: эффект смены сессии может сработать
+        // в любой момент между этими двумя строками, и метка обязана стоять
+        // раньше.
+        justCreatedSessionId.current = id;
+        return id;
+      });
+    }
+    return pendingSession.current;
+  }, [sessionId, ensureSession]);
+
   const send = useCallback(
     async (text: string, attachmentPaths: string[]) => {
       const parsed = parseCommand(text);
@@ -347,9 +397,10 @@ export function ChatScreen({
       ]);
       setSendError(null);
       try {
-        // На чистой установке сессий нет. Молча ничего не делать — худший
-        // вариант: первое действие нового пользователя уходит в тишину.
-        const target = sessionId ?? (await ensureSession());
+        // Тот же резолвер, что у attach(): сессия, которую уже завела (или
+        // заводит прямо сейчас) загрузка вложения, а не вторая новая поверх
+        // неё (Finding 7 обзора, гонка "Enter раньше перерисовки").
+        const target = await resolveTarget();
         const selectedExecutor = executorOptions.find(
           (option) => option.value === executorValue,
         );
@@ -367,7 +418,13 @@ export function ChatScreen({
               ? {}
               : {
                   executor: selectedExecutor.kind,
-                  adapter: selectedExecutor.adapter ?? undefined,
+                  // GET /executors отдаёт adapter простой строкой
+                  // (ExecutorOptionView.adapter: str | None) — сервер не
+                  // сужает её до Literal, в отличие от SendMessageRequest.
+                  // Сужаем здесь: значения приходят из того же перечня
+                  // адаптеров, что и Literal, которого ждёт сообщение.
+                  adapter: (selectedExecutor.adapter ??
+                    undefined) as RunOverride["adapter"],
                 }),
             provider,
             model,
@@ -375,6 +432,10 @@ export function ChatScreen({
           attachmentPaths,
         );
         setAttachments([]);
+        // Баннер прошлой неудачной загрузки не должен пережить успешную
+        // отправку — иначе он висит бессрочно, даже когда проблема уже не
+        // актуальна.
+        setUploadError(null);
         setRunId(ref.run_id);
         watch(ref.run_id);
       } catch (exc: unknown) {
@@ -392,8 +453,7 @@ export function ChatScreen({
     },
     [
       api,
-      sessionId,
-      ensureSession,
+      resolveTarget,
       autonomy,
       executorOptions,
       executorValue,
@@ -407,28 +467,37 @@ export function ChatScreen({
   const attach = useCallback(
     async (file: File) => {
       setUploadError(null);
+      // Эпоха на момент старта — не на момент ответа сервера: пока файл
+      // грузится, могут по-настоящему переключить чат (Finding 7 обзора,
+      // гонка "загрузка поперёк переключения").
+      const epoch = sessionEpoch.current;
+      setPendingUploads((n) => n + 1);
       try {
-        let target = sessionId;
-        if (target === null) {
-          target = await ensureSession();
-          // Помечаем сразу после получения id, а не после успешной
-          // загрузки: эффект смены сессии может сработать в любой момент
-          // между этими двумя строками, и метка обязана стоять раньше.
-          justCreatedSessionId.current = target;
-        }
+        const target = await resolveTarget();
         const stored = await api.uploadAttachment(target, file);
+        if (sessionEpoch.current !== epoch) {
+          // Сессию сменили, пока файл грузился — путь принадлежит workspace
+          // прошлой сессии и не должен попасть в чипы уже другой.
+          return;
+        }
         setAttachments((current) => [...current, stored]);
       } catch (exc: unknown) {
+        if (sessionEpoch.current !== epoch) return;
         setUploadError(
           exc instanceof ApiError ? exc.message : "Не удалось загрузить файл.",
         );
+      } finally {
+        setPendingUploads((n) => n - 1);
       }
     },
-    [api, sessionId, ensureSession],
+    [api, resolveTarget],
   );
 
   const removeAttachment = useCallback((path: string) => {
     setAttachments((current) => current.filter((item) => item.path !== path));
+    // Крестик — тоже способ закрыть баннер прошлой ошибки загрузки: без
+    // этого 415 от несвязанного файла висел бы над композером бессрочно.
+    setUploadError(null);
   }, []);
 
   const onFileQuery = useCallback(
@@ -495,7 +564,7 @@ export function ChatScreen({
                     <div className="chat__thumbs">
                       {entry.attachments.map((path) => {
                         const name = humanName(path);
-                        const src = `${baseUrl}/sessions/${sessionId}/attachments/${encodeURIComponent(basename(path))}`;
+                        const src = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(basename(path))}`;
                         if (isImagePath(path)) {
                           return (
                             <AttachmentThumb
@@ -552,8 +621,19 @@ export function ChatScreen({
       {uploadError !== null && (
         <p className="chat__error chat__upload-error">{uploadError}</p>
       )}
+      {/* Единственная видимая примета того, что файл вообще грузится —
+          без неё вставка большого файла выглядит так, будто ничего не
+          произошло (Finding 8 обзора). Отправка при этом заблокирована
+          через prop `uploading` у Composer — баннер сам по себе гонку не
+          снимает, только показывает, что она ещё не кончилась. */}
+      {uploadError === null && pendingUploads > 0 && (
+        <p className="chat__upload-pending" role="status">
+          Загружаем файл…
+        </p>
+      )}
       <Composer
         onSend={(text, atts) => void send(text, atts)}
+        uploading={pendingUploads > 0}
         autonomy={autonomy}
         onAutonomyChange={setAutonomy}
         executors={executors}
