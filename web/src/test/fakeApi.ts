@@ -42,6 +42,8 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       committed: "",
       uncommitted: "",
     }),
+    providers: vi.fn().mockResolvedValue([]),
+    providerModels: vi.fn().mockResolvedValue([]),
     ...over,
   };
 }

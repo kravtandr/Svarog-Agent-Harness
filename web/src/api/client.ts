@@ -5,8 +5,11 @@ import type {
   MemoryFile,
   MemoryHit,
   MemoryPage,
+  ModelCard,
+  ProviderCard,
   RunDetail,
   RunDiff,
+  RunOverride,
   RunRef,
   RunSummary,
   SecretView,
@@ -42,6 +45,7 @@ export interface Api {
     sessionId: string,
     text: string,
     autonomy?: Autonomy,
+    override?: RunOverride,
   ): Promise<RunRef>;
   decideApproval(approvalId: string, approved: boolean): Promise<RunRef>;
   config(): Promise<ConfigView>;
@@ -55,6 +59,8 @@ export interface Api {
   runs(): Promise<RunSummary[]>;
   run(runId: string): Promise<RunDetail>;
   runDiff(runId: string): Promise<RunDiff>;
+  providers(): Promise<ProviderCard[]>;
+  providerModels(name: string): Promise<ModelCard[]>;
 }
 
 export function createClient({ baseUrl, token }: ClientOptions): Api {
@@ -110,13 +116,18 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
         throw new ApiError(response.status, detail);
       }
     },
-    sendMessage: (sessionId, text, autonomy) =>
+    sendMessage: (sessionId, text, autonomy, override) =>
       request<RunRef>(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: "POST",
-        // autonomy опционален: сервер подставит значение из конфига, если не задан.
-        body: JSON.stringify(
-          autonomy === undefined ? { text } : { text, autonomy },
-        ),
+        // Пустые поля не отправляем: сервер трактует отсутствие как
+        // «взять из конфига», а null пришлось бы обрабатывать отдельно.
+        body: JSON.stringify({
+          text,
+          ...(autonomy === undefined ? {} : { autonomy }),
+          ...(override?.executor ? { executor: override.executor } : {}),
+          ...(override?.provider ? { provider: override.provider } : {}),
+          ...(override?.model ? { model: override.model } : {}),
+        }),
       }),
     decideApproval: (approvalId, approved) =>
       request<RunRef>(`/approvals/${encodeURIComponent(approvalId)}`, {
@@ -145,5 +156,8 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
     run: (runId) => request<RunDetail>(`/runs/${encodeURIComponent(runId)}`),
     runDiff: (runId) =>
       request<RunDiff>(`/runs/${encodeURIComponent(runId)}/diff`),
+    providers: () => request<ProviderCard[]>("/models"),
+    providerModels: (name) =>
+      request<ModelCard[]>(`/models/${encodeURIComponent(name)}`),
   };
 }

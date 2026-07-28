@@ -132,3 +132,33 @@ export const AUTONOMY_LABELS: Record<Autonomy, string> = {
   auto: "авто",
   yolo: "без тормозов",
 };
+
+/** Значения executor.type сервера (config/schema.py). */
+export type ExecutorKind = "native" | "external";
+
+export const EXECUTOR_LABELS: Record<ExecutorKind, string> = {
+  native: "нативный цикл",
+  external: "внешний агент",
+};
+
+/** Выбор в поле ввода: свойство сообщения, конфиг не меняется. */
+export interface RunOverride {
+  executor?: ExecutorKind;
+  provider?: string;
+  model?: string;
+}
+
+export interface ProviderCard {
+  name: string;
+  base_url: string;
+  model: string;
+  is_default: boolean;
+}
+
+export interface ModelCard {
+  id: string;
+  name: string | null;
+  context_length: number | null;
+  input_usd_per_mtok: number | null;
+  output_usd_per_mtok: number | null;
+}
