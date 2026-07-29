@@ -451,8 +451,11 @@ class RunAssembly:
             on_notify=hooks.on_notify,
             on_approval_prompt=_approval_prompt_async(hooks.on_approval_requested),
             self_docs=external.self_docs,
-            # FTS выключен — фабрику не передаём, и search_memory не появится
-            # в наборе бриджа (связка B).
+            # Read-фабрика к runtime-БД для search_memory (связка B): tool
+            # только читает FTS-индекс. Синк (заполнение memory_fts) делает
+            # MemoryWriter._reindex на том же drain_memory, что и native —
+            # код-путь общий (orchestrator.py drain_memory), external-специ-
+            # фичного writer-синка нет и не нужно.
             search_sessions=self._read_session_factory() if cfg.memory.fts_enabled else None,
         )
         assert infra.bridge is not None

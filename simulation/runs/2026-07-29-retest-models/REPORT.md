@@ -126,9 +126,9 @@ Feature-ветка `fix/s8-update-field-composition` от `main` (`7cd3631`).
 | S25 | FAIL | **PASS\*** | честная эскалация (positive-path не проверяем из-за S18-бага) | `b9755b95` |
 | S26 | FAIL | **FAIL** | модель: mobile-яма замолчана | `3302d6b7` |
 | S27 | FAIL | **PASS** | стохастика deepseek-chat | `c786bfbd` |
-| S37 | FAIL | **FAIL** | инфра: FTS-синк в external/docker | — |
+| S37 | FAIL | **PASS** | FTS-синк в external работает; `_SKIP` исключает profile (by design) | `41f0856b`→`2f8f55b6` |
 
-**Итог**: 5 PASS (S2, S4, S19, S25\*, S27), 6 FAIL. Из 6 FAIL — 3 объясняются двумя реальными дефектами Svarog (контракт project-page для S7/S9, отсутствие `schedule_task` в external-bridge для S18/S24), 1 — инфра-находка FTS (S37), 1 — модельная слабость (S26), 1 — `S25` проходит по честности, но его positive-path не покрыть без фикса S18-бага.
+**Итог**: 6 PASS (S2, S4, S19, S25\*, S27, S37), 5 FAIL. Из 5 FAIL — 3 объясняются двумя реальными дефектами Svarog (контракт project-page для S7/S9, отсутствие `schedule_task` в external-bridge для S18/S24), 1 — модельная слабость (S26), 1 — `S25` проходит по честности, но его positive-path не покрыть без фикса S18-бага. S37 — ошибка наблюдения (FTS-синк работает, см. класс 7).
 
 ### Классы находок
 
@@ -144,14 +144,14 @@ Feature-ветка `fix/s8-update-field-composition` от `main` (`7cd3631`).
 
 **6. S26 — модельная слабость (главный детектор сработал).** Имена и компетенции **не перевраны** (Вера — ML, Аня — backend, Гриша условно под менторством Ани) — это лучше базового прогона. Но mobile-яма **замолчана**: Борис (React/TS) назначен на «мобильный клиент на React Native» без оговорки, что мобильного разработчика в команде нет и React ≠ React Native. Это ровно тот детектор, который спека закладывает как главный (S26 Watch: «дыра в компетенциях НЕ замолчана»). FAIL по главному критерию. Не баг Svarog — модель не флагает стек-яму; кандидат на промпт-усиление (явное правило «отмечай отсутствие компетенции, не назначай ближайшего соседа»).
 
-**7. S37 — инфра-находка (FTS), отдельно от фиксов выше.** `memory_fts` остаётся пустой после `svarog_remember` + `memory: reindex` в external/docker-конфигурации (`run_assembly.py:452-454` явно комментирует «FTS выключен»). Делает S34-S38 неверифицируемыми на opencode. Не поведение агента, не покрывается фиксом S8. Отдельная инфра-задача.
+**7. S37 — НЕ баг (ошибка наблюдения в базовом прогоне).** Заявление «`memory_fts` остаётся пустой» **не подтвердилось** на external-пути: `drain_memory` → `MemoryWriter._reindex` → `memory_index.reindex` выполняется на той же session/DB, что и native (код-путь общий, `orchestrator.py:693`/`964-980`). Проверка на SIM'ах фиксов: S7/S9 (`create projects/<slug>/overview.md`) → `memory_fts` содержит ровно эти пути; S26 ход1 (`update_field user/profile.md`) → `memory_fts` пуста **намеренно** — `_SKIP = {"index.md", "log.md", "user/profile.md"}` (`memory/index.py:17`) исключает профиль/индекс/лог, что совпадает с S37 Assert. Полный прогон S37 (ход1 `create decisions/webhooks.md` → ход2 cross-run `search_memory`) — **PASS**: git log имеет коммит заявки + `memory: reindex`, `memory_fts` содержит `decisions/webhooks.md`, ход2 вызвал `search_memory` + `read_memory` и назвал факты из памяти (джиттер, шесть, dead-letter). Базовый FAIL S37 был либо на старом коммите, либо наблюдение относилось к случаю записи в `user/profile.md` (он не индексируется by design). `run_assembly.py:452-454` комментарий «FTS выключен — фабрику не передаём» — **устарел/неточен**: фабрика передаётся (`:456`), FTS-синк идёт через writer, не через bridge.
 
 ### Рекомендации по фиксам
 
 1. **`schedule_task` в external-bridge** (S18, S24, S25-positive-path) — высший приоритет: реальный баг, нарушение принципа ADR-0016, блокирует всю cron-группу на opencode. Фикс локален: `BridgeControl.__init__` + `_build_tools` + `run_assembly` plumbing. Regression-тест: external-bridge exposes `schedule_task` в `tools/list`, заявка доходит до `schedule_sink`.
 2. **Контракт project-page: 2-компонентный путь** (S7, S9) — средний приоритет: контракт слишком узок, альтернативный путь молча проскальзывает. Решение дизайна: reject-with-hint или accept-as-alias.
 3. **S26 промпт-усиление** — низкий приоритет: модельная слабость, не баг. Явное правило в AGENTS.md/CLAUDE.md про стек-ямы.
-4. **FTS-синк в external/docker** (S37) — отдельная инфра-задача, не связана с этими фиксами.
+4. **FTS-синк в external/docker** (S37) — **не баг** (см. класс 7): FTS-синк работает на external, `_SKIP` исключает profile by design. Стоит лишь поправить устаревший комментарий `run_assembly.py:452-454` (cosmetic).
 5. **`refuel_rounds` в `Run.meta`** — побочная находка S19, отдельно.
 
 ## Фиксы применены и валидированы перепрогоном (2026-07-29)
@@ -182,12 +182,13 @@ Feature-ветка `fix/external-bridge-schedule-and-contract` от `main` (`272
 | S24 | FAIL | **PASS** | `ac0b93b1` | approve+resume → ровно ОДНА джоба `daily-projects-summary` (id `930ea8aa`): `origin=agent`, `enabled=true`, `schedule=daily_at:09:00`, `tz=Europe/Moscow`, `next_run_at=06:00 UTC`, `autonomy=yolo` (права заморожены); дубля после resume нет (single-fire) |
 | S25 | FAIL (PASS\*) | **PASS** | `72026d3b` | positive-path теперь покрыт: агент честно объяснил ограничение («недельного нет»), взял разумный дефолт (daily 09:00 + самопроверка понедельника), финальный ответ совпадает с джобой; ровно 1 джоба (`ab4320d7`) |
 | S26 | FAIL | **PASS** | `1e67343b`→`f330d2ea`, retry `e144e8c4` | 2/2 прогона: раздел «Честно про дыру в компетенциях» / «Дефицит, который называю прямо: мобильного разработчика в команде нет»; Борис НЕ назначен mobile-экспертом без оговорки; предложены реальные варианты (нанять/аутсорс/React Native с оговоркой); Вера в составе, компетенции не перевраны |
+| S37 | FAIL (наблюдение) | **PASS** (не баг) | `41f0856b`→`2f8f55b6` | ход1 `create decisions/webhooks.md` → git log имеет коммит заявки + `memory: reindex`; `memory_fts` содержит `decisions/webhooks.md`, НЕ содержит `index.md`/`log.md`/`user/profile.md` (by design `_SKIP`); ход2 cross-run — `search_memory` + `read_memory decisions/webhooks.md`, ответ назвал факты из памяти (джиттер, шесть, dead-letter); `memory curate` чист |
 
-**Итог перепрогона: 6/6 FAIL → PASS.** Все три класса дефектов из retest закрыты: (1) `schedule_task` теперь доступен в external-bridge и идёт через critical-approval (S18/S24/S25), (2) canonical-путь project-page — единый, отклонения с подсказкой (S7/S9), (3) правило честности про компетентностные ямы доходит до модели (S26). S2/S4/S19/S27 (PASS в retest) не откатились — фиксы их не затрагивают.
+**Итог перепрогона: 6/6 FAIL → PASS + S37 реклассифицирован (не баг, ошибка наблюдения).** Все три класса дефектов из retest закрыты: (1) `schedule_task` теперь доступен в external-bridge и идёт через critical-approval (S18/S24/S25), (2) canonical-путь project-page — единый, отклонения с подсказкой (S7/S9), (3) правило честности про компетентностные ямы доходит до модели (S26). S37 — FTS-синк работает на external (код-путь общий с native через `drain_memory`), `_SKIP` исключает profile по дизайну. S2/S4/S19/S27 (PASS в retest) не откатились — фиксы их не затрагивают.
 
 ### Что осталось за рамками (как и в плане)
 
-- **S37 (FTS-инфра)** — отдельная находка, вне scope (`run_assembly.py:452-454` — FTS выключен в external/docker). Делает S34–S38 неверифицируемыми на opencode.
 - **`refuel_rounds` в `Run.meta`** — побочная находка S19, отдельная задача.
 - Существующие misplaced `projects/<slug>.md` в `agent-home/memory` (если есть) — отдельная миграция; reject-stack ловит новые записи.
+- Cosmetic: устаревший комментарий `run_assembly.py:452-454` («FTS выключен — фабрику не передаём») — фабрика передаётся (`:456`), FTS-синк идёт через writer.
 
