@@ -111,6 +111,60 @@ def test_sources_path_not_falsely_flagged_as_memory_prefix(tmp_path: Path) -> No
     assert validate_change(tmp_path, req) is None
 
 
+# --- контракт canonical-пути страницы проекта (S7/S9) -----------------------
+
+
+def test_rejects_two_component_project_path(tmp_path: Path) -> None:
+    """projects/<slug>.md (2-компонентный) — не canonical: project_slug_from_path
+    вернёт None, контракт не применится, файл станет осиротевшим (без index.md,
+    без дат, без frontmatter-проверки). Отвергаем с подсказкой canonical-формы."""
+    error = validate_change(
+        tmp_path,
+        _req("projects/ghost.md", MemoryOperation.CREATE, content="# ghost\n"),
+    )
+    assert error is not None
+    assert "projects/<slug>/overview.md" in error
+    assert "projects/ghost.md" in error
+
+
+def test_rejects_non_overview_project_file(tmp_path: Path) -> None:
+    """Любой не-overview.md файл под projects/<slug>/ — тоже не canonical:
+    например, агент имитирует страницу проекта через notes.md."""
+    error = validate_change(
+        tmp_path,
+        _req("projects/ghost/notes.md", MemoryOperation.CREATE, content="заметка\n"),
+    )
+    assert error is not None
+    assert "projects/<slug>/overview.md" in error
+
+
+def test_allows_delete_of_misplaced_project_file(tmp_path: Path) -> None:
+    """DELETE осиротевшего projects/<slug>.md разрешён: агент может зачистить
+    свою же прошлую ошибку (контракт canonical не должен блокировать удаление)."""
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "ghost.md").write_text("осиротевший\n", encoding="utf-8")
+    error = validate_change(
+        tmp_path, _req("projects/ghost.md", MemoryOperation.DELETE)
+    )
+    assert error is None
+
+
+def test_canonical_project_path_still_validated(tmp_path: Path) -> None:
+    """Canonical projects/<slug>/overview.md проходит к контракту frontmatter:
+    файл без summary по-прежнему отвергается (фикс S7/S9 не ослабил контракт)."""
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "ghost").mkdir()
+    error = validate_change(
+        tmp_path,
+        _req(
+            "projects/ghost/overview.md",
+            MemoryOperation.CREATE,
+            content="---\nname: ghost\nslug: ghost\nstatus: active\n---\n# ghost\n",
+        ),
+    )
+    assert error is not None and "summary" in error
+
+
 # --- инструмент propose_memory_change (блок C §2) ----------------------------
 
 
