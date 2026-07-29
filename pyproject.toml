@@ -68,6 +68,8 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-pyyaml>=6.0",
+    # Backend сборки: нужен в dev-окружении, чтобы тесты видели hatch_build.py.
+    "hatchling>=1.27",
     # Опциональные интерфейсы гоняются в тестах и CI.
     "fastapi>=0.115",
     "uvicorn>=0.34",
@@ -79,10 +81,11 @@ dev = [
 packages = ["src/svarog_harness"]
 
 # Бандл клиента собирается до сборки пакета (шаг CI) и едет внутри колеса,
-# чтобы запуск Сварога не требовал Node. Каталога может не быть — сборка
-# пакета без клиента остаётся возможной.
-[tool.hatch.build.targets.wheel.force-include]
-"web/dist" = "svarog_harness/gateway/web"
+# чтобы запуск Сварога не требовал Node. Каталога может не быть (web/dist не в
+# git), а статический force-include в этом случае роняет сборку — включение
+# объявляет hatch_build.py, который проверяет наличие бандла.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [tool.ruff]
 target-version = "py312"

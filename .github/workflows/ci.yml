@@ -56,3 +56,11 @@ jobs:
 
       - name: Web build
         run: npm --prefix web run build
+
+      # Колесо собирается только здесь — после бандла. Шаг стережёт обратный
+      # путь: `uv sync` выше проверяет сборку без клиента, этот — с клиентом
+      # (бандл должен попасть внутрь пакета, см. hatch_build.py).
+      - name: Package build
+        run: |
+          uv build --wheel
+          unzip -l dist/*.whl | grep -q 'svarog_harness/gateway/web/index.html'
