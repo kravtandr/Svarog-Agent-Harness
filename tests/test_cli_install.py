@@ -237,4 +237,7 @@ def test_cli_install_skips_symlink_on_existing_regular(
     # regular file не тронут.
     assert not target.is_symlink()
     assert "remote" in target.read_text(encoding="utf-8")
-    assert "уже существует" in result.output
+    # Rich word-wrap (width=80 в CliRunner) может разорвать фразу «уже
+    # существует» переносом строки — нормализуем whitespace перед поиском.
+    flat = " ".join(result.output.split())
+    assert "уже существует как файл" in flat
