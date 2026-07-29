@@ -208,8 +208,12 @@ def test_cli_install_fails_when_agent_home_missing(
     )
 
     assert result.exit_code == 1
-    assert "не найден" in result.output
-    assert "svarog init" in result.output
+    # Rich word-wrap (width=80 в CliRunner) рвёт сообщение по месту, которое
+    # зависит от длины tmp_path: на короткой /tmp/... перенос ложится между
+    # «не» и «найден» — нормализуем whitespace перед поиском.
+    flat = " ".join(result.output.split())
+    assert "не найден" in flat
+    assert "svarog init" in flat
 
 
 def test_cli_install_skips_symlink_on_existing_regular(
