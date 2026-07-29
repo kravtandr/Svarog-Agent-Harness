@@ -20,6 +20,8 @@ from svarog_harness.runtime.agents import (
     EXTERNAL_ADAPTERS,
     adapter_available,
 )
+from svarog_harness.sandbox.base import ExecResult
+from svarog_harness.sandbox.docker import DockerEnvironment
 from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
 from svarog_harness.trace.lookup import find_run_by_prefix
 
@@ -125,6 +127,29 @@ def test_adapter_only_override_on_already_external_config(tmp_path: Path) -> Non
 @pytest.fixture
 def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> GatewayService:
     monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Образы агентов (svarog/agent-*) собирает локально `svarog init`, в
+    # реестре их нет. Отправка сообщения поднимает sandbox синхронно
+    # (service._acquire_warm → prepare_session_resources), поэтому на машине
+    # без готового образа `docker run` отвечал pull access denied, а запрос —
+    # 422 вместо 201. Тесты здесь про то, что выбор в композере доезжает до
+    # Run.meta и производного конфига, а не про исполнение внутри контейнера:
+    # подменяем старт контейнера, оставляя весь остальной путь настоящим.
+    async def stub_start(self: DockerEnvironment) -> None:
+        self._docker = "stub-docker"
+        self._container_id = "stub-container"
+
+    async def stub_execute(
+        self: DockerEnvironment, command: str, *, timeout_sec: float
+    ) -> ExecResult:
+        return ExecResult(exit_code=1, stdout="", stderr="sandbox застаблен в тесте")
+
+    async def stub_cleanup(self: DockerEnvironment) -> None:
+        self._container_id = None
+
+    monkeypatch.setattr(DockerEnvironment, "start", stub_start)
+    monkeypatch.setattr(DockerEnvironment, "execute", stub_execute)
+    monkeypatch.setattr(DockerEnvironment, "cleanup", stub_cleanup)
     cfg = _config(tmp_path)
     return GatewayService(cfg, tmp_path / "ws")
 
