@@ -36,15 +36,59 @@ def test_sources_are_immutable(tmp_path: Path) -> None:
     assert error is not None and "неизменяемый" in error
 
 
-def test_pending_file_relaxes_existence_check(tmp_path: Path) -> None:
+def test_pending_change_relaxes_existence_check(tmp_path: Path) -> None:
     """Файл, поставленный в очередь этим же run'ом, ещё не на диске — не ошибка."""
     target = str((tmp_path / "notes.md").resolve())
+    change = _req("notes.md", MemoryOperation.UPDATE_FIELD, field="status", content="active")
     error = validate_change(
         tmp_path,
-        _req("notes.md", MemoryOperation.UPDATE_FIELD, field="status", content="active"),
-        pending_files={target},
+        change,
+        pending_changes={target: [change]},
     )
     assert error is None
+
+
+def test_update_field_composes_queued_summary_then_status(tmp_path: Path) -> None:
+    """Regression S8: цепочка update_field summary → update_field status на
+    странице без summary. Вторая заявка валидируется по суммированному
+    состоянию (summary уже добавлен первой), а не по диску — иначе падает
+    «нет обязательных полей: summary»."""
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "x").mkdir()
+    page = tmp_path / "projects" / "x" / "overview.md"
+    page.write_text(
+        "---\nname: x\nslug: x\nstatus: active\n---\n## Тело\nрешение\n", encoding="utf-8"
+    )
+    target = str(page.resolve())
+    add_summary = _req(
+        "projects/x/overview.md", MemoryOperation.UPDATE_FIELD, field="summary", content="бот"
+    )
+    set_status = _req(
+        "projects/x/overview.md", MemoryOperation.UPDATE_FIELD, field="status", content="paused"
+    )
+    error = validate_change(tmp_path, set_status, pending_changes={target: [add_summary]})
+    assert error is None, error
+
+
+def test_update_field_still_requires_summary_without_queue(tmp_path: Path) -> None:
+    """Composition не ослабила контракт: одиночный update_field status на
+    странице без summary (без queued summary) всё равно падает."""
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "x").mkdir()
+    page = tmp_path / "projects" / "x" / "overview.md"
+    page.write_text(
+        "---\nname: x\nslug: x\nstatus: active\n---\n## Тело\nрешение\n", encoding="utf-8"
+    )
+    error = validate_change(
+        tmp_path,
+        _req(
+            "projects/x/overview.md",
+            MemoryOperation.UPDATE_FIELD,
+            field="status",
+            content="paused",
+        ),
+    )
+    assert error is not None and "summary" in error
 
 
 def test_valid_append_passes(tmp_path: Path) -> None:

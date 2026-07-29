@@ -66,11 +66,24 @@ def validate_proposal(memory_dir: Path, request: MemoryProposalRequest) -> list[
         errors.append("proposal не содержит ни одной правки")
         return errors
 
+    # Правки внутри одного proposal применяются последовательно (как заявки в
+    # очереди remember): цепочка update_field summary → update_field status по
+    # одной странице должна валидироваться по суммированному состоянию, а не по
+    # диску. Накапливаем принятые правки по абсолютному пути и передаём их в
+    # validate_change — той же механикой composition, что у RememberTool.
+    seen: dict[str, list[MemoryChangeRequest]] = {}
     for index, change in enumerate(request.changes, start=1):
         if change.operation is MemoryOperation.DELETE:
             error = _delete_allowed(memory_dir, change)
         else:
-            error = validate_change(memory_dir, change)
+            error = validate_change(memory_dir, change, pending_changes=seen)
         if error is not None:
             errors.append(f"правка {index}: {error}")
+            continue
+        if change.operation is not MemoryOperation.DELETE:
+            try:
+                key = str(resolve_memory_path(memory_dir, change.file))
+            except MemoryApplyError:
+                continue
+            seen.setdefault(key, []).append(change)
     return errors

@@ -259,7 +259,13 @@ class BridgeControl:
             result.output if result.ok else (result.error or "ошибка"), self._secret_values
         )
         if self._on_notify is not None:
-            self._on_notify("bridge.mcp", f"{name}: {'ok' if result.ok else 'ошибка'}")
+            # При отказе пробрасываем redacted-причину (text уже несёт
+            # result.error либо «ошибка») — иначе в run-логе не видно, ПОЧЕМУ
+            # инструмент упал, и без instrumentation баг выглядит как «мост
+            # сломался» вместо реальной причины (например «нет обязательных
+            # полей: summary»).
+            reason = "ok" if result.ok else text
+            self._on_notify("bridge.mcp", f"{name}: {reason}")
         if result.ok and result.blocks:
             # Бинарные блоки redaction не проходят: источник ограничен
             # workspace, секреты в байтах картинок не живут (spec 2026-07-24).

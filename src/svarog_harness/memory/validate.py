@@ -5,12 +5,13 @@
 временем разъедется между ними.
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from svarog_harness.memory.apply import (
     MemoryApplyError,
+    _new_content,
     has_section,
-    preview_content,
     resolve_memory_path,
 )
 from svarog_harness.memory.change import MemoryChangeRequest, MemoryOperation
@@ -21,16 +22,20 @@ def validate_change(
     memory_dir: Path,
     request: MemoryChangeRequest,
     *,
-    pending_files: set[str] | None = None,
+    pending_changes: Mapping[str, list[MemoryChangeRequest]] | None = None,
 ) -> str | None:
     """Отловить предсказуемые ошибки применения до постановки в очередь.
 
-    `pending_files` — абсолютные пути, уже поставленные в очередь этим же
-    run'ом: очередь применяется после run, поэтому цепочка create →
-    replace_section по одному файлу не должна ложно падать на проверке
-    существования. None — проверять строго по диску.
+    `pending_changes` — заявки, уже поставленные в очередь этим же run'ом,
+    сгруппированные по абсолютному пути файла. Очередь применяется после run,
+    поэтому цепочки по одному файлу (create → replace_section, а также
+    update_field → update_field) не должны ложно падать. Контракт страницы
+    проекта валидируется по *просуммированному* состоянию: queued-заявки
+    накатываются на дисковое содержимое через тот же `_new_content`, которым
+    пользуется single-writer, — иначе вторая `update_field` в цепочке не видит
+    поле, добавленное первой. None — проверять строго по диску.
     """
-    queued = pending_files or set()
+    pending = dict(pending_changes or {})
     try:
         target = resolve_memory_path(memory_dir, request.file)
     except MemoryApplyError as exc:
@@ -73,7 +78,7 @@ def validate_change(
                     f"секция '{request.section}' не найдена в '{request.file}'; "
                     f"проверь заголовок или используй append"
                 )
-        elif str(target) not in queued:
+        elif str(target) not in pending:
             # Файл, поставленный в очередь этим же run'ом, ещё не применён —
             # для него проверку пропускаем (оптимистично).
             return f"файл '{request.file}' не существует для replace_section"
@@ -81,19 +86,22 @@ def validate_change(
     if request.operation is MemoryOperation.UPDATE_FIELD:
         if not request.field:
             return "для update_field нужно указать field (имя поля frontmatter)"
-        if not target.exists() and str(target) not in queued:
+        if not target.exists() and str(target) not in pending:
             return f"файл '{request.file}' не существует для update_field"
 
     slug = project_slug_from_path(request.file)
     if slug is not None and request.operation is not MemoryOperation.DELETE:
         # Контракт страницы проекта (ADR-0011): frontmatter должен быть валиден
-        # в прогнозируемом содержимом. Заявку, поставленную в очередь этим же
-        # run'ом и ещё не применённую (нет на диске), пропускаем — она
-        # провалидируется своей заявкой.
-        if str(target) in queued and not target.exists():
-            return None
+        # в прогнозируемом содержимом. Просуммируем queued-заявки этого же run'а
+        # поверх диска тем же `_new_content`, которым применяет очередь
+        # single-writer — иначе цепочка update_field summary → update_field
+        # status ложно падает: вторая заявка не видит поле из первой.
+        queued_for_file = pending.get(str(target), ())
         try:
-            prospective = preview_content(memory_dir, request)
+            existing = target.read_text(encoding="utf-8") if target.exists() else ""
+            for change in queued_for_file:
+                existing = _new_content(existing, change)
+            prospective = _new_content(existing, request)
         except MemoryApplyError as exc:
             return str(exc)
         return validate_project_page(prospective, expected_slug=slug)
