@@ -20,7 +20,7 @@ from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.loop import AgentLoop
 from svarog_harness.runtime.refuel import build_task_state, segment_progress
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
-from svarog_harness.storage.models import RunState
+from svarog_harness.storage.models import Run, RunState
 from svarog_harness.tools.file_tools import file_tools
 from svarog_harness.tools.registry import ToolRegistry
 from svarog_harness.trace.recorder import TraceRecorder
@@ -160,6 +160,25 @@ async def test_refuel_suspends_then_resume_rebuilds_context(
     assert len(request_after_refuel) == 2
     assert request_after_refuel[0].role == "system"
     assert "task_state" in request_after_refuel[1].content.lower()
+
+
+async def test_refuel_suspend_writes_rounds_to_run_meta(db: AsyncSession, tmp_path: Path) -> None:
+    """S19 Assert: Run.meta['refuel_rounds'] >= 1 даже на suspend-пути.
+
+    Раньше _refuel_suspend не инкрементировал счётчик и не писал его в Run.meta
+    (в отличие от _autocontinue) — наблюдатель не мог узнать, что refuel вообще
+    произошёл, хотя task_state.md писался и resume работал. S19 ловил это.
+    """
+    cfg = RuntimeConfig(max_iterations=6, refuel_after_iterations=2, max_refuel_rounds=0)
+    provider = ScriptedProvider(
+        [_tool_turn(0), _tool_turn(1), _tool_turn(2)]
+    )
+    outcome = await _loop(provider, db, tmp_path, cfg).run("длинная задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.SUSPENDED
+
+    run = await db.get(Run, outcome.run_id)
+    assert run is not None
+    assert run.meta.get("refuel_rounds") == 1
 
 
 async def test_max_iterations_caps_segment_not_total(db: AsyncSession, tmp_path: Path) -> None:

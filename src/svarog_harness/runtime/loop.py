@@ -807,14 +807,22 @@ class AgentLoop:
         или потолок раундов исчерпан. Раздутая история из checkpoint убирается —
         resume пересоберёт контекст с нуля из task_state.md. Процесс и sandbox
         между refuel и resume освобождаются.
+
+        Счётчик раундов инкрементируется и пишется в Run.meta, как в
+        _autocontinue: suspend — это тоже раунд refuel (контекст уже сброшен
+        в task_state.md). Ручной resume обнулит LoopState.refuel_rounds (новый
+        бюджет), но snapshot в Run.meta остаётся — так наблюдатель (S19 Assert)
+        видит, что хотя бы один сброс произошёл.
         """
         await self._write_task_state(run, state)
+        state.refuel_rounds += 1
         state.refuel_pending = True
         # Раздутую историю в checkpoint не тащим — resume пересоберёт из файла.
         state.messages = []
         state.pending_tool_calls = ()
         state.iterations_since_refuel = 0
         state.last_prompt_tokens = 0
+        await self._recorder.merge_run_meta(run, {"refuel_rounds": state.refuel_rounds})
         if self._cfg.max_refuel_rounds:
             reason = (
                 f"исчерпан потолок автопродолжений "
