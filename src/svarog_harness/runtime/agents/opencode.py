@@ -18,6 +18,7 @@ from svarog_harness.runtime.executor import (
     AgentEvent,
     AgentLaunch,
     ask_user_guide,
+    competency_honesty_guide,
 )
 from svarog_harness.runtime.self_docs import self_docs_hint
 from svarog_harness.tools.document_tools import document_tools_hint
@@ -81,6 +82,7 @@ class OpencodeAdapter:
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
         sections.append(ask_user_guide("svarog_ask_user"))
+        sections.append(competency_honesty_guide())
         # Наблюдение 21.07.2026 (S13): модель дописывала файл через write с
         # одним лишь новым фрагментом — write перезаписывает файл целиком.
         sections.append(

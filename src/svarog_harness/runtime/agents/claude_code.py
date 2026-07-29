@@ -25,6 +25,7 @@ from svarog_harness.runtime.executor import (
     AgentEvent,
     AgentLaunch,
     ask_user_guide,
+    competency_honesty_guide,
 )
 from svarog_harness.runtime.self_docs import self_docs_hint
 from svarog_harness.tools.document_tools import document_tools_hint
@@ -116,6 +117,7 @@ class ClaudeCodeAdapter:
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
         sections.append(ask_user_guide("mcp__svarog__ask_user"))
+        sections.append(competency_honesty_guide())
         if skill_cards:
             sections.append(
                 "# Скиллы Svarog\n\nПолное содержимое скилла — MCP-tool `read_skill`.\n\n"
@@ -127,8 +129,6 @@ class ClaudeCodeAdapter:
             sections.append(
                 document_tools_hint("mcp__svarog__read_document", "mcp__svarog__read_image")
             )
-        if not sections:
-            return {}
         return {"CLAUDE.md": "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
