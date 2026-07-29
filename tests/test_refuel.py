@@ -170,9 +170,7 @@ async def test_refuel_suspend_writes_rounds_to_run_meta(db: AsyncSession, tmp_pa
     произошёл, хотя task_state.md писался и resume работал. S19 ловил это.
     """
     cfg = RuntimeConfig(max_iterations=6, refuel_after_iterations=2, max_refuel_rounds=0)
-    provider = ScriptedProvider(
-        [_tool_turn(0), _tool_turn(1), _tool_turn(2)]
-    )
+    provider = ScriptedProvider([_tool_turn(0), _tool_turn(1), _tool_turn(2)])
     outcome = await _loop(provider, db, tmp_path, cfg).run("длинная задача", AutonomyMode.YOLO)
     assert outcome.state is RunState.SUSPENDED
 

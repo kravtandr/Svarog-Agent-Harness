@@ -143,9 +143,7 @@ def test_allows_delete_of_misplaced_project_file(tmp_path: Path) -> None:
     свою же прошлую ошибку (контракт canonical не должен блокировать удаление)."""
     (tmp_path / "projects").mkdir()
     (tmp_path / "projects" / "ghost.md").write_text("осиротевший\n", encoding="utf-8")
-    error = validate_change(
-        tmp_path, _req("projects/ghost.md", MemoryOperation.DELETE)
-    )
+    error = validate_change(tmp_path, _req("projects/ghost.md", MemoryOperation.DELETE))
     assert error is None
 
 

@@ -611,8 +611,11 @@ async def test_schedule_task_single_enqueue_after_approval(
     approval = await recorder.create_approval(
         run,
         action_type="schedule.create",
-        payload={"tool_name": "schedule_task", "tool_input": args,
-                 FINGERPRINT_KEY: call_fingerprint("schedule_task", args)},
+        payload={
+            "tool_name": "schedule_task",
+            "tool_input": args,
+            FINGERPRINT_KEY: call_fingerprint("schedule_task", args),
+        },
     )
     await recorder.decide_approval(approval, approved=True, decided_by="tester")
     response = await control.handle_mcp(
