@@ -420,6 +420,7 @@ class RunAssembly:
         autonomy: AutonomyMode,
         proposal_sink: list[SkillProposalRequest],
         hooks: RunHooks,
+        schedule_sink: list[ScheduleRequest] | None = None,
     ) -> BridgeControl:
         """Control-plane bridge (ADR-0016 §4/§6): MCP-tools + hook-мост.
 
@@ -443,6 +444,7 @@ class RunAssembly:
             workspace_dir=workspace,
             skills=scan_skills(skills_dirs(cfg, workspace)).skills,
             proposal_sink=proposal_sink,
+            schedule_sink=schedule_sink,
             secret_values=self.known_secret_values(),
             approval_grace_sec=float(external.approval_grace_sec),
             ask_user_timeout_sec=cfg.runtime.ask_user_timeout_sec,

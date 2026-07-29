@@ -326,6 +326,24 @@ def test_claude_context_steers_questions_to_ask_user() -> None:
     assert "не завершай" in text.lower()
 
 
+def test_opencode_context_includes_competency_honesty_guide() -> None:
+    """S26: правило честности про пробелы в компетенциях доходит до opencode —
+    иначе модель назначает ближайшего стек-соседа (React → mobile) без оговорки."""
+    files = OpencodeAdapter().context_files("", "")
+    assert "пробелы в компетенциях" in files[".config/opencode/AGENTS.md"].lower()
+
+
+def test_claude_context_includes_competency_honesty_guide() -> None:
+    files = ClaudeCodeAdapter().context_files("", "")
+    assert "пробелы в компетенциях" in files["CLAUDE.md"].lower()
+
+
+def test_codex_context_includes_competency_honesty_guide() -> None:
+    """Codex без MCP всё равно получает правило поведения модели (не MCP-tool)."""
+    files = CodexAdapter().context_files("", "")
+    assert "пробелы в компетенциях" in files["AGENTS.md"].lower()
+
+
 def test_claude_context_files_doc_tools() -> None:
     files = ClaudeCodeAdapter().context_files("", "", doc_tools=True)
     body = files["CLAUDE.md"]

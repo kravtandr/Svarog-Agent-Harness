@@ -47,3 +47,11 @@ def test_memory_guide_documents_wiki_contract() -> None:
 def test_without_memory_no_guide() -> None:
     messages = build_initial_messages("задача", Path("/ws"))
     assert "Долговременная память" not in messages[0].content
+
+
+def test_system_prompt_includes_competency_honesty_rule() -> None:
+    """S26: native-промпт несёт правило честности про пробелы в компетенциях —
+    иначе модель назначает ближайшего стек-соседа без оговорки (React → mobile)."""
+    system = build_initial_messages("t", Path("/ws"), memory="")[0].content
+    assert "пробелы в компетенциях" in system.lower()
+    assert "React ≠ mobile" in system

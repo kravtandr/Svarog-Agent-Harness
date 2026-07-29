@@ -43,6 +43,7 @@ from svarog_harness.secrets.store import EnvSecretStore
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.models import Approval, ApprovalStatus, MemoryChange
 from svarog_harness.tools.base import RiskLevel, Tool, ToolResult
+from svarog_harness.tools.schedule_tools import ScheduleRequest
 from svarog_harness.trace.recorder import TraceRecorder
 from tests.test_document_tools import _PNG_1PX
 
@@ -364,6 +365,7 @@ def _control(
     workspace_dir: Path | None = None,
     on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
     search_sessions: object | None = None,
+    schedule_sink: list[ScheduleRequest] | None = None,
 ) -> BridgeControl:
     policy = PolicyEngine(
         autonomy=autonomy,
@@ -378,6 +380,7 @@ def _control(
         workspace_dir=workspace_dir,
         skills=[],
         proposal_sink=[],
+        schedule_sink=schedule_sink,
         approval_grace_sec=grace_sec,
         on_approval_prompt=on_approval_prompt,
         search_sessions=search_sessions,  # type: ignore[arg-type]
@@ -524,9 +527,12 @@ async def test_mcp_remember_enqueues_memory(db: AsyncSession, tmp_path: Path) ->
             "params": {
                 "name": "remember",
                 "arguments": {
-                    "file": "projects/demo.md",
+                    "file": "projects/demo/overview.md",
                     "operation": "create",
-                    "content": "# demo\n\nвнешний агент узнал факт\n",
+                    "content": (
+                        "---\nname: demo\nslug: demo\nsummary: x\nstatus: active\n---\n"
+                        "# demo\n\nвнешний агент узнал факт\n"
+                    ),
                 },
             },
         }
@@ -537,7 +543,92 @@ async def test_mcp_remember_enqueues_memory(db: AsyncSession, tmp_path: Path) ->
     assert rows[0].source_run_id == run_id
 
 
-async def test_hook_allows_reads_in_yolo(tmp_path: Path) -> None:
+async def test_schedule_task_absent_without_sink(tmp_path: Path) -> None:
+    """Без schedule_sink (chat-mode/child-run) tool не регистрируется —
+    как search_memory без FTS-фабрики. Гарантирует, что approval-gate в
+    _call_tool не сработает на несуществующий tool."""
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    control = _control(tmp_path, memory_dir=mem)  # schedule_sink=None
+    listed = await control.handle_mcp({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "schedule_task" not in names
+
+
+async def test_schedule_task_listed_with_sink(tmp_path: Path) -> None:
+    """sink wired — schedule_task появляется в MCP tools/list (зеркало native)."""
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", schedule_sink=[])
+    listed = await control.handle_mcp({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert "schedule_task" in names
+
+
+async def test_schedule_task_requires_approval_even_in_yolo(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """schedule.create — неотключаемый critical-набор (ADR-0010/0019): вызов
+    без одобрения создаёт Approval, роняет run в waiting_approval, и в sink
+    ничего не попадает (single-fire только после approval). Гейт внутри MCP
+    (_call_tool), а не на hook-слое — mcp__svarog short-circuit нейтрализован."""
+    sink: list[ScheduleRequest] = []
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", schedule_sink=sink)
+    control.run_id = await _start_run(db, str(tmp_path))
+    args = {"name": "daily-digest", "task": "сводка", "daily_at": "09:00", "tz": "UTC"}
+    response = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "schedule_task", "arguments": args},
+        }
+    )
+    # Grace истёк, решения нет → ошибка + suspend.
+    assert response["result"]["isError"]
+    assert "SVAROG-PENDING" in response["result"]["content"][0]["text"]
+    assert control.suspend.is_set()
+    assert sink == []  # ни одной заявки без одобрения
+    approvals = list((await db.execute(select(Approval))).scalars())
+    assert len(approvals) == 1
+    assert approvals[0].action_type == "schedule.create"
+    assert approvals[0].status is ApprovalStatus.PENDING
+    assert approvals[0].payload[FINGERPRINT_KEY] == call_fingerprint("schedule_task", args)
+
+
+async def test_schedule_task_single_enqueue_after_approval(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Resume после approve: decision cache по отпечатку пропускает гейт
+    мгновенно, и ScheduleTaskTool.on_enqueue срабатывает ровно один раз
+    (native-семантика single-fire). Заявка готова к materialизации джобой."""
+    sink: list[ScheduleRequest] = []
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", schedule_sink=sink)
+    run_id = await _start_run(db, str(tmp_path))
+    control.run_id = run_id
+    recorder = TraceRecorder(db)
+    run = await recorder.get_run(run_id)
+    assert run is not None
+    args = {"name": "weekly", "task": "план", "daily_at": "09:00", "tz": "Europe/Moscow"}
+    approval = await recorder.create_approval(
+        run,
+        action_type="schedule.create",
+        payload={"tool_name": "schedule_task", "tool_input": args,
+                 FINGERPRINT_KEY: call_fingerprint("schedule_task", args)},
+    )
+    await recorder.decide_approval(approval, approved=True, decided_by="tester")
+    response = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {"name": "schedule_task", "arguments": args},
+        }
+    )
+    assert not response["result"]["isError"], response
+    assert len(sink) == 1
+    assert sink[0].name == "weekly"
+    assert sink[0].kind.value == "daily_at"
+    assert sink[0].spec == "09:00"
+    assert sink[0].tz == "Europe/Moscow"
     control = _control(tmp_path)
     decision = await control.handle_hook({"tool_name": "Read", "tool_input": {"file_path": "a.py"}})
     assert decision == {"decision": "allow", "reason": ""}

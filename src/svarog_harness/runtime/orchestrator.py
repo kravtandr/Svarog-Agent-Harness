@@ -328,8 +328,11 @@ class TaskRunner:
         autonomy: AutonomyMode,
         proposal_sink: list[SkillProposalRequest],
         hooks: RunHooks,
+        schedule_sink: list[ScheduleRequest] | None = None,
     ) -> BridgeControl:
-        return self._assembly.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+        return self._assembly.wire_bridge_control(
+            infra, autonomy, proposal_sink, hooks, schedule_sink=schedule_sink
+        )
 
     def prepare_agent_launch(self, infra: ExternalAgentInfra) -> None:
         self._assembly.prepare_agent_launch(infra)
@@ -633,7 +636,9 @@ class TaskRunner:
                     # Data-plane — внешний агент (ADR-0016): память и скиллы
                     # доступны агенту через MCP-сервер bridge (§4).
                     assert infra is not None
-                    control = self.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+                    control = self.wire_bridge_control(
+                        infra, autonomy, proposal_sink, hooks, schedule_sink=schedule_sink
+                    )
                     executor = self.build_external_executor(
                         recorder, env, hooks, infra=infra, control=control
                     )
@@ -854,8 +859,14 @@ class TaskRunner:
         await environment.start()
         try:
             proposal_sink: list[SkillProposalRequest] = []
+            # schedule_sink для resume: одобренная на resume заявка schedule_task
+            # materialизуется джобой здесь (зеркало native resume() → drain_schedule).
+            # Без этого approve+resume даёт completed без джобы (баг S24, ADR-0019).
+            schedule_sink: list[ScheduleRequest] = []
             autonomy = AutonomyMode(run.autonomy)
-            control = runner.wire_bridge_control(infra, autonomy, proposal_sink, hooks)
+            control = runner.wire_bridge_control(
+                infra, autonomy, proposal_sink, hooks, schedule_sink=schedule_sink
+            )
             control.set_run(run)
             executor = runner.build_external_executor(
                 recorder, environment, hooks, infra=infra, control=control
@@ -863,6 +874,7 @@ class TaskRunner:
             outcome = await executor.resume(run, prompt, agent_session=agent_session)
             await runner.drain_memory(db, hooks)
             await runner.drain_proposals(db, proposal_sink, outcome.run_id, hooks)
+            await runner.drain_schedule(db, schedule_sink, workspace, hooks)
             failed_checks = await runner.verify(environment, recorder, outcome, hooks)
             if failed_checks:
                 error = f"verifier: {failed_checks} проверок не прошли"

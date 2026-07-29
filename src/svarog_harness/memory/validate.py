@@ -90,6 +90,22 @@ def validate_change(
             return f"файл '{request.file}' не существует для update_field"
 
     slug = project_slug_from_path(request.file)
+    if (
+        request.file.split("/", 1)[0] == "projects"
+        and slug is None
+        and request.operation is not MemoryOperation.DELETE
+    ):
+        # Проект обязан жить по canonical-пути projects/<slug>/overview.md
+        # (ADR-0011). Любой другой путь под projects/ (projects/<slug>.md,
+        # projects/<slug>/notes.md и т.п.) — это не проектная страница:
+        # validate_project_page её не проверит, index.md не индексирует,
+        # даты не проставятся. Отвергаем с подсказкой canonical-формата, чтобы
+        # агент сразу исправил путь, а не записал осиротевший файл (S7/S9).
+        return (
+            f"проект должен быть в projects/<slug>/overview.md "
+            f"(получено '{request.file}'); overview.md — обязательная страница "
+            f"проекта с frontmatter (name, slug, summary, status)"
+        )
     if slug is not None and request.operation is not MemoryOperation.DELETE:
         # Контракт страницы проекта (ADR-0011): frontmatter должен быть валиден
         # в прогнозируемом содержимом. Просуммируем queued-заявки этого же run'а

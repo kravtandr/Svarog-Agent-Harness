@@ -373,7 +373,14 @@ async def test_remember_accepts_valid_operations(tmp_path: Path) -> None:
             "section": "Дейлики",
             "content": "обновлено\n",
         },
-        {"file": "projects/animateyou.md", "operation": "create", "content": "# AnimateYou\n"},
+        {
+            "file": "projects/animateyou/overview.md",
+            "operation": "create",
+            "content": (
+                "---\nname: AnimateYou\nslug: animateyou\n"
+                "summary: медиа-агрегатор\nstatus: active\n---\n# AnimateYou\n"
+            ),
+        },
     ):
         result = await tool.call(args)
         assert result.ok, result.error
@@ -385,12 +392,19 @@ async def test_remember_allows_chain_create_then_replace(tmp_path: Path) -> None
     # предыдущая заявка этого же run, не должен ложно падать.
     tool, sink = _remember_tool(tmp_path)
     created = await tool.call(
-        {"file": "projects/new.md", "operation": "create", "content": "# New\n\n## Статус\nok\n"}
+        {
+            "file": "projects/new/overview.md",
+            "operation": "create",
+            "content": (
+                "---\nname: New\nslug: new\nsummary: test\nstatus: active\n---\n"
+                "# New\n\n## Статус\nok\n"
+            ),
+        }
     )
     assert created.ok
     replaced = await tool.call(
         {
-            "file": "projects/new.md",
+            "file": "projects/new/overview.md",
             "operation": "replace_section",
             "section": "Статус",
             "content": "x",

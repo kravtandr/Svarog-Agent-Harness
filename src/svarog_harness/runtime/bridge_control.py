@@ -4,8 +4,9 @@
 
 * `/svarog/mcp` — MCP-сервер Svarog (JSON-RPC поверх HTTP): «обратные»
   инструменты remember / read_memory / read_skill / create_skill_proposal /
-  ask_user / request_approval. Память идёт в очередь single-writer'а,
-  proposals — в sink Flow B, всё под тем же governance, что у нативного loop.
+  schedule_task / ask_user / request_approval. Память идёт в очередь
+  single-writer'а, proposals — в sink Flow B, schedule-заявки — в sink
+  планировщика, всё под тем же governance, что у нативного loop.
 * `/svarog/hook` — PreToolUse-мост (tier 2): каждый вызов инструмента агента
   прогоняется через Policy Engine c замороженным на старте run снапшотом
   (ADR-0010); require_approval ждёт grace period и при отсутствии решения
@@ -49,6 +50,7 @@ from svarog_harness.tools.document_tools import (
     document_tools_available,
 )
 from svarog_harness.tools.memory_tools import ReadMemoryTool, RememberTool, SearchMemoryTool
+from svarog_harness.tools.schedule_tools import ScheduleRequest, ScheduleTaskTool
 from svarog_harness.tools.skill_tools import CreateSkillProposalTool, ReadSkillTool
 from svarog_harness.tools.user_tools import question_options
 from svarog_harness.trace.recorder import TraceRecorder
@@ -100,6 +102,7 @@ class BridgeControl:
         workspace_dir: Path | None = None,
         skills: list[Skill],
         proposal_sink: list[SkillProposalRequest],
+        schedule_sink: list[ScheduleRequest] | None = None,
         secret_values: frozenset[str] = frozenset(),
         approval_grace_sec: float = 120.0,
         ask_user_timeout_sec: int = 3600,
@@ -114,6 +117,11 @@ class BridgeControl:
         self._workspace_dir = workspace_dir
         self._skills = skills
         self._proposal_sink = proposal_sink
+        # Sink планировщика (ADR-0019): schedule_task пробрасывается как MCP-tool
+        # наравне с native-loop; заявка materialизуется джобой после run'а в
+        # orchestrator._resume_external / run_once (зеркало native drain_schedule).
+        # None — планировщик не wired (тесты BridgeControl без schedule_sink).
+        self._schedule_sink = schedule_sink
         self._self_docs = self_docs
         # Read-фабрика к runtime-БД для search_memory (связка B). BridgeControl
         # конфига не держит, поэтому фабрику собирает и передаёт RunAssembly;
@@ -162,6 +170,12 @@ class BridgeControl:
         tools["create_skill_proposal"] = CreateSkillProposalTool(
             on_propose=self._proposal_sink.append
         )
+        if self._schedule_sink is not None:
+            # Планировщик (ADR-0019): schedule_task пробрасывается как MCP-tool,
+            # approval-gate срабатывает в _call_tool (critical-набор schedule.create
+            # неотключаем — см. _call_tool). on_enqueue — единственная точка
+            # добавления в sink (single-fire после approval, как в native loop).
+            tools["schedule_task"] = ScheduleTaskTool(on_enqueue=self._schedule_sink.append)
         # Документация самого Svarog: агент отвечает про систему по источнику,
         # а не по претрейну. Недоступный docs-root — фича молча выключается.
         if self._self_docs and resolve_docs_root() is not None:
@@ -250,6 +264,23 @@ class BridgeControl:
                 approved_prefix="пользователь одобрил: ",
             )
             return [{"type": "text", "text": text}], is_error
+        if name == "schedule_task":
+            # schedule.create — неотключаемый critical-набор (ADR-0010/0019):
+            # approval требуется в любом режиме автономии, включая yolo. Hook-мост
+            # не видит вызовы mcp__svarog* (short-circuit в handle_hook), поэтому
+            # гейт обязан жить здесь, на MCP-слое. Fingerprint даёт decision cache:
+            # на resume _human_gate мгновенно вернёт «одобрено» из кеша, и
+            # ScheduleTaskTool.on_enqueue сработает ровно один раз (single-fire,
+            # как в native loop). При отказе — run уходит в waiting_approval.
+            text, is_error = await self._human_gate(
+                action_type="schedule.create",
+                payload={"tool_name": name, "tool_input": arguments},
+                pending_reason="schedule_task: ждём решения человека",
+                approved_prefix="",
+                fingerprint=call_fingerprint(name, arguments),
+            )
+            if is_error:
+                return [{"type": "text", "text": text}], True
         tool = self._tools.get(name)
         if tool is None:
             return [{"type": "text", "text": f"неизвестный MCP-tool: {name}"}], True

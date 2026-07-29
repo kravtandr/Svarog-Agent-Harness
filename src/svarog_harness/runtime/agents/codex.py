@@ -23,6 +23,7 @@ from svarog_harness.runtime.executor import (
     AgentAuth,
     AgentEvent,
     AgentLaunch,
+    competency_honesty_guide,
 )
 
 _STATE_DIR = PurePosixPath("/tmp/home/.codex")
@@ -83,10 +84,9 @@ class CodexAdapter:
         sections: list[str] = []
         if memory:
             sections.append(f"# Память Svarog\n\n{memory}")
+        sections.append(competency_honesty_guide())
         if skill_cards:
             sections.append(f"# Скиллы Svarog\n\n{skill_cards}")
-        if not sections:
-            return {}
         return {"AGENTS.md": "\n\n".join(sections) + "\n"}
 
     def provider_files(self, model: str | None) -> dict[str, str]:
