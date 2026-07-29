@@ -105,6 +105,23 @@
 искажают оценку. В сценариях ниже такие реплики оставлены только как историческая
 цитата или удалены; при новом прогоне их использовать не надо.
 
+### Контракт страницы проекта (общее правило для всех сценариев)
+
+Любой Setup, кладущий `projects/<slug>/overview.md`, обязан давать страницу с
+**полным валидным frontmatter** (`name`, `slug`, `summary`, `status`, `created`,
+`updated`) и непустым телом — этого требует `validate_project_page`
+(`memory/project_page.py:18`, `REQUIRED_FIELDS`). Без `summary` страница не
+пройдёт prospective-валидацию при `update_field`, и сценарий воспроизведёт тупик
+из S8 Watch вместо своей настоящей цели. Контрольная проверка перед прогоном:
+
+```
+git -C <memory-repo> ls-tree -r --name-only HEAD | grep 'projects/.*overview.md'
+git -C <memory-repo> show HEAD:projects/<slug>/overview.md | head -8   # frontmatter
+```
+
+Если в выводе нет ожидаемой страницы или в её frontmatter нет `summary` — Setup
+кривой, прогон заведомо ложный.
+
 ---
 
 ## Каталог
@@ -202,7 +219,12 @@
            через `index.md` и `read_memory` в одном run'е.
 - Goal:    вернуться к старому проекту и обновить его.
 - Setup:   память с несколькими `projects/<slug>/overview.md` и заполненным
-           `index.md`.
+           `index.md`. Каждая страница **обязательно** имеет полный frontmatter
+           контракта (`name`, `slug`, `summary`, `status`, `created`, `updated`)
+           и тело — без `summary` страница не пройдёт валидацию и агент не сможет
+           её обновить (см. S8 Watch). Страницы должны физически лежать в
+           `memory`-репо и входить в seed-коммит (проверка: `git -C memory
+           ls-tree -r --name-only HEAD | grep overview.md`).
 - Driver:  «Что мы решали по проекту <slug>? Обнови у него статус на paused».
 - Assert:  агент находит проект через `index.md` и подтягивает страницу
            `read_memory('projects/<slug>/overview.md')` (а не выдумывает);
@@ -218,7 +240,12 @@
 - Persona: любая; провоцирует P7 (проверяющий) и P6 (меняющий требования).
 - Режим:   run — страница уже в памяти (Setup), одно `update_field` в одном run'е.
 - Goal:    сменить ОДНО поле frontmatter существующей страницы (status).
-- Setup:   `projects/<slug>/overview.md` со `status: active` и телом с решениями.
+- Setup:   `projects/<slug>/overview.md` со **ВСЕМИ** обязательными полями
+           frontmatter контракта (`name`, `slug`, `summary`, `status: active`,
+           `created`, `updated`) и телом с решениями. Без `summary` страница не
+           пройдёт `validate_project_page`, и `update_field status` будет
+           отклонён → воспроизводится тупик из Watch. Страница должна входить в
+           seed-коммит `memory`-репо (`git -C memory ls-tree … | grep overview.md`).
 - Driver:  «Поставь проекту <slug> статус paused».
 - Assert:  ровно одна заявка `remember update_field` (field=status,
            content=paused); страница НЕ удалена, тело/frontmatter целы, `updated`
