@@ -455,6 +455,84 @@ async def test_remember_update_field_rejects_sources(tmp_path: Path) -> None:
     assert sink == []
 
 
+async def test_remember_allows_chain_create_then_update_field(tmp_path: Path) -> None:
+    # Очередь применяется после run: update_field по файлу, который создаст
+    # предыдущая заявка этого же run, не должен ложно падать на «не существует».
+    tool, sink = _remember_tool(tmp_path)
+    created = await tool.call(
+        {
+            "file": "projects/foo/overview.md",
+            "operation": "create",
+            "content": (
+                "---\nname: Foo\nslug: foo\nsummary: s\nstatus: active\n---\n## Описание\nт\n"
+            ),
+        }
+    )
+    assert created.ok, created.error
+    updated = await tool.call(
+        {
+            "file": "projects/foo/overview.md",
+            "operation": "update_field",
+            "field": "status",
+            "content": "paused",
+        }
+    )
+    assert updated.ok, updated.error
+    assert len(sink) == 2 and sink[1].field == "status"
+
+
+async def test_remember_update_field_chain_composes_frontmatter(tmp_path: Path) -> None:
+    # Regression S8: на странице без summary первая заявка добавляет summary,
+    # вторая меняет status — обе принимаются. До фикса вторая падала с
+    # «нет обязательных полей: summary», т.к. preview не видел queued summary.
+    (tmp_path / "projects" / "x").mkdir(parents=True)
+    (tmp_path / "projects" / "x" / "overview.md").write_text(
+        "---\nname: x\nslug: x\nstatus: active\n---\n## Описание\nт\n", encoding="utf-8"
+    )
+    tool, sink = _remember_tool(tmp_path)
+    add_summary = await tool.call(
+        {
+            "file": "projects/x/overview.md",
+            "operation": "update_field",
+            "field": "summary",
+            "content": "бот",
+        }
+    )
+    assert add_summary.ok, add_summary.error
+    set_status = await tool.call(
+        {
+            "file": "projects/x/overview.md",
+            "operation": "update_field",
+            "field": "status",
+            "content": "paused",
+        }
+    )
+    assert set_status.ok, set_status.error
+    assert len(sink) == 2
+    assert sink[0].field == "summary" and sink[1].field == "status"
+
+
+async def test_remember_update_field_invalid_status_still_rejected(tmp_path: Path) -> None:
+    # Composition не ослабила контрак-проверку: update_field status=bogus на
+    # валидной странице всё равно падает с «status='bogus' недопустим».
+    (tmp_path / "projects" / "x").mkdir(parents=True)
+    (tmp_path / "projects" / "x" / "overview.md").write_text(
+        "---\nname: x\nslug: x\nsummary: s\nstatus: active\n---\n## Описание\nт\n", encoding="utf-8"
+    )
+    tool, sink = _remember_tool(tmp_path)
+    result = await tool.call(
+        {
+            "file": "projects/x/overview.md",
+            "operation": "update_field",
+            "field": "status",
+            "content": "bogus",
+        }
+    )
+    assert not result.ok
+    assert result.error is not None and "недопустим" in result.error
+    assert sink == []
+
+
 # --- read_memory: профиль первым, при усечении режется хвост (index) ---
 
 

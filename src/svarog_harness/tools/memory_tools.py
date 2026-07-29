@@ -77,10 +77,12 @@ class RememberTool(Tool[RememberArgs]):
         # Для валидации заявки по текущему состоянию памяти (чтение — без
         # ограничений, ADR-0004); None — валидация по файлам пропускается.
         self._memory_dir = memory_dir
-        # Файлы, уже поставленные в очередь этим run'ом: очередь применяется
-        # после run, поэтому цепочка create → replace_section по одному файлу
-        # не должна ложно падать на проверке существования.
-        self._pending_files: set[str] = set()
+        # Заявки, уже поставленные в очередь этим run'ом, по абсолютному пути
+        # файла. Очередь применяется после run, поэтому цепочки по одному файлу
+        # (create → replace_section, update_field → update_field) не должны
+        # ложно падать; сами заявки нужны, чтобы просуммировать frontmatter при
+        # контрак-валидации (иначе вторая update_field не видит поле из первой).
+        self._pending_changes: dict[str, list[MemoryChangeRequest]] = {}
 
     async def execute(self, args: RememberArgs) -> ToolResult:
         if args.operation is MemoryOperation.UPDATE_FIELD and (not args.field or not args.content):
@@ -101,7 +103,8 @@ class RememberTool(Tool[RememberArgs]):
         )
         self._on_enqueue(request)
         if self._memory_dir is not None and args.operation is not MemoryOperation.DELETE:
-            self._pending_files.add(str(resolve_memory_path(self._memory_dir, args.file)))
+            key = str(resolve_memory_path(self._memory_dir, args.file))
+            self._pending_changes.setdefault(key, []).append(request)
         return ToolResult.success(
             f"заявка в память принята ({request.summary()}); применится после "
             f"завершения задачи. Не перечитывай файл через read_memory для проверки "
@@ -119,7 +122,7 @@ class RememberTool(Tool[RememberArgs]):
             section=args.section,
             field=args.field,
         )
-        return validate_change(self._memory_dir, request, pending_files=self._pending_files)
+        return validate_change(self._memory_dir, request, pending_changes=self._pending_changes)
 
 
 class ReadMemoryArgs(BaseModel):

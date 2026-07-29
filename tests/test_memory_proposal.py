@@ -82,3 +82,33 @@ def test_change_level_error_is_reported_with_index(tmp_path: Path) -> None:
         ),
     )
     assert any(e.startswith("правка 2:") for e in errors)
+
+
+def test_intra_proposal_update_field_chain_composes(tmp_path: Path) -> None:
+    """Regression S8 (proposal-путь): две update_field в одном proposal на
+    странице без summary. До фикса вторая правка падала с «нет обязательных
+    полей: summary», т.к. validate_proposal валидировал каждую правку по диску,
+    а не по сумме правок proposal."""
+    (tmp_path / "projects" / "x").mkdir(parents=True)
+    page = tmp_path / "projects" / "x" / "overview.md"
+    page.write_text(
+        "---\nname: x\nslug: x\nstatus: active\n---\n## Описание\nт\n", encoding="utf-8"
+    )
+    errors = validate_proposal(
+        tmp_path,
+        _proposal(
+            MemoryChangeRequest(
+                file="projects/x/overview.md",
+                operation=MemoryOperation.UPDATE_FIELD,
+                field="summary",
+                content="бот",
+            ),
+            MemoryChangeRequest(
+                file="projects/x/overview.md",
+                operation=MemoryOperation.UPDATE_FIELD,
+                field="status",
+                content="paused",
+            ),
+        ),
+    )
+    assert errors == [], errors
