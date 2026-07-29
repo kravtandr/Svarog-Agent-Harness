@@ -33,8 +33,22 @@ jobs:
       - name: Typecheck
         run: uv run mypy
 
+      # Список падений дублируется в annotations и job summary: логи шага
+      # видны только авторизованным, а эти два канала — всем, кому доступен
+      # репозиторий (и переживают ротацию логов).
       - name: Tests
-        run: uv run pytest
+        run: |
+          set -o pipefail
+          uv run pytest -q --tb=short 2>&1 | tee /tmp/pytest.log || {
+            grep -E '^(FAILED|ERROR)' /tmp/pytest.log | sed 's/^/::error::/'
+            {
+              echo '### Падения pytest'
+              echo '```'
+              grep -E '^(FAILED|ERROR)' /tmp/pytest.log || tail -60 /tmp/pytest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
 
       - name: Evals (MVP criteria §26)
         run: uv run pytest evals
