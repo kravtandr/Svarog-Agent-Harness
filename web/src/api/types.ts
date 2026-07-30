@@ -190,3 +190,23 @@ export interface Attachment {
   mime: string | null;
   too_large_for_vision: boolean;
 }
+
+/** Подкаталог из GET /fs (пикер рабочей папки). */
+export interface FsEntry {
+  name: string;
+  path: string;
+  accessible: boolean;
+}
+
+export interface FsListing {
+  path: string;
+  parent: string | null;
+  entries: FsEntry[];
+}
+
+/** Недавний корень из GET /fs/recent; exists=false — папка исчезла. */
+export interface RecentRoot {
+  path: string;
+  exists: boolean;
+  last_used: string;
+}
