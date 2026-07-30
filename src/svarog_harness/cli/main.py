@@ -1485,7 +1485,9 @@ def serve(
     else:
         # Single-tenant — через WorkspaceHub: рабочая папка выбирается в UI
         # при создании чата (спека 2026-07-30), корень запуска — default_root.
-        workspace_registry = WorkspaceRootsRegistry(Path("~/.svarog/workspace-roots.json").expanduser())
+        workspace_registry = WorkspaceRootsRegistry(
+            Path("~/.svarog/workspace-roots.json").expanduser()
+        )
         api = create_app(
             resolver=WorkspaceHub(cfg, workspace, registry=workspace_registry, bearer_token=token)
         )
