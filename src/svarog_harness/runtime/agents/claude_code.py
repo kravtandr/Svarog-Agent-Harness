@@ -115,7 +115,8 @@ class ClaudeCodeAdapter:
             "Claude Code выключена. Чтобы что-то запомнить между запусками, вызывай "
             "MCP-tool `mcp__svarog__remember` (прочитать — `mcp__svarog__read_memory`); "
             "НЕ пиши факты в файлы через Write и НЕ веди свой ~/.claude/…/memory."
-            "\n\n" + memory_sources_guide("mcp__svarog__remember")
+            "\n\n"
+            + memory_sources_guide("mcp__svarog__remember")
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
         sections.append(ask_user_guide("mcp__svarog__ask_user"))

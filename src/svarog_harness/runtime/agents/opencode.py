@@ -80,7 +80,8 @@ class OpencodeAdapter:
             "запомнить между запусками, вызывай MCP-tool `svarog_remember` "
             "(прочитать — `svarog_read_memory`); НЕ пиши факты в файлы "
             "workspace и НЕ веди свою локальную память в ~/.local/share/opencode."
-            "\n\n" + memory_sources_guide("svarog_remember")
+            "\n\n"
+            + memory_sources_guide("svarog_remember")
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
         sections.append(ask_user_guide("svarog_ask_user"))

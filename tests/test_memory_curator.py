@@ -50,10 +50,16 @@ def test_duplicate_slugs_detected(tmp_path: Path) -> None:
 
 def test_duplicate_by_frontmatter_name(tmp_path: Path) -> None:
     """Разные slug'и, но одинаковый name во frontmatter — тоже дубль."""
-    _write(tmp_path, "projects/mediabot/overview.md", _page("mediabot").replace(
-        "name: mediabot", "name: AnimateYou"))
-    _write(tmp_path, "projects/animate-you/overview.md", _page("animate-you").replace(
-        "name: animate-you", "name: AnimateYou"))
+    _write(
+        tmp_path,
+        "projects/mediabot/overview.md",
+        _page("mediabot").replace("name: mediabot", "name: AnimateYou"),
+    )
+    _write(
+        tmp_path,
+        "projects/animate-you/overview.md",
+        _page("animate-you").replace("name: animate-you", "name: AnimateYou"),
+    )
     report = audit_memory(tmp_path, stale_after_days=30, today=_TODAY)
     assert any(f.kind == KIND_DUPLICATE for f in report.findings)
 

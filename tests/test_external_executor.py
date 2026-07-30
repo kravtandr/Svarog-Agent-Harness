@@ -281,9 +281,7 @@ async def test_end_to_end_completed_run(db: AsyncSession, tmp_path: Path) -> Non
     assert call.result == {"output": "hello.py"}
 
 
-async def test_stream_without_result_auto_continues_once(
-    db: AsyncSession, tmp_path: Path
-) -> None:
+async def test_stream_without_result_auto_continues_once(db: AsyncSession, tmp_path: Path) -> None:
     """Инфрафлейк S17 (30.07.2026): opencode после tool-fail обрывает стрим —
     exit 0 без result-события. Сессия жива → executor делает ровно одно
     автопродолжение (--resume той же сессии), и run завершается ответом агента."""

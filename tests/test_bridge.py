@@ -716,9 +716,7 @@ async def test_schedule_task_after_human_denial_is_refused_without_new_approval(
             FINGERPRINT_KEY: call_fingerprint("schedule_task", args),
         },
     )
-    await recorder.decide_approval(
-        approval, approved=False, decided_by="tester", reason="не нужно"
-    )
+    await recorder.decide_approval(approval, approved=False, decided_by="tester", reason="не нужно")
     corrected = {**args, "daily_at": "10:00", "task": "сводка покороче"}
     response = await control.handle_mcp(
         {

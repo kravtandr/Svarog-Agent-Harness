@@ -222,9 +222,7 @@ class ExternalAgentExecutor:
             # повторно. Синтетический prompt пишется в trace user-сообщением —
             # продолжение видно в истории, а не выглядит телепатией агента.
             recovery_attempts += 1
-            await self._recorder.add_message(
-                run, "user", {"content": _STREAM_RECOVERY_PROMPT}
-            )
+            await self._recorder.add_message(run, "user", {"content": _STREAM_RECOVERY_PROMPT})
             relaunch = AgentLaunch(
                 task=_STREAM_RECOVERY_PROMPT,
                 session=state.agent_session,

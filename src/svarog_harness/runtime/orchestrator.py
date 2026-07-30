@@ -967,9 +967,7 @@ class TaskRunner:
             "продолжай задачу с учётом отказа или заверши с объяснением."
         )
 
-    async def _peek_approved_schedule(
-        self, db: AsyncSession, run: Run
-    ) -> ScheduleRequest | None:
+    async def _peek_approved_schedule(self, db: AsyncSession, run: Run) -> ScheduleRequest | None:
         """Одобренная, ещё не материализованная schedule-заявка run'а (без записи).
 
         Берётся свежайшая approved-заявка; кривой payload (не спарсился в
@@ -1008,9 +1006,7 @@ class TaskRunner:
         except (ScheduleSpecError, ValidationError):
             return None
 
-    async def _expire_pending_schedule_duplicates(
-        self, recorder: TraceRecorder, run: Run
-    ) -> None:
+    async def _expire_pending_schedule_duplicates(self, recorder: TraceRecorder, run: Run) -> None:
         """Погасить pending-дубли schedule.create при уже принятом решении.
 
         Каскад (S24/S18, 30.07.2026): после grace-таймаута агент успевает
@@ -1027,9 +1023,7 @@ class TaskRunner:
             )
         )
         approvals = list(result.scalars())
-        if not any(
-            a.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED) for a in approvals
-        ):
+        if not any(a.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED) for a in approvals):
             return
         for approval in approvals:
             if approval.status is ApprovalStatus.PENDING:
@@ -1268,8 +1262,7 @@ class TaskRunner:
         seen_ops: set[tuple[str, str, str, str, str]] = set()
         for request in sink:
             signature = {
-                (c.file, c.operation.value, c.content, c.section, c.field)
-                for c in request.changes
+                (c.file, c.operation.value, c.content, c.section, c.field) for c in request.changes
             }
             if signature and signature <= seen_ops:
                 if hooks.on_notify is not None:
