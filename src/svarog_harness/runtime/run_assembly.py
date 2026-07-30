@@ -403,6 +403,7 @@ class RunAssembly:
             secret_values=self.known_secret_values(),
             on_text_delta=hooks.on_text_delta,
             on_tool_call=hooks.on_tool_call,
+            on_tool_result=hooks.on_tool_result,
             on_run_started=on_run_started,
             on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,

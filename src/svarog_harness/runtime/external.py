@@ -22,6 +22,7 @@ from svarog_harness.config.schema import AutonomyMode
 from svarog_harness.runtime.bridge import RunBridge
 from svarog_harness.runtime.executor import AgentAdapter, AgentEvent, AgentLaunch
 from svarog_harness.runtime.loop import RunOutcome
+from svarog_harness.runtime.summaries import short_result
 from svarog_harness.sandbox.base import ExecResult
 from svarog_harness.secrets.redaction import redact
 from svarog_harness.storage.models import Run, RunState, ToolCall
@@ -95,6 +96,7 @@ class ExternalAgentExecutor:
         secret_values: frozenset[str] = frozenset(),
         on_text_delta: "Callable[[str], None] | None" = None,
         on_tool_call: "Callable[[str, dict[str, object]], None] | None" = None,
+        on_tool_result: "Callable[[str, str, str], None] | None" = None,
         on_run_started: "Callable[[Run], None] | None" = None,
         on_progress: "Callable[[int, int, float, float, int], None] | None" = None,
         parent_run_id: str | None = None,
@@ -114,6 +116,7 @@ class ExternalAgentExecutor:
         self._secret_values = secret_values
         self._on_text_delta = on_text_delta
         self._on_tool_call = on_tool_call
+        self._on_tool_result = on_tool_result
         self._on_run_started = on_run_started
         self._on_progress = on_progress
         # Делегация (ADR-0016 фаза 3.5): внешний run как ребёнок нативного.
@@ -321,6 +324,20 @@ class ExternalAgentExecutor:
                         output=output,
                         error=None if event.ok else output or "инструмент вернул ошибку",
                     )
+                    # Живой стрим (веб-лента): без этого события вызов висит
+                    # «выполняется» до конца run, хотя trace уже закрыт.
+                    if self._on_tool_result is not None:
+                        self._on_tool_result(
+                            finished.tool_name,
+                            finished.status.value,
+                            self._redact(
+                                short_result(
+                                    ok=event.ok,
+                                    output=output,
+                                    error=None if event.ok else output,
+                                )
+                            ),
+                        )
             case "result":
                 state.saw_result = True
                 state.result_ok = event.ok
