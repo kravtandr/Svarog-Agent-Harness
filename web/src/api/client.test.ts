@@ -250,3 +250,80 @@ describe("клиент API", () => {
     expect(body).toEqual({ text: "смотри", autonomy: "yolo" });
   });
 });
+
+describe("пикер рабочей папки", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("createSession шлёт path только когда он задан", async () => {
+    // mockImplementation — не mockResolvedValue: клиент вызывается дважды,
+    // а Response с уже прочитанным телом на второй раз не отдать.
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(JSON.stringify({ session_id: "s1" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.createSession("Новый чат", "/home/u/proj");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+      title: "Новый чат",
+      path: "/home/u/proj",
+    });
+
+    await api.createSession("Новый чат");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({
+      title: "Новый чат",
+    });
+  });
+
+  it("fs кодирует путь, fsRecent зовёт /fs/recent", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        () =>
+          new Response(
+            JSON.stringify({ path: "/", parent: null, entries: [] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.fs("/home/у же");
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/fs?path=%2Fhome%2F%D1%83%20%D0%B6%D0%B5",
+    );
+    await api.fs();
+    expect(fetchMock.mock.calls[1][0]).toBe("/fs");
+    await api.fsRecent();
+    expect(fetchMock.mock.calls[2][0]).toBe("/fs/recent");
+  });
+
+  it("withRoot добавляет X-Svarog-Root ко всем запросам копии", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => new Response("[]", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "", token: "т" });
+
+    await api.withRoot("/home/u/proj").skills();
+    const headers = fetchMock.mock.calls[0][1].headers as Record<
+      string,
+      string
+    >;
+    expect(headers["X-Svarog-Root"]).toBe("/home/u/proj");
+    expect(headers.Authorization).toBe("Bearer т");
+
+    await api.skills(); // исходный клиент — без заголовка
+    expect(
+      (fetchMock.mock.calls[1][1].headers as Record<string, string>)[
+        "X-Svarog-Root"
+      ],
+    ).toBeUndefined();
+  });
+});

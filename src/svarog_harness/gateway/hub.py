@@ -15,12 +15,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
+from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import resolve_tenant_config, tenant_home
 from svarog_harness.config.schema import SvarogConfig
+from svarog_harness.gateway.models import FsEntryView, FsListingView, RecentRootView, SessionSummary
+from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 from svarog_harness.gateway.service import GatewayService
 from svarog_harness.tenant import TenantRegistry
 from svarog_harness.tenant.models import TenantContext
@@ -184,3 +190,196 @@ class TenantHub:
                 with contextlib.suppress(Exception):
                     await svc.supervise_once()
             await asyncio.sleep(interval)
+
+
+class RootPathError(ValueError):
+    """Кандидат в корень не существует или не каталог (422)."""
+
+
+class RootGoneError(LookupError):
+    """Корень сессии/run'а удалён с диска (410 Gone)."""
+
+
+class RootConfigError(RootPathError):
+    """Корень существует, но его svarog.yaml не читается (422, не 500).
+
+    Подкласс RootPathError, а не отдельная ветка: все существующие
+    обработчики (422 в api._require_service/_service_for_path, skip в
+    list_sessions) уже ловят RootPathError и покрывают этот случай без
+    нового кода на местах использования.
+    """
+
+
+@dataclass
+class WorkspaceHub:
+    """Мультиплекс GatewayService по папкам-корням (спека 2026-07-30).
+
+    Как TenantHub, но ключ — путь: каждый корень получает сервис со своим
+    конфигом (`load_config(project_dir=root)`), памятью и скиллами. Auth —
+    общий bearer, как в SingleTenantResolver: фича живёт только в
+    single-tenant, в multi-tenant режиме хаб не создаётся вовсе.
+    """
+
+    base_cfg: SvarogConfig
+    default_root: Path
+    registry: WorkspaceRootsRegistry
+    bearer_token: str | None = None
+    _services: dict[Path, GatewayService] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        self.default_root = self.default_root.expanduser().resolve()
+        # Сервис корня запуска — из уже загруженного конфига, без второго load.
+        self._services[self.default_root] = self._make_service(self.base_cfg, self.default_root)
+
+    def _make_service(self, cfg: SvarogConfig, root: Path) -> GatewayService:
+        # Колбэки пишут карты маршрутизации; они же обновляют last_used корня.
+        return GatewayService(
+            cfg,
+            root,
+            on_run_created=lambda run_id: self.registry.record_run(run_id, root),
+            on_session_created=lambda session_id: self.registry.record_session(session_id, root),
+        )
+
+    def service_for(self, path: str | Path) -> GatewayService:
+        """Сервис произвольного корня; несуществующий/не-каталог — RootPathError."""
+        root = Path(path).expanduser().resolve()
+        if not root.is_dir():
+            raise RootPathError(f"не каталог или не существует: {root}")
+        svc = self._services.get(root)
+        if svc is None:
+            try:
+                cfg = load_config(project_dir=root)
+            except ConfigError as exc:
+                # Битый/невалидный svarog.yaml корня — это ввод (чужая папка
+                # с мусорным конфигом), а не сбой шлюза: RootConfigError —
+                # подкласс RootPathError, поэтому все места, уже ловящие
+                # RootPathError (422 в api, skip в list_sessions), покрывают
+                # и этот случай без изменений.
+                raise RootConfigError(f"конфиг корня не читается: {exc}") from exc
+            svc = self._make_service(cfg, root)
+            self._services[root] = svc
+        return svc
+
+    def route(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        root: str | None = None,
+    ) -> GatewayService:
+        """Сервис запроса: id → заголовок X-Svarog-Root → default_root.
+
+        Сессионные запросы маршрутизируются по id (спека: «сессионные — по
+        id») — известный id выигрывает у заголовка, даже если оба переданы
+        одновременно. Заголовок смотрим только когда id не задан или не
+        резолвится реестром (сессия до фичи, либо запрос вообще без id —
+        create с `path`, /fs и т.п.).
+
+        Промах реестра — default_root: сессии, созданные до фичи, работают
+        без миграции. Известный, но исчезнувший корень — RootGoneError (410).
+        """
+        target: Path | None = None
+        if session_id is not None:
+            target = self.registry.root_of_session(session_id)
+        elif run_id is not None:
+            target = self.registry.root_of_run(run_id)
+        if target is None:
+            if root is not None:
+                return self.service_for(root)
+            return self._services[self.default_root]
+        if not target.is_dir():
+            raise RootGoneError(f"каталог сессии удалён: {target}")
+        return self.service_for(target)
+
+    def authenticate(
+        self, authorization: str | None, *, query_token: str | None = None
+    ) -> GatewayService | None:
+        """Auth-гейт как у SingleTenantResolver; выбор сервиса — в route()."""
+        if self.bearer_token is None:
+            return self._services[self.default_root]
+        token = extract_bearer(authorization) or query_token
+        return self._services[self.default_root] if token == self.bearer_token else None
+
+    @property
+    def supervisor_enabled(self) -> bool:
+        return self.base_cfg.supervisor.auto_resume_refuel
+
+    async def run_supervisor(self, *, should_stop: Callable[[], bool] | None = None) -> None:
+        """Refuel-супервизор по корням с записанными run'ами (как TenantHub)."""
+        interval = self.base_cfg.supervisor.interval_sec
+        while should_stop is None or not should_stop():
+            for root in {self.default_root, *self.registry.roots_with_runs()}:
+                if not root.is_dir():
+                    continue  # исчезнувший корень: run поднимется, когда папка вернётся
+                with contextlib.suppress(Exception):
+                    await self.service_for(root).supervise_once()
+            await asyncio.sleep(interval)
+
+    async def shutdown(self) -> None:
+        """Закрыть тёплые sandbox'ы всех материализованных корней (ADR-0017)."""
+        for svc in self._services.values():
+            await svc.close_warm_sessions()
+
+    async def list_sessions(self, limit: int = 50) -> list[SessionSummary]:
+        """Агрегированный список: веер по корням реестра + default, дедуп по id.
+
+        Корни без своего db_path делят пользовательскую БД — одна сессия
+        приходит из нескольких сервисов; ряды идентичны (meta в строке БД),
+        так что первый занявший id выигрывает. Исчезнувший корень пропускаем:
+        его сессии вернутся вместе с папкой (реестр — кэш, не истина).
+        """
+        seen: dict[str, SessionSummary] = {}
+        candidates = [self.default_root] + [root for root, _ in self.registry.roots()]
+        for root in candidates:
+            try:
+                svc = self.service_for(root)
+            except RootPathError:
+                continue
+            for summary in await svc.list_sessions(limit=limit):
+                seen.setdefault(summary.session_id, summary)
+        ordered = sorted(seen.values(), key=lambda s: s.updated_at, reverse=True)
+        return ordered[:limit]
+
+    def list_fs(self, path: str | None) -> FsListingView:
+        """Подкаталоги для пикера: только каталоги, скрытые отфильтрованы."""
+        base = Path(path).expanduser() if path else Path.home()
+        try:
+            base = base.resolve(strict=True)
+        except OSError as exc:
+            raise RootPathError(f"нет такого каталога: {path}") from exc
+        if not base.is_dir():
+            raise RootPathError(f"не каталог: {base}")
+        try:
+            children = sorted(base.iterdir(), key=lambda p: p.name.lower())
+        except PermissionError as exc:
+            raise RootPathError(f"нет доступа: {base}") from exc
+        entries: list[FsEntryView] = []
+        for child in children:
+            try:
+                if child.name.startswith(".") or not child.is_dir():
+                    continue
+                accessible = os.access(child, os.R_OK | os.X_OK)
+            except OSError:
+                continue  # битый symlink и подобное — просто пропускаем
+            entries.append(FsEntryView(name=child.name, path=str(child), accessible=accessible))
+        parent = None if base == base.parent else str(base.parent)
+        return FsListingView(path=str(base), parent=parent, entries=entries)
+
+    def recent_roots(self) -> list[RecentRootView]:
+        """Недавние корни для пикера; несуществующие помечены, не выброшены."""
+        entries: list[RecentRootView] = []
+        for root, ts in self.registry.roots():
+            try:
+                # registry.roots() отдаёт ISO-строку (сырое поле JSON) —
+                # парсим в datetime здесь, а не меняем контракт реестра ради
+                # одного поля.
+                last_used = datetime.fromisoformat(ts)
+            except ValueError:
+                # Реестр — кэш, не источник истины: битая строка last_used
+                # (например, ручная правка roots.json) — повод пропустить
+                # запись, а не уронить /fs/recent целиком.
+                continue
+            entries.append(
+                RecentRootView(path=str(root), exists=root.is_dir(), last_used=last_used)
+            )
+        return entries

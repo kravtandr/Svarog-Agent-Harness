@@ -5,11 +5,13 @@ import type {
   ConfigView,
   ExecutorOption,
   FileSuggestion,
+  FsListing,
   MemoryFile,
   MemoryHit,
   MemoryPage,
   ModelCard,
   ProviderCard,
+  RecentRoot,
   RunDetail,
   RunDiff,
   RunOverride,
@@ -38,12 +40,13 @@ export class ApiError extends Error {
 export interface ClientOptions {
   baseUrl: string;
   token?: string;
+  root?: string;
 }
 
 export interface Api {
   listSessions(): Promise<SessionSummary[]>;
   sessionThread(sessionId: string): Promise<SessionThread>;
-  createSession(title: string): Promise<{ session_id: string }>;
+  createSession(title: string, path?: string): Promise<{ session_id: string }>;
   deleteSession(sessionId: string): Promise<void>;
   sendMessage(
     sessionId: string,
@@ -70,9 +73,13 @@ export interface Api {
   runDiff(runId: string): Promise<RunDiff>;
   providers(): Promise<ProviderCard[]>;
   providerModels(name: string): Promise<ModelCard[]>;
+  fs(path?: string): Promise<FsListing>;
+  fsRecent(): Promise<RecentRoot[]>;
+  /** Копия клиента с X-Svarog-Root: workspace-экраны активной сессии. */
+  withRoot(root: string | null): Api;
 }
 
-export function createClient({ baseUrl, token }: ClientOptions): Api {
+export function createClient({ baseUrl, token, root }: ClientOptions): Api {
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     // FormData (загрузка вложений) — без content-type: браузер сам
     // проставит его вместе с multipart-boundary, руками это не собрать.
@@ -81,6 +88,7 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
       ? {}
       : { "content-type": "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;
+    if (root) headers["X-Svarog-Root"] = root;
     const response = await fetch(`${baseUrl}${path}`, { ...init, headers });
     if (!response.ok) {
       // detail — стандартная форма ошибки FastAPI; без него берём статус.
@@ -97,21 +105,22 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
     return (await response.json()) as T;
   }
 
-  return {
+  const api: Api = {
     listSessions: () => request<SessionSummary[]>("/sessions"),
     sessionThread: (sessionId) =>
       request<SessionThread>(
         `/sessions/${encodeURIComponent(sessionId)}/messages`,
       ),
-    createSession: (title) =>
+    createSession: (title, path) =>
       request<{ session_id: string }>("/sessions", {
         method: "POST",
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({ title, ...(path ? { path } : {}) }),
       }),
     deleteSession: async (sessionId) => {
       // 204 без тела — request<T> ждёт JSON, поэтому отдельным вызовом.
       const headers: Record<string, string> = {};
       if (token) headers.Authorization = `Bearer ${token}`;
+      if (root) headers["X-Svarog-Root"] = root;
       const response = await fetch(
         `${baseUrl}/sessions/${encodeURIComponent(sessionId)}`,
         { method: "DELETE", headers },
@@ -187,5 +196,11 @@ export function createClient({ baseUrl, token }: ClientOptions): Api {
         { method: "POST", body: form },
       );
     },
+    fs: (path) =>
+      request<FsListing>(path ? `/fs?path=${encodeURIComponent(path)}` : "/fs"),
+    fsRecent: () => request<RecentRoot[]>("/fs/recent"),
+    withRoot: (nextRoot) =>
+      nextRoot ? createClient({ baseUrl, token, root: nextRoot }) : api,
   };
+  return api;
 }

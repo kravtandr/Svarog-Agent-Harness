@@ -56,6 +56,14 @@
   color: var(--text);
 }
 
+/* Бейдж корня: последняя часть пути рабочей папки сессии. */
+.nav__root {
+  font-size: 0.75em;
+  opacity: 0.6;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 /* Индикатор занятости: чат считается занятым, пока run не завершён. */
 .nav__busy {
   flex: 0 0 auto;

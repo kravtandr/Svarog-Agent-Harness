@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { fakeApi } from "./test/fakeApi";
@@ -9,6 +9,7 @@ const session = {
   session_id: "s1",
   title: "FTS-поиск по памяти",
   workspace: null,
+  root: null,
   updated_at: new Date().toISOString(),
   runs_count: 1,
   last_state: "completed",
@@ -73,18 +74,136 @@ describe("оболочка приложения", () => {
     );
   });
 
-  it("создаёт новый чат и возвращает в диалог", async () => {
-    const client = api();
+  it("новый чат открывает пикер и создаёт сессию с выбранным путём", async () => {
+    const client = fakeApi({
+      fsRecent: vi.fn().mockResolvedValue([
+        {
+          path: "/home/u/proj",
+          exists: true,
+          last_used: "2026-07-30T10:00:00Z",
+        },
+      ]),
+    });
+    render(<App api={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    expect(client.createSession).not.toHaveBeenCalled();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj" }),
+    );
+    await waitFor(() =>
+      expect(client.createSession).toHaveBeenCalledWith(
+        "Новый чат",
+        "/home/u/proj",
+      ),
+    );
+  });
+
+  it("отмена пикера возвращает в чат без создания сессии", async () => {
+    const client = fakeApi();
+    render(<App api={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Отмена" }),
+    );
+    expect(client.createSession).not.toHaveBeenCalled();
+    expect(screen.queryByText("Где работать?")).not.toBeInTheDocument();
+  });
+
+  it("клик по существующему чату в навигаторе закрывает открытый пикер", async () => {
+    const other = {
+      session_id: "s2",
+      title: "второй чат",
+      workspace: null,
+      root: null,
+      updated_at: new Date().toISOString(),
+      runs_count: 0,
+      last_state: null,
+    };
+    const client = fakeApi({
+      listSessions: () => Promise.resolve([session, other]),
+    });
+    render(<App api={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    expect(await screen.findByText("Где работать?")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "второй чат" }));
+
+    expect(screen.queryByText("Где работать?")).not.toBeInTheDocument();
+    expect(client.createSession).not.toHaveBeenCalled();
+  });
+
+  it("строка сессии показывает бейдж корня", async () => {
+    const client = fakeApi({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "s1",
+          title: "чат",
+          workspace: "/home/u/proj/test",
+          root: "/home/u/proj/test",
+          updated_at: "2026-07-30T10:00:00Z",
+          runs_count: 0,
+          last_state: null,
+        },
+      ]),
+    });
+    render(<App api={client} />);
+    // Бейдж есть и в шапке (активная сессия — единственная), поэтому строку
+    // сессии проверяем адресно, внутри навигатора, а не по всему документу.
+    const nav = screen.getByRole("navigation");
+    expect(await within(nav).findByText("test")).toBeInTheDocument();
+  });
+
+  it("скоупит настройки/память/скиллы по root активной сессии, а не workspace", async () => {
+    // repo/named-сессии: workspace — clone/task-каталог, root — корень
+    // сервиса. Settings/Memory/Skills должны звать withRoot(root), иначе
+    // X-Svarog-Root ведёт в мусорный «корень» и 422 (F4 финального ревью).
+    const scoped = {
+      session_id: "s1",
+      title: "чат",
+      workspace: "/home/u/proj/.svarog-tasks/clone-1",
+      root: "/home/u/proj",
+      updated_at: new Date().toISOString(),
+      runs_count: 0,
+      last_state: null,
+    };
+    const client = fakeApi({ listSessions: () => Promise.resolve([scoped]) });
+    render(<App api={client} />);
+    // Бейдж корня ("clone-1") входит в accessible name кнопки сессии, так
+    // что точное имя "чат" не совпадёт, — ждём по частичному совпадению.
+    await screen.findByRole("button", { name: /^чат/ });
+
+    await userEvent.click(screen.getByRole("button", { name: "Настройки" }));
+
+    expect(client.withRoot).toHaveBeenCalledWith("/home/u/proj");
+  });
+
+  it("не скоупит настройки, когда у активной сессии нет root (сессия до фичи)", async () => {
+    const client = fakeApi({ listSessions: () => Promise.resolve([session]) });
     render(<App api={client} />);
     await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
-    await userEvent.click(screen.getByRole("button", { name: /Новый чат/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Настройки" }));
 
-    expect(client.createSession).toHaveBeenCalledWith("Новый чат");
+    expect(client.withRoot).not.toHaveBeenCalled();
   });
 
   it("команда /new в чате заводит новый чат так же, как кнопка навигатора", async () => {
-    const client = api();
+    const client = fakeApi({
+      listSessions: () => Promise.resolve([session]),
+      fsRecent: vi.fn().mockResolvedValue([
+        {
+          path: "/home/u/proj",
+          exists: true,
+          last_used: "2026-07-30T10:00:00Z",
+        },
+      ]),
+    });
     render(<App api={client} />);
     await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
@@ -93,8 +212,14 @@ describe("оболочка приложения", () => {
       "/new{Enter}",
     );
 
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj" }),
+    );
     await waitFor(() =>
-      expect(client.createSession).toHaveBeenCalledWith("Новый чат"),
+      expect(client.createSession).toHaveBeenCalledWith(
+        "Новый чат",
+        "/home/u/proj",
+      ),
     );
   });
 

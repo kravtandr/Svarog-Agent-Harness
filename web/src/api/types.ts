@@ -4,6 +4,11 @@ export interface SessionSummary {
   session_id: string;
   title: string;
   workspace: string | null;
+  // Корень сервиса, которому принадлежит сессия (спека 2026-07-30, финальное
+  // ревью): для path-сессий — выбранный корень, для repo/named — default.
+  // null — сессии до этого поля. Используется для X-Svarog-Root (withRoot),
+  // а не workspace: для repo/named workspace — clone-каталог, не корень.
+  root: string | null;
   updated_at: string;
   runs_count: number;
   last_state: string | null;
@@ -189,4 +194,24 @@ export interface Attachment {
   size_bytes: number;
   mime: string | null;
   too_large_for_vision: boolean;
+}
+
+/** Подкаталог из GET /fs (пикер рабочей папки). */
+export interface FsEntry {
+  name: string;
+  path: string;
+  accessible: boolean;
+}
+
+export interface FsListing {
+  path: string;
+  parent: string | null;
+  entries: FsEntry[];
+}
+
+/** Недавний корень из GET /fs/recent; exists=false — папка исчезла. */
+export interface RecentRoot {
+  path: string;
+  exists: boolean;
+  last_used: string;
 }

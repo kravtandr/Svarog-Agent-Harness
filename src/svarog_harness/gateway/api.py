@@ -18,6 +18,7 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -38,7 +39,14 @@ from svarog_harness.gateway.attachments import (
 )
 from svarog_harness.gateway.catalog import CatalogError
 from svarog_harness.gateway.commands import WEB_COMMANDS
-from svarog_harness.gateway.hub import GatewayResolver, SingleTenantResolver, TenantHub
+from svarog_harness.gateway.hub import (
+    GatewayResolver,
+    RootGoneError,
+    RootPathError,
+    SingleTenantResolver,
+    TenantHub,
+    WorkspaceHub,
+)
 from svarog_harness.gateway.models import (
     AnswerRequest,
     ApprovalDecisionRequest,
@@ -52,11 +60,13 @@ from svarog_harness.gateway.models import (
     ExecutorOptionView,
     FileEntry,
     FileSuggestionView,
+    FsListingView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
     ModelCardView,
     ProviderView,
+    RecentRootView,
     RunDetail,
     RunDiffView,
     RunRef,
@@ -185,14 +195,48 @@ def create_app(
         )
 
     def _require_service(
+        request: Request,
         authorization: Annotated[str | None, Header()] = None,
+        x_svarog_root: Annotated[str | None, Header()] = None,
     ) -> GatewayService:
         svc = resolver.authenticate(authorization)
         if svc is None:
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+        if isinstance(resolver, WorkspaceHub):
+            # Маршрутизация по корню: id из пути URL (какой найдётся) либо
+            # явный заголовок; сессии до фичи проваливаются в default_root.
+            try:
+                return resolver.route(
+                    session_id=request.path_params.get("session_id"),
+                    run_id=request.path_params.get("run_id"),
+                    root=x_svarog_root,
+                )
+            except RootPathError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+            except RootGoneError as exc:
+                if request.method == "DELETE":
+                    # Удаление истории должно работать и без папки: строка
+                    # сессии живёт в общей БД default-корня независимо от
+                    # того, существует ли её каталог, — иначе зомби-сессию
+                    # с удалённым корнем нельзя убрать из списка никогда.
+                    return resolver.route()
+                raise HTTPException(status_code=410, detail=str(exc)) from None
         return svc
 
     ServiceDep = Annotated[GatewayService, Depends(_require_service)]  # noqa: N806 — тип-алиас
+
+    def _service_for_path(path: str | None, fallback: GatewayService) -> GatewayService:
+        """Сервис корня из `path` тела create-запроса (спека 2026-07-30)."""
+        if path is None:
+            return fallback
+        if not isinstance(resolver, WorkspaceHub):
+            raise HTTPException(
+                status_code=422, detail="path поддерживается только в single-tenant режиме"
+            )
+        try:
+            return resolver.service_for(path)
+        except RootPathError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -204,6 +248,7 @@ def create_app(
 
     @app.post("/runs", response_model=RunRef, status_code=201)
     async def create_run(req: CreateRunRequest, service: ServiceDep) -> RunRef:
+        service = _service_for_path(req.path, service)
         try:
             run_id = await service.create_run(
                 req.task, req.autonomy, repo=req.repo, workspace_name=req.workspace
@@ -304,6 +349,7 @@ def create_app(
 
     @app.post("/sessions", response_model=SessionView, status_code=201)
     async def create_session(req: CreateSessionRequest, service: ServiceDep) -> SessionView:
+        service = _service_for_path(req.path, service)
         try:
             return await service.create_session(
                 title=req.title, repo=req.repo, workspace_name=req.workspace
@@ -320,6 +366,8 @@ def create_app(
     # Раньше маршрута с параметром: иначе "/sessions" уедет в {session_id}.
     @app.get("/sessions", response_model=list[SessionSummary])
     async def list_sessions(service: ServiceDep, limit: int = 50) -> list[SessionSummary]:
+        if isinstance(resolver, WorkspaceHub):
+            return await resolver.list_sessions(limit=limit)
         return await service.list_sessions(limit=limit)
 
     @app.get("/sessions/{session_id}", response_model=SessionView)
@@ -433,6 +481,26 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return RunRef(run_id=run_id, state="running")
 
+    # --- обзор ФС для пикера рабочей папки (спека 2026-07-30) -------------
+    # Только single-tenant: в multi-tenant режиме маршрутов не существует.
+    if isinstance(resolver, WorkspaceHub):
+        hub_resolver = resolver
+
+        @app.get("/fs", response_model=FsListingView, dependencies=[Depends(_require_service)])
+        async def list_fs(path: str | None = None) -> FsListingView:
+            try:
+                return hub_resolver.list_fs(path)
+            except RootPathError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        @app.get(
+            "/fs/recent",
+            response_model=list[RecentRootView],
+            dependencies=[Depends(_require_service)],
+        )
+        async def recent_roots() -> list[RecentRootView]:
+            return hub_resolver.recent_roots()
+
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------
 
     @app.post("/workspaces", response_model=WorkspaceView, status_code=201)
@@ -506,6 +574,11 @@ def create_app(
         query_token = websocket.query_params.get("token")
         authorization = websocket.headers.get("authorization")
         service = resolver.authenticate(authorization, query_token=query_token)
+        if service is not None and isinstance(resolver, WorkspaceHub):
+            try:
+                service = resolver.route(run_id=run_id)
+            except (RootPathError, RootGoneError):
+                service = None  # закроется ниже как policy violation
         if service is None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return

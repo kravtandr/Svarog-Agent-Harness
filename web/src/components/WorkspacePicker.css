@@ -1,0 +1,156 @@
+/* Полноэкранный шаг выбора рабочей папки, а не плавающая панель — поэтому
+   свой корневой класс, а не .picker из ModelPicker.css (те же .css плоские,
+   без модулей, и с этим именем совпали бы стили обеих панелей). */
+.workspace-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 0 16px;
+  color: var(--text);
+  font-family: var(--sans);
+}
+.workspace-picker__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+.workspace-picker__field {
+  position: relative;
+}
+.workspace-picker__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+.workspace-picker__input::placeholder {
+  color: var(--faint);
+}
+.workspace-picker__input:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.workspace-picker__error {
+  margin: 0;
+  color: var(--bad);
+  font-size: 12.5px;
+}
+.workspace-picker__heading {
+  margin: 8px 0 4px;
+  font-size: 0.9em;
+  color: var(--faint);
+}
+.workspace-picker__recent {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-picker__recent:hover:not(:disabled) {
+  background: var(--raised);
+}
+.workspace-picker__recent:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.workspace-picker__crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.workspace-picker__crumbs button {
+  border: 0;
+  border-radius: 4px;
+  padding: 2px 4px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.workspace-picker__crumbs button:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.workspace-picker__dirs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.workspace-picker__dirs button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-picker__dirs button:hover:not(:disabled) {
+  background: var(--raised);
+}
+.workspace-picker__dirs button:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.workspace-picker__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.workspace-picker__confirm {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--ember);
+  color: #1a1210;
+  font-family: var(--sans);
+  font-size: 14px;
+  cursor: pointer;
+}
+.workspace-picker__confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.workspace-picker__cancel {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 14px;
+  cursor: pointer;
+}
+.workspace-picker__cancel:hover {
+  color: var(--text);
+}
+
+@media (max-width: 899px) {
+  .workspace-picker__recent,
+  .workspace-picker__dirs button {
+    min-height: 44px;
+  }
+}

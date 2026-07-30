@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createClient, type Api } from "./api/client";
 import type { SessionSummary } from "./api/types";
-import { busyLabel, Nav, type Section } from "./components/Nav";
+import { busyLabel, Nav, rootBase, type Section } from "./components/Nav";
 import { Shell } from "./components/Shell";
+import { WorkspacePicker } from "./components/WorkspacePicker";
 import { ChatScreen } from "./screens/ChatScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { RunsScreen } from "./screens/RunsScreen";
@@ -52,6 +53,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
   const [section, setSection] = useState<Section>("chat");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   const reload = useCallback(async () => {
     const listed = await api.listSessions();
@@ -69,13 +71,22 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
       .finally(() => setLoading(false));
   }, [reload]);
 
-  const startNew = useCallback(async () => {
-    const created = await api.createSession("Новый чат");
-    setActiveId(created.session_id);
+  // «＋ Новый чат» открывает пикер папки (спека 2026-07-30); сама сессия
+  // создаётся уже с выбранным path в createIn.
+  const startNew = useCallback(() => {
+    setPicking(true);
     setSection("chat");
-    await reload();
-    return created.session_id;
-  }, [api, reload]);
+  }, []);
+
+  const createIn = useCallback(
+    async (path: string) => {
+      const created = await api.createSession("Новый чат", path);
+      setPicking(false);
+      setActiveId(created.session_id);
+      await reload();
+    },
+    [api, reload],
+  );
 
   const remove = useCallback(
     async (sessionId: string) => {
@@ -111,13 +122,29 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
     return () => window.clearInterval(timer);
   }, [api, sessions]);
 
-  /** Сессия для отправки: текущая, а если её нет — новая. */
-  const ensureSession = useCallback(
-    async () => activeId ?? (await startNew()),
-    [activeId, startNew],
-  );
+  /** Сессия для отправки: текущая, а если её нет — быстрая, в корне serve.
+      Пикер тут не открываем: человек уже написал сообщение, не блокируем его. */
+  const ensureSession = useCallback(async () => {
+    if (activeId !== null) return activeId;
+    const created = await api.createSession("Новый чат");
+    setActiveId(created.session_id);
+    await reload();
+    return created.session_id;
+  }, [activeId, api, reload]);
 
   const active = sessions.find((session) => session.session_id === activeId);
+
+  // Настройки/память/скиллы показывают проект активной сессии, а не корень
+  // serve: withRoot добавляет X-Svarog-Root ко всем их запросам. Скоупим по
+  // root, а не workspace: для repo/named сессий workspace — clone/task-
+  // каталог, а не корень сервиса (root совпадает с workspace только для
+  // path-сессий). root=null — сессии до этого поля, работают unscoped.
+  // useMemo — иначе новый Api-объект каждый рендер рефетчит все данные
+  // экрана на busy-поллинге (каждые 3с, пока хоть один чат занят).
+  const scopedApi = useMemo(
+    () => (active?.root ? api.withRoot(active.root) : api),
+    [api, active?.root],
+  );
 
   return (
     <Shell
@@ -128,8 +155,13 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           onPick={(id) => {
             setActiveId(id);
             setSection("chat");
+            // Клик по существующему чату — тоже выход из пикера: иначе
+            // тернарник в разделе "chat" всё ещё рисует WorkspacePicker
+            // поверх уже выбранной сессии, и человек застревает на экране
+            // выбора папки до явной «Отмены».
+            setPicking(false);
           }}
-          onNew={() => void startNew()}
+          onNew={startNew}
           onDelete={(id) => void remove(id)}
           section={section}
           onSection={setSection}
@@ -140,30 +172,42 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           {section === "chat"
             ? (active?.title ?? TITLES.chat)
             : TITLES[section]}
+          {section === "chat" && active?.workspace && (
+            <span className="bar__root" title={active.workspace}>
+              {rootBase(active.workspace)}
+            </span>
+          )}
         </span>
       }
     >
-      {section === "settings" && <SettingsScreen api={api} />}
-      {section === "memory" && <MemoryScreen api={api} />}
-      {section === "skills" && <SkillsScreen api={api} />}
+      {section === "settings" && <SettingsScreen api={scopedApi} />}
+      {section === "memory" && <MemoryScreen api={scopedApi} />}
+      {section === "skills" && <SkillsScreen api={scopedApi} />}
       {section === "runs" && <RunsScreen api={api} />}
-      {section === "chat" && (
-        <ChatScreen
-          api={api}
-          sessionId={activeId}
-          ensureSession={ensureSession}
-          loading={loading}
-          error={error}
-          token={token}
-          onNew={() => void startNew()}
-          // "Перейти к списку чатов" здесь — фокус на уже видимый навигатор
-          // (он показан на всех разделах), а не переключение section: тот
-          // же список сессий, что открывает "＋ Новый чат".
-          onSessions={() =>
-            document.querySelector<HTMLButtonElement>(".nav__new")?.focus()
-          }
-        />
-      )}
+      {section === "chat" &&
+        (picking ? (
+          <WorkspacePicker
+            api={api}
+            onPick={createIn}
+            onCancel={() => setPicking(false)}
+          />
+        ) : (
+          <ChatScreen
+            api={api}
+            sessionId={activeId}
+            ensureSession={ensureSession}
+            loading={loading}
+            error={error}
+            token={token}
+            onNew={startNew}
+            // "Перейти к списку чатов" здесь — фокус на уже видимый навигатор
+            // (он показан на всех разделах), а не переключение section: тот
+            // же список сессий, что открывает "＋ Новый чат".
+            onSessions={() =>
+              document.querySelector<HTMLButtonElement>(".nav__new")?.focus()
+            }
+          />
+        ))}
     </Shell>
   );
 }

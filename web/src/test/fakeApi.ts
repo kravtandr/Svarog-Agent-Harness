@@ -62,6 +62,11 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       mime: null,
       too_large_for_vision: false,
     }),
+    fs: vi
+      .fn()
+      .mockResolvedValue({ path: "/home/u", parent: "/home", entries: [] }),
+    fsRecent: vi.fn().mockResolvedValue([]),
+    withRoot: vi.fn().mockReturnThis(),
     ...over,
   };
 }

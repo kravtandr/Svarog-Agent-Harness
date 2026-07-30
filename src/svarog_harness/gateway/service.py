@@ -178,6 +178,9 @@ class GatewayService:
     events: EventStream = field(default_factory=InProcessEventStream)
     # Колбэк на создание run'а — TenantHub пишет им run_index run→tenant (ADR-0014).
     on_run_created: Callable[[str], None] | None = None
+    # Колбэк на создание сессии — WorkspaceHub пишет им session→root
+    # в реестр маршрутизации (спека 2026-07-30).
+    on_session_created: Callable[[str], None] | None = None
     # Роль тенанта (ADR-0013): фиксируется в runner'е и держит кламп на resume.
     role: TenantRole = TenantRole.SUPERUSER
     # Проверка квоты перед стартом run'а — TenantHub вешает сюда лимиты тенанта
@@ -768,7 +771,16 @@ class GatewayService:
     ) -> SessionView:
         """Сессия: workspace провижнится один раз и живёт всю серию runs."""
         workspace = await self._provision_workspace(title or "session", repo, workspace_name)
-        meta = {"workspace": str(workspace.expanduser().resolve())}
+        meta = {
+            "workspace": str(workspace.expanduser().resolve()),
+            # root — корень сервиса, обработавшего запрос: для path-сессий
+            # это выбранный корень (сервис создан WorkspaceHub.service_for
+            # ровно под него), для repo/named — root дефолтного сервиса.
+            # workspace — где физически работает агент (clone/task-каталог
+            # внутри этого root); для repo/named они не совпадают, поэтому
+            # заведено отдельное поле (спека 2026-07-30, финальное ревью).
+            "root": str(self.workspace.expanduser().resolve()),
+        }
 
         async def action(db: AsyncSession) -> Session:
             return await TraceRecorder(db).create_session(
@@ -776,6 +788,8 @@ class GatewayService:
             )
 
         session = await self._read(action)
+        if self.on_session_created is not None:
+            self.on_session_created(session.id)
         return SessionView(
             session_id=session.id, title=session.title or "", workspace=meta["workspace"], runs=[]
         )
@@ -916,6 +930,7 @@ class GatewayService:
                         session_id=session.id,
                         title=session.title or "",
                         workspace=(session.meta or {}).get("workspace"),
+                        root=(session.meta or {}).get("root"),
                         updated_at=session.updated_at,
                         runs_count=len(runs),
                         last_state=runs[-1].state.value if runs else None,

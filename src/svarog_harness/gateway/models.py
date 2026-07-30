@@ -26,11 +26,16 @@ class CreateRunRequest(BaseModel):
     # ЛИБО постоянный named workspace тенанта; оба None — workspace сервиса.
     repo: RepoSpec | None = None
     workspace: str | None = Field(default=None, description="Имя named workspace")
+    # Абсолютный путь папки-корня (single-tenant, спека 2026-07-30);
+    # взаимоисключающ с repo и workspace — это третий источник workspace.
+    path: str | None = None
 
     @model_validator(mode="after")
     def _one_workspace_source(self) -> "CreateRunRequest":
         if self.repo is not None and self.workspace is not None:
             raise ValueError("repo и workspace взаимоисключающие: задайте один источник")
+        if self.path is not None and (self.repo is not None or self.workspace is not None):
+            raise ValueError("path взаимоисключающ с repo и workspace: задайте один источник")
         return self
 
 
@@ -99,6 +104,29 @@ class WorkspaceView(BaseModel):
     busy: bool  # есть живой run в этом workspace (lease, ADR-0015 §0.5)
 
 
+class FsEntryView(BaseModel):
+    """Подкаталог из GET /fs (пикер рабочей папки, спека 2026-07-30)."""
+
+    name: str
+    path: str
+    # Нечитаемый каталог показываем, но выбрать не даём (PermissionError).
+    accessible: bool = True
+
+
+class FsListingView(BaseModel):
+    path: str
+    parent: str | None  # None — корень ФС, выше некуда
+    entries: list[FsEntryView]
+
+
+class RecentRootView(BaseModel):
+    """Недавний корень из реестра; exists=False рисуется приглушённым."""
+
+    path: str
+    exists: bool
+    last_used: datetime
+
+
 class FileEntry(BaseModel):
     name: str
     is_dir: bool
@@ -139,11 +167,16 @@ class CreateSessionRequest(BaseModel):
     title: str = Field(default="", max_length=200)
     repo: RepoSpec | None = None
     workspace: str | None = None
+    # Абсолютный путь папки-корня (single-tenant, спека 2026-07-30);
+    # взаимоисключающ с repo и workspace — это третий источник workspace.
+    path: str | None = None
 
     @model_validator(mode="after")
     def _one_workspace_source(self) -> "CreateSessionRequest":
         if self.repo is not None and self.workspace is not None:
             raise ValueError("repo и workspace взаимоисключающие: задайте один источник")
+        if self.path is not None and (self.repo is not None or self.workspace is not None):
+            raise ValueError("path взаимоисключающ с repo и workspace: задайте один источник")
         return self
 
 
@@ -257,6 +290,11 @@ class SessionSummary(BaseModel):
     session_id: str
     title: str
     workspace: str | None = None
+    # Корень сервиса, которому принадлежит сессия (спека 2026-07-30, финальное
+    # ревью): для path-сессий — выбранный корень, для repo/named — default.
+    # Отдельно от workspace (clone/task-каталог) — они расходятся для repo/named.
+    # None — сессии, созданные до этого поля (миграции нет).
+    root: str | None = None
     updated_at: datetime
     runs_count: int
     last_state: str | None = None
