@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createClient, type Api } from "./api/client";
 import type { SessionSummary } from "./api/types";
@@ -135,8 +135,16 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
   const active = sessions.find((session) => session.session_id === activeId);
 
   // Настройки/память/скиллы показывают проект активной сессии, а не корень
-  // serve: withRoot добавляет X-Svarog-Root ко всем их запросам.
-  const scopedApi = active?.workspace ? api.withRoot(active.workspace) : api;
+  // serve: withRoot добавляет X-Svarog-Root ко всем их запросам. Скоупим по
+  // root, а не workspace: для repo/named сессий workspace — clone/task-
+  // каталог, а не корень сервиса (root совпадает с workspace только для
+  // path-сессий). root=null — сессии до этого поля, работают unscoped.
+  // useMemo — иначе новый Api-объект каждый рендер рефетчит все данные
+  // экрана на busy-поллинге (каждые 3с, пока хоть один чат занят).
+  const scopedApi = useMemo(
+    () => (active?.root ? api.withRoot(active.root) : api),
+    [api, active?.root],
+  );
 
   return (
     <Shell

@@ -9,6 +9,7 @@ const session = {
   session_id: "s1",
   title: "FTS-поиск по памяти",
   workspace: null,
+  root: null,
   updated_at: new Date().toISOString(),
   runs_count: 1,
   last_state: "completed",
@@ -117,6 +118,7 @@ describe("оболочка приложения", () => {
       session_id: "s2",
       title: "второй чат",
       workspace: null,
+      root: null,
       updated_at: new Date().toISOString(),
       runs_count: 0,
       last_state: null,
@@ -143,6 +145,7 @@ describe("оболочка приложения", () => {
           session_id: "s1",
           title: "чат",
           workspace: "/home/u/proj/test",
+          root: "/home/u/proj/test",
           updated_at: "2026-07-30T10:00:00Z",
           runs_count: 0,
           last_state: null,
@@ -154,6 +157,40 @@ describe("оболочка приложения", () => {
     // сессии проверяем адресно, внутри навигатора, а не по всему документу.
     const nav = screen.getByRole("navigation");
     expect(await within(nav).findByText("test")).toBeInTheDocument();
+  });
+
+  it("скоупит настройки/память/скиллы по root активной сессии, а не workspace", async () => {
+    // repo/named-сессии: workspace — clone/task-каталог, root — корень
+    // сервиса. Settings/Memory/Skills должны звать withRoot(root), иначе
+    // X-Svarog-Root ведёт в мусорный «корень» и 422 (F4 финального ревью).
+    const scoped = {
+      session_id: "s1",
+      title: "чат",
+      workspace: "/home/u/proj/.svarog-tasks/clone-1",
+      root: "/home/u/proj",
+      updated_at: new Date().toISOString(),
+      runs_count: 0,
+      last_state: null,
+    };
+    const client = fakeApi({ listSessions: () => Promise.resolve([scoped]) });
+    render(<App api={client} />);
+    // Бейдж корня ("clone-1") входит в accessible name кнопки сессии, так
+    // что точное имя "чат" не совпадёт, — ждём по частичному совпадению.
+    await screen.findByRole("button", { name: /^чат/ });
+
+    await userEvent.click(screen.getByRole("button", { name: "Настройки" }));
+
+    expect(client.withRoot).toHaveBeenCalledWith("/home/u/proj");
+  });
+
+  it("не скоупит настройки, когда у активной сессии нет root (сессия до фичи)", async () => {
+    const client = fakeApi({ listSessions: () => Promise.resolve([session]) });
+    render(<App api={client} />);
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Настройки" }));
+
+    expect(client.withRoot).not.toHaveBeenCalled();
   });
 
   it("команда /new в чате заводит новый чат так же, как кнопка навигатора", async () => {

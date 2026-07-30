@@ -4,6 +4,11 @@ export interface SessionSummary {
   session_id: string;
   title: string;
   workspace: string | null;
+  // Корень сервиса, которому принадлежит сессия (спека 2026-07-30, финальное
+  // ревью): для path-сессий — выбранный корень, для repo/named — default.
+  // null — сессии до этого поля. Используется для X-Svarog-Root (withRoot),
+  // а не workspace: для repo/named workspace — clone-каталог, не корень.
+  root: string | null;
   updated_at: string;
   runs_count: number;
   last_state: string | null;
