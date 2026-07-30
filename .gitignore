@@ -49,3 +49,4 @@ agent-home/
 # Клиент: зависимости и сборка не коммитятся, бандл собирает CI
 web/node_modules/
 web/dist/
+node_modules/
