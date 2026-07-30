@@ -240,3 +240,59 @@ resume-материализация ×2, executor recovery ×2, обновлен
 
 Не тронуты (вне скоупа фиксов): S16 (нужна docker-сборка native-родителя),
 S21/S32 (семантика Dream — отдельная фича), S29 (нужна vision-модель).
+
+---
+
+## Дополнение 31.07: добиты S16, S29, S21/S32
+
+### S16 — ✅ PASS (docker happy-path)
+
+`sandbox: docker` + executor native с секцией external/opencode: родитель
+77b1ca19 вызвал `spawn_child_run executor=external`, child 341beea3
+(adapter=opencode) completed, результат вернулся tool-результатом и вошёл в
+финальный ответ, summary.md создан, workspace закоммичен.
+
+### S29 — ⚠️ остаётся ЖЁЛТЫМ на opencode: подтверждён upstream
+
+Прогон на vision-модели google/gemini-3.5-flash (opencode 1.18.9, run
+8f88f811): мост отдал image-блок (`read_image: ok`), но модель пикселей не
+видит — MCP-клиент opencode image-блоки по-прежнему не рендерит (как 1.18.4,
+24.07). Контроль: та же картинка той же модели напрямую через OpenRouter →
+«сплошной квадрат красного цвета». Разрыв ровно в opencode (issue upstream);
+слой Svarog исправен, на claude-code путь зелёный (24.07, 2/2).
+Также: OpenRouter больше не хостит `google/gemini-2.0-flash-001` из примера
+спеки — актуальный аналог `google/gemini-3.5-flash`.
+
+### S21/S32 — ✅ PASS (семантика Dream починена)
+
+Фиксы:
+1. **Дубли проектов ловятся детерминированно**: аудит curator получил находку
+   `duplicate` (нормализация slug/name: animateyou ≡ animate-you) — LLM больше
+   не единственная линия обороны.
+2. **Промт Dream**: обязательное чтение КАЖДОЙ страницы через read_memory
+   (сравнивать только содержимое), рецепт слияния и запрет повторных
+   предложений.
+3. **validate_proposal: allow_overwrite** — create по существующей странице в
+   proposal-пути = полная перезапись под ревью человека (это и есть операция
+   слияния; в Dream-прогоне 31.07 ровно она 7× отбивалась валидатором).
+   sources/* неизменяемы в обоих путях; прямой remember запрет сохраняет.
+4. **Дедуп предложений** в drain_memory_proposals (30.07 junk.md удалялся 3×).
+5. **Dream всегда нативный**: при `executor: external` DREAM-профиль раньше
+   молча уходил во внешний мост, где есть remember (запись в память!) и нет
+   propose_memory_change — теперь run_once принуждает native loop (ADR-0020),
+   docker-гейт внешнего агента к Dream не применяется.
+
+Перепрогоны (native glm-5.2, executor воркспейса opencode):
+- **S21** (run 10cca1d8): отдельные proposals на слияние дублей (create-
+  перезапись выжившей + архивация дубля) и на противоречие SQLite/Postgres;
+  junk/ghost закрыты; память не тронута.
+- **S32** (run 18b3de9e): конфликт тона найден → proposal по user/profile.md →
+  approve + flush → консолидация закоммичена.
+- Нюанс: deepseek-chat как native-модель Dream может сымитировать tool-вызовы
+  текстом (0 calls, модельный флейк) — для Dream использовать glm-5.2+.
+
+### Изменён и каталог
+
+`svarog cron`-джоба Dream в воркспейсе с executor=opencode теперь работает из
+коробки (native-принуждение); статусы S16/S21/S29/S32 обновлены в
+scenarios.md.

@@ -678,6 +678,11 @@ fix-sim-blockers): мост Svarog подключается remote-MCP секц�
            родительский workspace не материализовался — результат жил только
            в тексте; ответ родителя этого не скрывал. Контрветка без
            `external` не гонялась.
+           Перепрогон 31.07.2026 (run 77b1ca19): happy path подтверждён на
+           `sandbox: docker` (30.07 гейт ADR-0016 честно отказывал на
+           local-trusted): spawn_child_run executor=external → child 341beea3
+           (adapter=opencode) completed → результат в финальном ответе,
+           summary.md создан, workspace закоммичен.
 
 ---
 
@@ -853,6 +858,19 @@ fix-sim-blockers): мост Svarog подключается remote-MCP секц�
            предлагает `delete` вместо архивации; трогает файлы напрямую —
            последнее означало бы, что профиль реестра дал течь.
 - Runs:    ещё не прогонялся.
+- Статус:  **ЗЕЛЁНЫЙ** (перепрогон 31.07.2026, run 10cca1d8, native glm-5.2,
+           executor воркспейса opencode — Dream принудительно нативный).
+           После фиксов: (1) дубль animateyou/animate-you ловится
+           детерминированно аудитом (`duplicate`, curator._audit_duplicates);
+           (2) промт Dream обязывает читать КАЖДУЮ страницу и даёт рецепт
+           слияния (create-перезапись выжившей + update_field архивация
+           дубля — validate_proposal разрешает overwrite под ревью);
+           (3) дубли предложений схлопываются в drain_memory_proposals.
+           Результат: отдельные proposals на слияние дублей И на противоречие
+           SQLite/Postgres (rationale внятные), junk.md/ghost закрыты, память
+           не тронута (git чист). Известный нюанс: deepseek-chat как
+           native-модель может сымитировать tool-вызовы текстом (0 calls) —
+           модельный флейк, гоняй Dream на glm-5.2/сильнее.
 
 ### S22: Вопрос про сам Svarog идёт в документацию  (регрессия — фикс c6b9acf)
 - Persona: P3 (немногословный), P5 (нетехнический) — оба формулируют без намёка
@@ -1154,6 +1172,15 @@ S11–S16 (cloud-executor), но образ обязан быть собран �
            (1.18.4 не рендерит image-блоки), а не Svarog: кандидат (б),
            issue upstream OpenCode, остаётся; на claude-code read_image —
            полноценный vision-путь.
+- Перепрогон 31.07.2026 (opencode 1.18.9, google/gemini-3.5-flash, run
+           8f88f811): upstream-ограничение НЕ починено — read_image ok
+           (image-блок отдан мостом), но модель пикселей не видит: уходит в
+           программный путь (python3 в образе нет → пустой финал). Контроль:
+           та же картинка тем же gemini-3.5-flash напрямую через OpenRouter →
+           «сплошной квадрат красного цвета» — модель vision-capable, разрыв
+           ровно в MCP-клиенте opencode. Вывод: на opencode read_image НЕ
+           считать рабочим vision-путём до фикса upstream; на claude-code —
+           зелёный (24.07, 2/2).
 
 ---
 
@@ -1208,6 +1235,12 @@ S11–S16 (cloud-executor), но образ обязан быть собран �
            • после `svarog memory proposals approve <id>` профиль консолидирован (противоречие устранено), правка — git-коммит.
 - Watch:   Dream не упоминает профиль в проходе (регрессия #5); предлагает delete вместо консолидации; профиль остался нетронут при явном конфликте.
 - Runs:    2 (стохастика: ловит ли модель смысловой конфликт).
+- Статус:  **ЗЕЛЁНЫЙ** (перепрогон 31.07.2026, run 18b3de9e, native glm-5.2).
+           Полный цикл: Dream нашёл конфликт «## Тон (кратко)» vs «## Прочее
+           (развёрнуто)», оформил proposal replace_section по user/profile.md
+           с внятным rationale, без delete; approve + flush → противоречивая
+           строка убрана, тон консолидирован, git-коммит
+           `memory: replace_section user/profile.md#Прочее` + reindex.
 
 ---
 
