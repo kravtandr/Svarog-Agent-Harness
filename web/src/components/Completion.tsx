@@ -17,10 +17,14 @@ export function Completion({
   items,
   active,
   onPick,
+  listboxId = COMPLETION_LISTBOX_ID,
 }: {
   items: CompletionItem[];
   active: number;
   onPick: (value: string) => void;
+  /** Свой id, когда на странице больше одного комбобокса (модальный пикер
+      рендерится ПОВЕРХ композера — дубликат id ломал бы aria-controls). */
+  listboxId?: string;
 }) {
   const activeRow = useRef<HTMLLIElement>(null);
 
@@ -38,7 +42,7 @@ export function Completion({
 
   return (
     <ul
-      id={COMPLETION_LISTBOX_ID}
+      id={listboxId}
       className="completion"
       role="listbox"
       aria-label="Подсказки ввода"
@@ -46,7 +50,7 @@ export function Completion({
       {items.map((item, index) => (
         <li
           key={item.value}
-          id={`completion-option-${index}`}
+          id={`${listboxId}-option-${index}`}
           ref={index === active ? activeRow : undefined}
           role="option"
           aria-selected={index === active}

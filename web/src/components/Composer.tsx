@@ -238,7 +238,9 @@ export function Composer({
             aria-expanded={items.length > 0}
             aria-controls={items.length > 0 ? COMPLETION_LISTBOX_ID : undefined}
             aria-activedescendant={
-              items.length > 0 ? `completion-option-${active}` : undefined
+              items.length > 0
+                ? `${COMPLETION_LISTBOX_ID}-option-${active}`
+                : undefined
             }
             onChange={(event) => {
               const value = event.target.value;

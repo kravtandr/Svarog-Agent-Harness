@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from "react";
 
 import { type Api } from "../api/client";
 import type { FsListing, RecentRoot, RootInspect } from "../api/types";
-import {
-  Completion,
-  COMPLETION_LISTBOX_ID,
-  type CompletionItem,
-} from "./Completion";
+import { Completion, type CompletionItem } from "./Completion";
 import "./WorkspacePicker.css";
+
+/** Свой листбокс: пикер-модалка живёт в DOM одновременно с композером,
+    и дубликат COMPLETION_LISTBOX_ID ломал бы aria-connections обоих. */
+const PICKER_LISTBOX_ID = "workspace-picker-listbox";
 
 /**
  * Экран выбора рабочей папки нового чата (спека 2026-07-30).
@@ -193,9 +193,11 @@ export function WorkspacePicker({
           role="combobox"
           aria-label="Путь к папке"
           aria-expanded={suggestions.length > 0}
-          aria-controls={COMPLETION_LISTBOX_ID}
+          aria-controls={PICKER_LISTBOX_ID}
           aria-activedescendant={
-            suggestions.length > 0 ? `completion-option-${active}` : undefined
+            suggestions.length > 0
+              ? `${PICKER_LISTBOX_ID}-option-${active}`
+              : undefined
           }
           className="workspace-picker__input"
           placeholder="/путь/к/проекту"
@@ -220,7 +222,10 @@ export function WorkspacePicker({
                   ? suggestions[active].value
                   : value.trim(),
               );
-            } else if (event.key === "Escape") {
+            } else if (event.key === "Escape" && suggestions.length > 0) {
+              // Первый Escape закрывает подсказки; всплытие гасим, чтобы
+              // модалка не закрылась заодно. Второй — уже уходит наверх.
+              event.stopPropagation();
               setSuggestions([]);
             }
           }}
@@ -228,6 +233,7 @@ export function WorkspacePicker({
         <Completion
           items={suggestions}
           active={active}
+          listboxId={PICKER_LISTBOX_ID}
           onPick={(picked) => {
             setValue(picked);
             setSuggestions([]);

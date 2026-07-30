@@ -1,13 +1,10 @@
-/* Полноэкранный шаг выбора рабочей папки, а не плавающая панель — поэтому
-   свой корневой класс, а не .picker из ModelPicker.css (те же .css плоские,
-   без модулей, и с этим именем совпали бы стили обеих панелей). */
+/* Пикер рабочей папки живёт в модальном окне (.modal__panel задаёт размер,
+   2026-07-30); свой корневой класс, а не .picker из ModelPicker.css (плоские
+   css без модулей — с тем именем совпали бы стили обеих панелей). */
 .workspace-picker {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-width: 560px;
-  margin: 48px auto;
-  padding: 0 16px;
   color: var(--text);
   font-family: var(--sans);
 }

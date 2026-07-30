@@ -186,30 +186,54 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
       {section === "memory" && <MemoryScreen api={scopedApi} />}
       {section === "skills" && <SkillsScreen api={scopedApi} />}
       {section === "runs" && <RunsScreen api={api} />}
-      {section === "chat" &&
-        (picking ? (
-          <WorkspacePicker
-            api={api}
-            onPick={createIn}
-            onCancel={() => setPicking(false)}
-          />
-        ) : (
-          <ChatScreen
-            api={api}
-            sessionId={activeId}
-            ensureSession={ensureSession}
-            loading={loading}
-            error={error}
-            token={token}
-            onNew={startNew}
-            // "Перейти к списку чатов" здесь — фокус на уже видимый навигатор
-            // (он показан на всех разделах), а не переключение section: тот
-            // же список сессий, что открывает "＋ Новый чат".
-            onSessions={() =>
-              document.querySelector<HTMLButtonElement>(".nav__new")?.focus()
-            }
-          />
-        ))}
+      {section === "chat" && (
+        <ChatScreen
+          api={api}
+          sessionId={activeId}
+          ensureSession={ensureSession}
+          loading={loading}
+          error={error}
+          token={token}
+          onNew={startNew}
+          // "Перейти к списку чатов" здесь — фокус на уже видимый навигатор
+          // (он показан на всех разделах), а не переключение section: тот
+          // же список сессий, что открывает "＋ Новый чат".
+          onSessions={() =>
+            document.querySelector<HTMLButtonElement>(".nav__new")?.focus()
+          }
+        />
+      )}
+      {/* Пикер — модальное окно поверх чата, а не подмена экрана: контекст
+          не пропадает, а закрытие возвращает ровно туда, где был человек.
+          Композер и пикер оба рендерят Completion — их листбоксы разведены
+          по id (listboxId), дубликата aria-controls нет. */}
+      {picking && (
+        <div
+          className="modal"
+          role="presentation"
+          onClick={(event) => {
+            // Клик по подложке = «передумал»; клики внутри панели не выходят
+            // наружу (currentTarget — сама подложка).
+            if (event.target === event.currentTarget) setPicking(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setPicking(false);
+          }}
+        >
+          <div
+            className="modal__panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Выбор рабочей папки"
+          >
+            <WorkspacePicker
+              api={api}
+              onPick={createIn}
+              onCancel={() => setPicking(false)}
+            />
+          </div>
+        </div>
+      )}
     </Shell>
   );
 }
