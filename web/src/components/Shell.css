@@ -29,6 +29,14 @@
   display: none;
 }
 
+/* Бейдж корня рядом с заголовком чата в шапке. */
+.bar__root {
+  font-size: 0.75em;
+  opacity: 0.6;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 .shell__scrim {
   display: none;
 }

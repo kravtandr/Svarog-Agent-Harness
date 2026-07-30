@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { fakeApi } from "./test/fakeApi";
@@ -73,18 +73,76 @@ describe("оболочка приложения", () => {
     );
   });
 
-  it("создаёт новый чат и возвращает в диалог", async () => {
-    const client = api();
+  it("новый чат открывает пикер и создаёт сессию с выбранным путём", async () => {
+    const client = fakeApi({
+      fsRecent: vi.fn().mockResolvedValue([
+        {
+          path: "/home/u/proj",
+          exists: true,
+          last_used: "2026-07-30T10:00:00Z",
+        },
+      ]),
+    });
     render(<App api={client} />);
-    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    expect(client.createSession).not.toHaveBeenCalled();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj" }),
+    );
+    await waitFor(() =>
+      expect(client.createSession).toHaveBeenCalledWith(
+        "Новый чат",
+        "/home/u/proj",
+      ),
+    );
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: /Новый чат/ }));
+  it("отмена пикера возвращает в чат без создания сессии", async () => {
+    const client = fakeApi();
+    render(<App api={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Отмена" }),
+    );
+    expect(client.createSession).not.toHaveBeenCalled();
+    expect(screen.queryByText("Где работать?")).not.toBeInTheDocument();
+  });
 
-    expect(client.createSession).toHaveBeenCalledWith("Новый чат");
+  it("строка сессии показывает бейдж корня", async () => {
+    const client = fakeApi({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "s1",
+          title: "чат",
+          workspace: "/home/u/proj/test",
+          updated_at: "2026-07-30T10:00:00Z",
+          runs_count: 0,
+          last_state: null,
+        },
+      ]),
+    });
+    render(<App api={client} />);
+    // Бейдж есть и в шапке (активная сессия — единственная), поэтому строку
+    // сессии проверяем адресно, внутри навигатора, а не по всему документу.
+    const nav = screen.getByRole("navigation");
+    expect(await within(nav).findByText("test")).toBeInTheDocument();
   });
 
   it("команда /new в чате заводит новый чат так же, как кнопка навигатора", async () => {
-    const client = api();
+    const client = fakeApi({
+      listSessions: () => Promise.resolve([session]),
+      fsRecent: vi.fn().mockResolvedValue([
+        {
+          path: "/home/u/proj",
+          exists: true,
+          last_used: "2026-07-30T10:00:00Z",
+        },
+      ]),
+    });
     render(<App api={client} />);
     await screen.findByRole("button", { name: "FTS-поиск по памяти" });
 
@@ -93,8 +151,14 @@ describe("оболочка приложения", () => {
       "/new{Enter}",
     );
 
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj" }),
+    );
     await waitFor(() =>
-      expect(client.createSession).toHaveBeenCalledWith("Новый чат"),
+      expect(client.createSession).toHaveBeenCalledWith(
+        "Новый чат",
+        "/home/u/proj",
+      ),
     );
   });
 

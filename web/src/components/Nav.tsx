@@ -30,6 +30,13 @@ export function busyLabel(session: SessionSummary): string | null {
     : (BUSY[session.last_state] ?? null);
 }
 
+/** Хвост пути для бейджа корня: /home/u/proj/test → test. */
+export function rootBase(workspace: string | null): string | null {
+  if (!workspace) return null;
+  const parts = workspace.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? null;
+}
+
 /** 0 — идёт сейчас, дальше остывает до 4 (архив). */
 export function heatLevel(
   session: SessionSummary,
@@ -115,6 +122,11 @@ export function Nav({
                     data-heat={heatLevel(session)}
                   />
                   <span className="nav__title">{session.title}</span>
+                  {rootBase(session.workspace) !== null && (
+                    <span className="nav__root" title={session.workspace ?? ""}>
+                      {rootBase(session.workspace)}
+                    </span>
+                  )}
                   {busy !== null && (
                     <span className="nav__busy" title={`Запуск ${busy}`}>
                       {busy}
