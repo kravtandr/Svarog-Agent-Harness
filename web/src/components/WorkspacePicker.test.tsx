@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -62,7 +62,13 @@ describe("WorkspacePicker", () => {
     const field = await screen.findByRole("combobox", { name: "Путь к папке" });
     await userEvent.type(field, "/home/u/pr");
     await waitFor(() => expect(api.fs).toHaveBeenCalledWith("/home/u"));
-    expect(await screen.findByText("proj")).toBeInTheDocument();
+    // Раздел «Обзор» тоже показывает «proj» (тот же домашний листинг) —
+    // берём текст именно из списка подсказок автодополнения, а не из
+    // первого совпадения на всей странице.
+    const suggestions = await screen.findByRole("listbox", {
+      name: "Подсказки ввода",
+    });
+    expect(within(suggestions).getByText("proj")).toBeInTheDocument();
     await userEvent.clear(field);
     await userEvent.type(field, "/home/u/proj{Enter}");
     expect(onPick).toHaveBeenCalledWith("/home/u/proj");

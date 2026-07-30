@@ -185,10 +185,7 @@ export function WorkspacePicker({
         </section>
       )}
 
-      {/* Пока показаны подсказки по вводу — обзор прячем: те же папки
-          иначе одновременно рисуются дважды (строка обзора и строка
-          подсказки), два конкурирующих способа выбрать один путь. */}
-      {listing !== null && suggestions.length === 0 && (
+      {listing !== null && (
         <section className="workspace-picker__browser">
           <h3 className="workspace-picker__heading">Обзор</h3>
           <nav className="workspace-picker__crumbs" aria-label="Путь">
