@@ -576,3 +576,75 @@ async def test_warm_disabled_by_ttl_zero(tmp_path: Path, monkeypatch: pytest.Mon
     assert await _wait_state(service, run_id, {"completed"}) == "completed"
     assert calls["prepare"] == 0
     assert service._warm == {}
+
+
+async def test_warm_session_rebuilt_on_autonomy_change(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Смена автономии пересобирает слот: policy-мост фиксирует её при подъёме.
+
+    Иначе сессия, начатая в supervised, держала бы supervised-policy и в yolo —
+    гейты продолжали бы спрашивать (находка 2026-07-30).
+    """
+    from svarog_harness.config.schema import AutonomyMode
+    from svarog_harness.runtime.orchestrator import TaskRunner
+
+    calls = {"prepare": 0}
+    original = TaskRunner.prepare_session_resources
+
+    async def counting_prepare(self: TaskRunner, autonomy: object) -> object:
+        calls["prepare"] += 1
+        return await original(self, autonomy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TaskRunner, "prepare_session_resources", counting_prepare)
+    await service.create_workspace("proj2")
+    _install_provider(monkeypatch, ScriptedProvider([_final("раз"), _final("два")]))
+
+    view = await service.create_session(title="чат", workspace_name="proj2")
+    run1 = await service.send_message(view.session_id, "привет", AutonomyMode.SUPERVISED)
+    assert await _wait_state(service, run1, {"completed"}) == "completed"
+    assert service._warm[view.session_id].autonomy is AutonomyMode.SUPERVISED
+
+    run2 = await service.send_message(view.session_id, "жги", AutonomyMode.YOLO)
+    assert await _wait_state(service, run2, {"completed"}) == "completed"
+
+    assert calls["prepare"] == 2  # слот пересобран под новую автономию
+    assert service._warm[view.session_id].autonomy is AutonomyMode.YOLO
+    await service.close_warm_sessions()
+
+
+def test_stream_survives_waiting_approval() -> None:
+    """Стрим не рвётся на паузе run'а: события resume доезжают в тот же сокет.
+
+    Раньше любой run_finished закрывал подписчика; клиент переподписывался,
+    реплей приносил старый approval_required — петля «бесконечного Разрешить».
+    """
+    import asyncio
+
+    from svarog_harness.storage.events import InProcessEventStream
+
+    async def scenario() -> list[str]:
+        stream = InProcessEventStream()
+        stream.publish("r1", {"type": "approval_required", "approval_id": "a1"})
+        stream.publish("r1", {"type": "run_finished", "state": "waiting_approval"})
+
+        got: list[str] = []
+
+        async def consume() -> None:
+            async for event in stream.stream("r1"):
+                got.append(f"{event['type']}:{event.get('state', '')}")
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.01)  # подписчик прошёл бэклог и ждёт живых событий
+        stream.publish("r1", {"type": "text", "delta": "после resume"})
+        stream.publish("r1", {"type": "run_finished", "state": "completed"})
+        await asyncio.wait_for(task, timeout=2)
+        return got
+
+    got = asyncio.run(scenario())
+    assert got == [
+        "approval_required:",
+        "run_finished:waiting_approval",  # пауза — НЕ конец стрима
+        "text:",
+        "run_finished:completed",
+    ]

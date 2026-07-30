@@ -13,9 +13,18 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-# Терминальные типы событий: подписчик после них выходит из стрима (run
-# завершён/приостановлен/ждёт approval — дальше поводов ждать в этом стриме нет).
-_TERMINAL_TYPES = frozenset({"run_finished"})
+# Финальные исходы run'а: только на них подписчик выходит из стрима.
+# waiting_approval/suspended — пауза ноги, а не конец run'а: сокет живёт,
+# resume публикует продолжение в тот же run_id, переподписка клиенту не
+# нужна. Раньше стрим рвался на любом run_finished, и клиент после решения
+# по гейту переподписывался: реплей бэклога приносил старый
+# approval_required, а старый run_finished(waiting_approval) тут же
+# закрывал сокет — петля «бесконечного Разрешить» (2026-07-30).
+_FINAL_RUN_STATES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _is_terminal(event: dict[str, Any]) -> bool:
+    return event.get("type") == "run_finished" and str(event.get("state")) in _FINAL_RUN_STATES
 
 
 class EventStream(ABC):
@@ -70,12 +79,12 @@ class InProcessEventStream(EventStream):
         try:
             for event in backlog:
                 yield event
-                if event.get("type") in _TERMINAL_TYPES:
+                if _is_terminal(event):
                     return
             while True:
                 event = await queue.get()
                 yield event
-                if event.get("type") in _TERMINAL_TYPES:
+                if _is_terminal(event):
                     return
         finally:
             subs = self._subscribers.get(run_id)

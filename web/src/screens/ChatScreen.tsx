@@ -170,6 +170,9 @@ export function ChatScreen({
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
   const commandSeq = useRef(0);
+  // Автоскролл ленты: держим низ, пока человек сам не ушёл в историю.
+  const threadRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
   // Сессия, которую только что завела сама загрузка вложения на чистой
   // установке (sessionId был null) — эффект смены сессии ниже не должен
   // стереть тот самый чип, ради которого сессия и была создана. Порядок,
@@ -274,6 +277,7 @@ export function ChatScreen({
     setItems([]);
     setThreadError(null);
     setSendError(null);
+    stickToBottom.current = true; // новая сессия открывается свежим низом
     // Эта сессия теперь известна родителю — общему резолверу больше не за
     // что держаться. Следующий раз, когда sessionId снова станет null
     // (например, после "/new"), resolveTarget() обязан позвать
@@ -301,6 +305,13 @@ export function ChatScreen({
   }, [api, sessionId]);
 
   useEffect(() => () => unsubscribe.current?.(), []);
+
+  // Свежие события подтягивают ленту вниз — но только пока человек и так у
+  // низа: ушедшего читать историю автоскролл не дёргает.
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el !== null && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [items]);
 
   const pushStatus = useCallback((text: string, failed: boolean) => {
     const id = `cmd-${commandSeq.current++}`;
@@ -521,18 +532,24 @@ export function ChatScreen({
   const decide = useCallback(
     async (approvalId: string, approved: boolean) => {
       const ref = await api.decideApproval(approvalId, approved);
+      // Сокет НЕ переподписываем: waiting_approval больше не закрывает стрим
+      // (storage/events.py), и события resume придут в уже открытый. Прежняя
+      // переподписка реплеила бэклог со старым approval_required — гейт
+      // возвращался бесконечно (петля «Разрешить», 2026-07-30).
       setItems((current) =>
         current.filter(
-          (item) => !(item.kind === "gate" && item.approvalId === approvalId),
+          (item) =>
+            !(item.kind === "gate" && item.approvalId === approvalId) &&
+            // Плашка «Запуск ждёт вашего решения» отработала — решение есть.
+            !(
+              item.kind === "status" &&
+              item.text.includes("ждёт вашего решения")
+            ),
         ),
       );
-      // При уходе в waiting_approval сервер закрывает сокет, а resume
-      // начинает новую «ногу» потока: без переподписки остаток run'а
-      // не попадёт в ленту до перезагрузки истории.
       setRunId(ref.run_id);
-      watch(ref.run_id);
     },
-    [api, watch],
+    [api],
   );
 
   // is_active пересчитывается от выбора человека (executorValue), а не от
@@ -547,7 +564,18 @@ export function ChatScreen({
 
   return (
     <div className="chat">
-      <div className="chat__thread">
+      <div
+        className="chat__thread"
+        ref={threadRef}
+        onScroll={() => {
+          const el = threadRef.current;
+          if (el === null) return;
+          // «Прилипание» к низу выключается, когда человек ушёл читать
+          // историю, и включается обратно у самого низа.
+          stickToBottom.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+      >
         <div className="chat__col">
           {shown !== null && <p className="chat__error">{shown}</p>}
           {shown === null && loading && (
