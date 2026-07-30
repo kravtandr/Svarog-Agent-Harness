@@ -24,6 +24,24 @@
 
 ---
 
+## 0. Executor прогона — спроси ПЕРВЫМ вопросом
+
+Фокус симуляции во ВСЕХ сценариях — **external executor** (ADR-0016):
+большинство регрессий живёт на мосте Svarog ↔ внешний агент
+(opencode/claude-code/codex) и в его managed-контексте, а не в native-петле.
+
+- Если человек попросил прогнать сценарии и **НЕ уточнил executor — первым
+  вопросом уточни, с каким executor гнать** (external/opencode,
+  external/claude-code, native), и только потом разворачивай среду.
+- Ответ «на твоё усмотрение» → дефолт: external/opencode + sandbox docker +
+  актуальная data-plane модель (инкапсулировано в `run-retest.sh`).
+- Native гоняется точечно, а не «вместо»: сценарии, нативные по спеке
+  (Dream S21/S32 — принудительно нативный run при ЛЮБОМ executor конфига;
+  родитель S16), и контрольные зеркала для локализации бага
+  («мост или петля?»).
+
+---
+
 ## 1. Ментальная модель
 
 - **SUT (система под тестом)** — агент Svarog: autonomous runtime (loop + tools +
@@ -49,8 +67,16 @@
 - **Секрет провайдера** (`PROVIDER_API_KEY` или как назван в конфиге) доступен в
   `~/.svarog/secrets.json` или по `secrets.path`; `HOME` при запуске указывает
   туда, где лежит store.
+- **`executor` в svarog.yaml песочницы указывай ЯВНО** — даже если это
+  `type: native`. Конфиг мержится с пользовательским `~/.svarog/config.yaml`
+  хоста, и незаданный executor молча подтянет хостовый external → не тот
+  прогон либо SandboxError (найдено 31.07.2026: джоба Dream 140 тиков подряд
+  падала из-за унаследованного `executor: external` при local-trusted).
+  Проверенный полный конфиг external/opencode — в `run-retest.sh`.
 - **sandbox: `local-trusted`** — для задач про память/тексты (быстро, без docker);
-  `docker` — только если сценарий реально исполняет недоверенный код.
+  `docker` — только если сценарий реально исполняет недоверенный код, и
+  ОБЯЗАТЕЛЬНО для любого external executor (fail-closed гейт) и для
+  spawn_child с external-ребёнком (S16).
 
 ```bash
 REPO=/path/to/Svarog            # корень репозитория svarog_harness
@@ -137,6 +163,27 @@ HOME="$HOME" uv run --project "$REPO" svarog run --yolo "<реплика лич�
 
 Автономия: `--yolo` (без approvals) по умолчанию; `--supervised`/`--auto` — если
 сценарий проверяет approval/policy.
+
+Грабли конкретных режимов (собраны прогонами 30–31.07.2026):
+- **Scheduler-сценарии (Dream S21/S32, cron):** джобу исполняет демон
+  `svarog scheduler` (не `serve`); для быстрого прогона ставь
+  `dream.interval_sec: 30` + `scheduler.interval_sec: 10` и УБИВАЙ демон после
+  прогона (`pkill -f "svarog scheduler"`), иначе он продолжит жечь токены.
+  `cron_jobs.last_status` хранит только КЛАСС ошибки («ошибка: SandboxError»)
+  — текст доставай, повторив путь напрямую (`svarog run` в той же песочнице).
+- **Dream — всегда нативный run** (принуждение в run_once, ADR-0020): его
+  модель — `models.providers.<default>`, НЕ `executor.external.model`. Слабая
+  native-модель (deepseek-chat) может сымитировать tool-вызовы текстом —
+  0 tool calls при completed-run; это модельный флейк, для Dream ставь
+  glm-5.2 или сильнее.
+- **Vision (S29):** сперва проверь, что модель жива на OpenRouter
+  (`curl -s https://openrouter.ai/api/v1/models | grep <id>`, симптом мёртвой —
+  «No endpoints found»); и помни: MCP-клиент opencode (≤1.18.9) image-блоки до
+  модели НЕ доносит (issue upstream) — vision-путь read_image гоняется на
+  claude-code.
+- **Approve/deny в run+approval:** решение + `svarog resume <id>` — двумя
+  командами; повторный suspend после resume (ask_user и т.п.) — нормальный ход,
+  отвечай и резюмь снова.
 
 ---
 
