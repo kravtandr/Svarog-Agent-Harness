@@ -112,6 +112,30 @@ describe("оболочка приложения", () => {
     expect(screen.queryByText("Где работать?")).not.toBeInTheDocument();
   });
 
+  it("клик по существующему чату в навигаторе закрывает открытый пикер", async () => {
+    const other = {
+      session_id: "s2",
+      title: "второй чат",
+      workspace: null,
+      updated_at: new Date().toISOString(),
+      runs_count: 0,
+      last_state: null,
+    };
+    const client = fakeApi({
+      listSessions: () => Promise.resolve([session, other]),
+    });
+    render(<App api={client} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "＋ Новый чат" }),
+    );
+    expect(await screen.findByText("Где работать?")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "второй чат" }));
+
+    expect(screen.queryByText("Где работать?")).not.toBeInTheDocument();
+    expect(client.createSession).not.toHaveBeenCalled();
+  });
+
   it("строка сессии показывает бейдж корня", async () => {
     const client = fakeApi({
       listSessions: vi.fn().mockResolvedValue([

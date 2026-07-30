@@ -147,6 +147,11 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           onPick={(id) => {
             setActiveId(id);
             setSection("chat");
+            // Клик по существующему чату — тоже выход из пикера: иначе
+            // тернарник в разделе "chat" всё ещё рисует WorkspacePicker
+            // поверх уже выбранной сессии, и человек застревает на экране
+            // выбора папки до явной «Отмены».
+            setPicking(false);
           }}
           onNew={startNew}
           onDelete={(id) => void remove(id)}
