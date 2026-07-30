@@ -40,6 +40,11 @@ dependencies = [
 server = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
+    # Протокольная библиотека WS для uvicorn: без неё голый uvicorn отвечает
+    # на WebSocket-upgrade 404-й («No supported WebSocket library detected»),
+    # и живой стрим /runs/{id}/events молча не работает. TestClient гоняет WS
+    # in-process мимо uvicorn — тесты дыру не видят, поймано вживую 2026-07-30.
+    "websockets>=14",
     # Приём файла в UploadFile (FastAPI/Starlette); раньше приходил
     # транзитивно через `mcp`, но без него установка [server] без [mcp] ломалась.
     "python-multipart>=0.0.9",
@@ -73,6 +78,7 @@ dev = [
     # Опциональные интерфейсы гоняются в тестах и CI.
     "fastapi>=0.115",
     "uvicorn>=0.34",
+    "websockets>=14",  # см. комментарий в extras server
     "mcp>=1.2",
     "markitdown[pdf,docx,xlsx,xls,pptx,epub]>=0.1.2",
 ]
