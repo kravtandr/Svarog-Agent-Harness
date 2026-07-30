@@ -10,7 +10,6 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  justify-content: flex-end;
   padding: 26px 0 10px;
   overflow-y: auto;
 }
@@ -18,7 +17,10 @@
 .chat__col {
   width: 100%;
   max-width: 700px;
-  margin: 0 auto;
+  /* margin-top: auto прижимает короткую ленту к низу БЕЗ justify-content:
+     flex-end — тот в связке с overflow выталкивает верх контента за начало
+     скролл-области, и история недоступна прокрутке (баг 2026-07-30). */
+  margin: auto auto 0;
   padding: 0 24px;
 }
 
