@@ -80,6 +80,14 @@ _HOOK_ACTIONS: dict[str, tuple[str, RiskLevel]] = {
 
 # Ключ отпечатка вызова в payload approval'а (decision cache, §7).
 FINGERPRINT_KEY = "fingerprint"
+# Флаг в payload approval'а schedule.create: одобренная заявка уже превращена
+# в ScheduleRequest (sink → drain_schedule). Single-fire дизайн полагался на
+# ДОСЛОВНЫЙ ретрай вызова после resume (fingerprint-cache), но LLM
+# переформулирует аргументы → cache-miss → новый approval → каскад/livelock,
+# а одобренная заявка не материализуется вовсе (S24, прогон 30.07.2026).
+# Материализацию делает harness (orchestrator._claim_approved_schedule либо
+# успешный enqueue здесь), флаг закрывает и дубли, и каскад.
+MATERIALIZED_KEY = "materialized"
 
 DbAction = Callable[..., Awaitable[Any]]
 
@@ -269,9 +277,47 @@ class BridgeControl:
             # approval требуется в любом режиме автономии, включая yolo. Hook-мост
             # не видит вызовы mcp__svarog* (short-circuit в handle_hook), поэтому
             # гейт обязан жить здесь, на MCP-слое. Fingerprint даёт decision cache:
-            # на resume _human_gate мгновенно вернёт «одобрено» из кеша, и
-            # ScheduleTaskTool.on_enqueue сработает ровно один раз (single-fire,
-            # как в native loop). При отказе — run уходит в waiting_approval.
+            # на resume _human_gate мгновенно вернёт «одобрено» из кеша.
+            # При отказе — run уходит в waiting_approval.
+            done = await self._materialized_schedule()
+            if done is None:
+                denied = await self._denied_schedule()
+                if denied is not None:
+                    # Человек уже отказал в создании джобы в этом run'е — новые
+                    # заявки (в т.ч. «исправленные») не создают approval и не
+                    # уводят run в suspend: deny-livelock S18. Нужна другая
+                    # джоба — отдельный запуск по явной просьбе пользователя.
+                    reason = denied.reason or "без причины"
+                    return [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"человек уже отклонил создание джобы в этом run'е "
+                                f"(причина: {reason}). НЕ отправляй новую заявку "
+                                "schedule_task; продолжай задачу без планировщика "
+                                "или заверши с честным объяснением отказа."
+                            ),
+                        }
+                    ], True
+            if done is not None:
+                # В этом run уже есть материализованная одобренная джоба.
+                # Повторный вызов (LLM после resume любит «на всякий случай»,
+                # часто с переформулированными аргументами → новый fingerprint)
+                # НЕ создаёт ни второй approval, ни дубль джобы — каскад S24.
+                tool_input = done.payload.get("tool_input")
+                job = tool_input.get("name") if isinstance(tool_input, dict) else None
+                return [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"джоба «{job or 'по одобренной заявке'}» уже создана в этом "
+                            "run'е — повторный вызов schedule_task не нужен и "
+                            "проигнорирован. Планирование выполнено; если нужна ДРУГАЯ "
+                            "джоба — назови её пользователю в финальном ответе, она "
+                            "заводится отдельным запуском."
+                        ),
+                    }
+                ], False
             text, is_error = await self._human_gate(
                 action_type="schedule.create",
                 payload={"tool_name": name, "tool_input": arguments},
@@ -285,6 +331,10 @@ class BridgeControl:
         if tool is None:
             return [{"type": "text", "text": f"неизвестный MCP-tool: {name}"}], True
         result = await tool.call(arguments)
+        if name == "schedule_task" and result.ok:
+            # Успешный enqueue — пометить approval материализованным, чтобы
+            # последующие вызовы в этом run'е не плодили заявки и джобы.
+            await self._mark_schedule_materialized(call_fingerprint(name, arguments))
         await self._flush_side_effects()
         text = redact(
             result.output if result.ok else (result.error or "ошибка"), self._secret_values
@@ -445,6 +495,63 @@ class BridgeControl:
             return approval.status, approval.reason
 
         return cast(tuple[ApprovalStatus | None, str | None], await self._db_action(action))
+
+    async def _denied_schedule(self) -> Approval | None:
+        """Свежайший DENIED schedule.create этого run'а (deny-guard S18)."""
+        run_id = self.run_id
+        if run_id is None:
+            return None
+
+        async def action(db: AsyncSession) -> Approval | None:
+            result = await db.execute(
+                select(Approval)
+                .where(
+                    Approval.run_id == run_id,
+                    Approval.action_type == "schedule.create",
+                    Approval.status == ApprovalStatus.DENIED,
+                )
+                .order_by(Approval.created_at.desc())
+            )
+            return result.scalars().first()
+
+        return cast(Approval | None, await self._db_action(action))
+
+    async def _materialized_schedule(self) -> Approval | None:
+        """Материализованная schedule-заявка этого run'а (guard от каскада S24)."""
+        run_id = self.run_id
+        if run_id is None:
+            return None
+
+        async def action(db: AsyncSession) -> Approval | None:
+            result = await db.execute(
+                select(Approval).where(
+                    Approval.run_id == run_id,
+                    Approval.action_type == "schedule.create",
+                )
+            )
+            for approval in result.scalars():
+                if approval.payload.get(MATERIALIZED_KEY):
+                    return approval
+            return None
+
+        return cast(Approval | None, await self._db_action(action))
+
+    async def _mark_schedule_materialized(self, fingerprint: str) -> None:
+        run_id = self.run_id
+        if run_id is None:
+            return
+
+        async def action(db: AsyncSession) -> None:
+            result = await db.execute(select(Approval).where(Approval.run_id == run_id))
+            for approval in result.scalars():
+                if approval.payload.get(FINGERPRINT_KEY) == fingerprint:
+                    # JSON-колонка: мутация словаря не детектится ORM — только
+                    # переприсваивание.
+                    approval.payload = {**approval.payload, MATERIALIZED_KEY: True}
+                    await db.commit()
+                    return
+
+        await self._db_action(action)
 
     async def _find_by_fingerprint(self, fingerprint: str) -> Approval | None:
         run_id = self.run_id

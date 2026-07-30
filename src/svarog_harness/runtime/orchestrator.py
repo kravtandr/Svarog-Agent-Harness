@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.config.loader import load_config
@@ -35,7 +37,7 @@ from svarog_harness.memory import (
 from svarog_harness.memory.autocapture import extract_facts
 from svarog_harness.memory.profile import load_profile
 from svarog_harness.runtime.agent_infra import ExternalAgentInfra
-from svarog_harness.runtime.bridge_control import BridgeControl
+from svarog_harness.runtime.bridge_control import MATERIALIZED_KEY, BridgeControl
 from svarog_harness.runtime.checkpoint import LoopState
 from svarog_harness.runtime.config_snapshot import CONFIG_HASH_META_KEY, config_digest
 from svarog_harness.runtime.external import (
@@ -57,7 +59,7 @@ from svarog_harness.sandbox import (
     SandboxError,
     find_docker,
 )
-from svarog_harness.scheduler.schedule import next_run_after
+from svarog_harness.scheduler.schedule import ScheduleSpecError, next_run_after
 from svarog_harness.scheduler.store import JobStore
 from svarog_harness.secrets import (
     SecretStore,
@@ -71,10 +73,12 @@ from svarog_harness.skills.proposal_manager import SkillProposalManager
 from svarog_harness.storage.db import create_engine, create_session_factory, init_db
 from svarog_harness.storage.locks import LockBackend, default_lock_backend
 from svarog_harness.storage.models import (
+    Approval,
     ApprovalStatus,
     JobOrigin,
     Run,
     RunState,
+    ScheduleKind,
     utcnow,
 )
 from svarog_harness.tools.base import ToolError
@@ -82,7 +86,11 @@ from svarog_harness.tools.child_tools import (
     SpawnChildCallback,
     SpawnChildRunArgs,
 )
-from svarog_harness.tools.schedule_tools import ScheduleRequest
+from svarog_harness.tools.schedule_tools import (
+    ScheduleRequest,
+    ScheduleTaskArgs,
+    request_from_args,
+)
 from svarog_harness.trace.lookup import RunNotResumableError, find_run_by_prefix
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import Verifier, skill_checks
@@ -851,7 +859,25 @@ class TaskRunner:
         runner.assert_external_autonomy_supported(AutonomyMode(run.autonomy))
         _assert_config_unchanged(run, runner._cfg, workspace)  # trust gate (§0.4)
         await recorder.acquire_workspace_lease(str(workspace))
+        # Одобренную schedule-заявку материализует HARNESS, а не ретрай агента:
+        # single-fire через fingerprint-cache требовал дословного повтора вызова,
+        # но LLM после resume переформулирует аргументы → cache-miss → новый
+        # approval → каскад, а одобренная джоба не создаётся вовсе (S24,
+        # прогон 30.07.2026). Заявка берётся из payload одобренного approval —
+        # создаётся ровно то, что человек видел и одобрил.
+        claimed = await self._peek_approved_schedule(db, run)
+        # Каскад плодит pending-дубли ещё ДО suspend (агент успевает переслать
+        # заявку после grace-таймаута): при уже принятом решении человека
+        # (approve ИЛИ deny) дубли гасятся, иначе resume откажет «решение ещё
+        # не принято» по дублю, а не по реальной интенции.
+        await self._expire_pending_schedule_duplicates(recorder, run)
         prompt = await self._external_resume_prompt(recorder, run)
+        if claimed is not None:
+            # Пометка materialized — только после успешной сборки промта:
+            # если resume не состоится (напр. pending ask_user), заявка не
+            # должна остаться помеченной без созданной джобы.
+            await self._mark_schedules_materialized(db, run)
+            prompt = await self._schedule_done_prompt(recorder, run, claimed, prompt)
         infra = runner.build_agent_infra()
         await infra.start()
         runner.prepare_agent_launch(infra)
@@ -859,10 +885,12 @@ class TaskRunner:
         await environment.start()
         try:
             proposal_sink: list[SkillProposalRequest] = []
-            # schedule_sink для resume: одобренная на resume заявка schedule_task
-            # materialизуется джобой здесь (зеркало native resume() → drain_schedule).
+            # schedule_sink для resume: одобренная заявка положена сюда harness'ом
+            # (_claim_approved_schedule) и материализуется drain_schedule ниже.
             # Без этого approve+resume даёт completed без джобы (баг S24, ADR-0019).
             schedule_sink: list[ScheduleRequest] = []
+            if claimed is not None:
+                schedule_sink.append(claimed)
             autonomy = AutonomyMode(run.autonomy)
             control = runner.wire_bridge_control(
                 infra, autonomy, proposal_sink, hooks, schedule_sink=schedule_sink
@@ -926,6 +954,126 @@ class TaskRunner:
             f"Действие отклонено человеком: {reason}. НЕ повторяй его; "
             "продолжай задачу с учётом отказа или заверши с объяснением."
         )
+
+    async def _peek_approved_schedule(
+        self, db: AsyncSession, run: Run
+    ) -> ScheduleRequest | None:
+        """Одобренная, ещё не материализованная schedule-заявка run'а (без записи).
+
+        Берётся свежайшая approved-заявка; кривой payload (не спарсился в
+        ScheduleTaskArgs) — фолбэк на старое поведение: ретрай агента через
+        decision cache.
+        """
+        result = await db.execute(
+            select(Approval)
+            .where(
+                Approval.run_id == run.id,
+                Approval.action_type == "schedule.create",
+            )
+            .order_by(Approval.created_at.desc())
+        )
+        decided = [
+            a
+            for a in result.scalars()
+            if a.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED)
+        ]
+        # Последнее слово за человеком: если свежайшее решение — отказ,
+        # более ранние approved-дубли не материализуются.
+        if decided and decided[0].status is ApprovalStatus.DENIED:
+            return None
+        fresh = [
+            a
+            for a in decided
+            if a.status is ApprovalStatus.APPROVED and not a.payload.get(MATERIALIZED_KEY)
+        ]
+        if not fresh:
+            return None
+        tool_input = fresh[0].payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return None
+        try:
+            return request_from_args(ScheduleTaskArgs.model_validate(tool_input))
+        except (ScheduleSpecError, ValidationError):
+            return None
+
+    async def _expire_pending_schedule_duplicates(
+        self, recorder: TraceRecorder, run: Run
+    ) -> None:
+        """Погасить pending-дубли schedule.create при уже принятом решении.
+
+        Каскад (S24/S18, 30.07.2026): после grace-таймаута агент успевает
+        переслать заявку с переформулированными аргументами — в run'е висят
+        pending-дубли той же интенции. Раз человек уже решил (approve или
+        deny), дубли протухают, иначе resume отказывает по ним «решение ещё
+        не принято». Без решения — no-op: одиночная pending-заявка обязана
+        блокировать resume как раньше.
+        """
+        result = await recorder._db.execute(
+            select(Approval).where(
+                Approval.run_id == run.id,
+                Approval.action_type == "schedule.create",
+            )
+        )
+        approvals = list(result.scalars())
+        if not any(
+            a.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED) for a in approvals
+        ):
+            return
+        for approval in approvals:
+            if approval.status is ApprovalStatus.PENDING:
+                await recorder.expire_approval(approval)
+
+    async def _mark_schedules_materialized(self, db: AsyncSession, run: Run) -> None:
+        """Пометить ВСЕ одобренные schedule.create run'а материализованными.
+
+        В одном run — одна schedule-интенция: несколько approved-заявок бывают
+        только у каскада дублей (см. MATERIALIZED_KEY в bridge_control), и
+        материализуется из них ровно одна (_peek_approved_schedule).
+        """
+        result = await db.execute(
+            select(Approval).where(
+                Approval.run_id == run.id,
+                Approval.action_type == "schedule.create",
+                Approval.status == ApprovalStatus.APPROVED,
+            )
+        )
+        for approval in result.scalars():
+            approval.payload = {**approval.payload, MATERIALIZED_KEY: True}
+        await db.commit()
+
+    async def _schedule_done_prompt(
+        self, recorder: TraceRecorder, run: Run, claimed: ScheduleRequest, base: str
+    ) -> str:
+        """Resume-промт, когда одобренную джобу материализовал harness.
+
+        Прежний текст «повтори заблокированное действие» провоцировал повторные
+        schedule_task с переформулированными аргументами (каскад S24).
+        """
+        # Семантику расписания проговариваем по-человечески: сырой kind/spec
+        # модель глотает не глядя — в S25 (30.07.2026) заявка daily_at
+        # выдавалась в финале за «каждый понедельник».
+        if claimed.kind is ScheduleKind.DAILY_AT:
+            schedule_human = f"ЕЖЕДНЕВНО в {claimed.spec} ({claimed.tz})"
+        else:
+            schedule_human = f"каждые {claimed.spec} секунд"
+        note = (
+            f"Человек одобрил джобу «{claimed.name}» — {schedule_human}; Svarog "
+            "создаст её автоматически по одобренной заявке — включённой, сразу "
+            "после завершения run'а. НЕ вызывай schedule_task повторно: повтор "
+            "создаст дубль. В финальном ответе называй расписание ровно таким "
+            "(другой периодичности — например «по понедельникам» — у джобы НЕТ; "
+            "если пользователь просил иное, честно оговори это отличие)."
+        )
+        latest = await recorder.latest_approval(run.id)
+        if latest is not None and latest.action_type == "schedule.create":
+            # Сюда попадают APPROVED и EXPIRED-дубли (pending погашены до
+            # промта, при DENIED заявка не материализуется вовсе) — в обоих
+            # случаях базовый текст «повтори действие»/«отклонено» лжёт.
+            return (
+                f"Approval получен. {note} Продолжай задачу и дай финальный "
+                "ответ; расписание называй так, как оно одобрено."
+            )
+        return f"{base}\n\n{note}"
 
     async def verify(
         self,

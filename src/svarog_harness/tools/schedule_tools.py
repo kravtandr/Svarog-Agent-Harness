@@ -57,6 +57,22 @@ class ScheduleTaskArgs(BaseModel):
     tz: str = Field(default="UTC", description="Таймзона расписания, например Europe/Moscow")
 
 
+def request_from_args(args: ScheduleTaskArgs) -> ScheduleRequest:
+    """Валидация аргументов → заявка; общий путь execute() и материализации
+    одобренного approval на resume (orchestrator._claim_approved_schedule).
+
+    Бросает ScheduleSpecError на «ноль или два расписания» и на кривой spec.
+    """
+    if (args.every_seconds is None) == (args.daily_at is None):
+        raise ScheduleSpecError("укажи ровно одно расписание: every_seconds ИЛИ daily_at")
+    if args.every_seconds is not None:
+        kind, spec = ScheduleKind.EVERY, str(args.every_seconds)
+    else:
+        kind, spec = ScheduleKind.DAILY_AT, str(args.daily_at)
+    parse_spec(kind, spec)
+    return ScheduleRequest(name=args.name, task=args.task, kind=kind, spec=spec, tz=args.tz)
+
+
 class ScheduleTaskTool(Tool[ScheduleTaskArgs]):
     name = SCHEDULE_TOOL_NAME
     action_type = "schedule.create"
@@ -74,22 +90,20 @@ class ScheduleTaskTool(Tool[ScheduleTaskArgs]):
         self._on_enqueue = on_enqueue
 
     async def execute(self, args: ScheduleTaskArgs) -> ToolResult:
-        if (args.every_seconds is None) == (args.daily_at is None):
-            return ToolResult.failure("укажи ровно одно расписание: every_seconds ИЛИ daily_at")
-        if args.every_seconds is not None:
-            kind, spec = ScheduleKind.EVERY, str(args.every_seconds)
-        else:
-            kind, spec = ScheduleKind.DAILY_AT, str(args.daily_at)
         try:
-            parse_spec(kind, spec)
+            request = request_from_args(args)
         except ScheduleSpecError as exc:
             return ToolResult.failure(str(exc))
 
-        self._on_enqueue(
-            ScheduleRequest(name=args.name, task=args.task, kind=kind, spec=spec, tz=args.tz)
-        )
+        self._on_enqueue(request)
+        # К моменту исполнения approval уже получен: schedule.create — critical-
+        # набор, гейт стоит ДО execute и в native loop, и на MCP-мосте. Прежний
+        # текст («создана выключенной, заработает после подтверждения») врал и
+        # провоцировал повторные заявки после resume (каскад S18/S24, 30.07.2026).
         return ToolResult.success(
-            f"заявка на джобу «{args.name}» принята; она создана выключенной и "
-            f"заработает только после подтверждения человеком. Повторять заявку "
-            f"не нужно."
+            f"джоба «{args.name}» одобрена человеком; сразу после завершения "
+            f"этого run'а она будет создана включённой и начнёт запускаться по "
+            f"расписанию. Планирование ВЫПОЛНЕНО: не вызывай schedule_task "
+            f"повторно для этой задачи, даже с изменённой формулировкой — "
+            f"повтор создаст дубль джобы."
         )

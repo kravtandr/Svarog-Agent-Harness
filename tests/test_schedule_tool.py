@@ -67,10 +67,14 @@ async def test_rejects_bad_daily_spec() -> None:
 
 
 async def test_success_message_discourages_repeat() -> None:
-    """Заявка отложенная: агент не должен повторять её «для надёжности»."""
+    """К моменту execute approval уже получен (critical-гейт стоит ДО): текст
+    честно говорит «одобрена, будет создана включённой» и прямо запрещает
+    повторный вызов — прежняя формулировка «заработает после подтверждения»
+    провоцировала каскад повторных заявок после resume (S18/S24, 30.07.2026)."""
     tool, _ = _tool()
     result = await tool.call({"name": "сводка", "task": "собери", "every_seconds": 3600})
 
     assert result.output
-    assert "подтверждения" in result.output
-    assert "Повторять" in result.output
+    assert "одобрена" in result.output
+    assert "включённой" in result.output
+    assert "не вызывай schedule_task повторно" in result.output

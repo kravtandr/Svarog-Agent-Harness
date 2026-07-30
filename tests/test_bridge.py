@@ -36,6 +36,7 @@ from svarog_harness.runtime.bridge import (
 )
 from svarog_harness.runtime.bridge_control import (
     FINGERPRINT_KEY,
+    MATERIALIZED_KEY,
     BridgeControl,
     call_fingerprint,
 )
@@ -632,9 +633,109 @@ async def test_schedule_task_single_enqueue_after_approval(
     assert sink[0].kind.value == "daily_at"
     assert sink[0].spec == "09:00"
     assert sink[0].tz == "Europe/Moscow"
+    # Успешный enqueue помечает approval материализованным (guard каскада S24).
+    await db.refresh(approval)
+    assert approval.payload.get(MATERIALIZED_KEY) is True
     control = _control(tmp_path)
     decision = await control.handle_hook({"tool_name": "Read", "tool_input": {"file_path": "a.py"}})
     assert decision == {"decision": "allow", "reason": ""}
+
+
+async def test_schedule_task_repeat_after_materialized_is_ignored(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Каскад S24 (30.07.2026): после resume LLM шлёт schedule_task повторно с
+    ПЕРЕФОРМУЛИРОВАННЫМИ аргументами → новый fingerprint → раньше это рождало
+    новый approval и suspend-livelock. Теперь: заявка run'а уже материализована →
+    повтор игнорируется без нового approval, без suspend и без второй заявки."""
+    sink: list[ScheduleRequest] = []
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", schedule_sink=sink)
+    run_id = await _start_run(db, str(tmp_path))
+    control.run_id = run_id
+    recorder = TraceRecorder(db)
+    run = await recorder.get_run(run_id)
+    assert run is not None
+    args = {"name": "daily", "task": "сводка по проектам", "daily_at": "09:00", "tz": "UTC"}
+    approval = await recorder.create_approval(
+        run,
+        action_type="schedule.create",
+        payload={
+            "tool_name": "schedule_task",
+            "tool_input": args,
+            FINGERPRINT_KEY: call_fingerprint("schedule_task", args),
+        },
+    )
+    await recorder.decide_approval(approval, approved=True, decided_by="tester")
+    first = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "schedule_task", "arguments": args},
+        }
+    )
+    assert not first["result"]["isError"]
+    assert len(sink) == 1
+    reworded = {**args, "task": "собери ежедневную сводку по всем проектам"}
+    second = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {"name": "schedule_task", "arguments": reworded},
+        }
+    )
+    assert not second["result"]["isError"]
+    assert "уже создана" in second["result"]["content"][0]["text"]
+    assert len(sink) == 1  # второй заявки нет
+    assert not control.suspend.is_set()  # и suspend-цикла тоже
+    approvals = list((await db.execute(select(Approval))).scalars())
+    assert len(approvals) == 1  # нового approval не создано
+
+
+async def test_schedule_task_after_human_denial_is_refused_without_new_approval(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Deny-livelock S18 (30.07.2026): после отказа человека новая («исправленная»)
+    заявка не создаёт approval и не уводит run в suspend — мгновенный отказ с
+    причиной человека."""
+    sink: list[ScheduleRequest] = []
+    control = _control(tmp_path, memory_dir=tmp_path / "memory", schedule_sink=sink)
+    run_id = await _start_run(db, str(tmp_path))
+    control.run_id = run_id
+    recorder = TraceRecorder(db)
+    run = await recorder.get_run(run_id)
+    assert run is not None
+    args = {"name": "daily", "task": "сводка", "daily_at": "09:00", "tz": "UTC"}
+    approval = await recorder.create_approval(
+        run,
+        action_type="schedule.create",
+        payload={
+            "tool_name": "schedule_task",
+            "tool_input": args,
+            FINGERPRINT_KEY: call_fingerprint("schedule_task", args),
+        },
+    )
+    await recorder.decide_approval(
+        approval, approved=False, decided_by="tester", reason="не нужно"
+    )
+    corrected = {**args, "daily_at": "10:00", "task": "сводка покороче"}
+    response = await control.handle_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {"name": "schedule_task", "arguments": corrected},
+        }
+    )
+    assert response["result"]["isError"]
+    text = response["result"]["content"][0]["text"]
+    assert "уже отклонил" in text
+    assert "не нужно" in text  # причина человека доносится до агента
+    assert sink == []
+    assert not control.suspend.is_set()
+    approvals = list((await db.execute(select(Approval))).scalars())
+    assert len(approvals) == 1  # нового approval нет — livelock невозможен
 
 
 async def test_hook_denies_by_project_rule(tmp_path: Path) -> None:

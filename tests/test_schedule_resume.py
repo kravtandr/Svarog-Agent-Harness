@@ -195,3 +195,113 @@ async def test_denied_schedule_create_does_not_materialize_on_resume(
 
     jobs = await runner.with_db(fetch_job)
     assert jobs == [], f"deny не должен создавать джобу, получено {len(jobs)}"
+
+
+async def test_harness_materializes_approved_schedule_without_agent_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """External resume (S24, 30.07.2026): одобренную заявку материализует harness
+    из payload approval'а — НЕ полагаясь на дословный ретрай вызова агентом
+    (LLM переформулирует аргументы → fingerprint-cache мимо → каскад).
+    Pending-дубли той же интенции гасятся, чтобы не блокировать resume."""
+    from svarog_harness.runtime.bridge_control import (
+        FINGERPRINT_KEY,
+        MATERIALIZED_KEY,
+        call_fingerprint,
+    )
+    from svarog_harness.storage.models import ApprovalStatus
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+
+    args = {"name": "daily", "task": "сводка", "daily_at": "09:00", "tz": "Europe/Moscow"}
+
+    def payload(task_text: str) -> dict[str, object]:
+        payload_args = {**args, "task": task_text}
+        return {
+            "tool_name": "schedule_task",
+            "tool_input": payload_args,
+            FINGERPRINT_KEY: call_fingerprint("schedule_task", payload_args),
+        }
+
+    async def scenario(db: AsyncSession) -> None:
+        recorder = TraceRecorder(db)
+        run = await recorder.start_run(
+            task="настрой сводку", autonomy="yolo", model="external:opencode", workspace=str(ws)
+        )
+        # Реальный каскад: одобренная заявка + pending-дубль, посланный агентом
+        # после grace-таймаута (до убийства контейнера).
+        approved = await recorder.create_approval(
+            run, action_type="schedule.create", payload=payload("сводка")
+        )
+        await recorder.decide_approval(approved, approved=True, decided_by="test")
+        await recorder.create_approval(
+            run, action_type="schedule.create", payload=payload("сводка по всем проектам")
+        )
+
+        claimed = await runner._peek_approved_schedule(db, run)
+        assert claimed is not None
+        assert (claimed.name, claimed.spec, claimed.tz) == ("daily", "09:00", "Europe/Moscow")
+
+        await runner._expire_pending_schedule_duplicates(recorder, run)
+        await runner._mark_schedules_materialized(db, run)
+
+        approvals = list((await db.execute(select(Approval))).scalars())
+        by_status = {a.status for a in approvals}
+        assert ApprovalStatus.PENDING not in by_status  # дубль погашен, resume не заблокирован
+        assert all(
+            a.payload.get(MATERIALIZED_KEY)
+            for a in approvals
+            if a.status is ApprovalStatus.APPROVED
+        )
+        # Повторный peek пуст: дублей джоб между resume'ами не будет.
+        assert await runner._peek_approved_schedule(db, run) is None
+
+    await runner.with_db(scenario)
+
+
+async def test_peek_respects_latest_human_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Последнее слово за человеком: свежайший DENY по schedule.create гасит
+    материализацию более ранней approved-заявки."""
+    from svarog_harness.runtime.bridge_control import FINGERPRINT_KEY, call_fingerprint
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_config(ws, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = TaskRunner(load_config(project_dir=ws), ws)
+    args = {"name": "daily", "task": "сводка", "daily_at": "09:00", "tz": "UTC"}
+
+    async def scenario(db: AsyncSession) -> None:
+        recorder = TraceRecorder(db)
+        run = await recorder.start_run(
+            task="t", autonomy="yolo", model="external:opencode", workspace=str(ws)
+        )
+        first = await recorder.create_approval(
+            run,
+            action_type="schedule.create",
+            payload={
+                "tool_name": "schedule_task",
+                "tool_input": args,
+                FINGERPRINT_KEY: call_fingerprint("schedule_task", args),
+            },
+        )
+        await recorder.decide_approval(first, approved=True, decided_by="test")
+        second = await recorder.create_approval(
+            run,
+            action_type="schedule.create",
+            payload={
+                "tool_name": "schedule_task",
+                "tool_input": {**args, "task": "другая сводка"},
+            },
+        )
+        await recorder.decide_approval(second, approved=False, decided_by="test", reason="нет")
+
+        assert await runner._peek_approved_schedule(db, run) is None
+
+    await runner.with_db(scenario)
