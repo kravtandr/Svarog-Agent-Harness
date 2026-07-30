@@ -24,16 +24,26 @@ def sync_db_url(db_path: Path) -> str:
     return f"sqlite:///{db_path}"
 
 
-def _enable_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+def _configure_connection(dbapi_connection: Any, _record: Any) -> None:
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA foreign_keys=ON")  # в SQLite они опт-ин
+    # WAL: читатели и писатель не блокируют друг друга. К одной БД ходят
+    # долгоживущая сессия ноги loop'а и per-вызов engine'ы gateway (get_run/
+    # cancel_run, в т.ч. из других потоков) — в rollback-journal такой доступ
+    # даёт «database is locked» (гонка cooperative-cancel, ADR-0017 §2).
+    # Режим персистентен для файла БД, но выставляем на каждом connect:
+    # первым к файлу может прийти и alembic со своим sync-engine.
+    cursor.execute("PRAGMA journal_mode=WAL")
+    # Явный busy_timeout на writer-writer столкновения (WAL их не отменяет):
+    # ждать чужой короткий commit, а не падать немедленно.
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
 def create_engine(db_path: Path) -> AsyncEngine:
-    """Async engine к SQLite с включенными foreign keys (в SQLite они опт-ин)."""
+    """Async engine к SQLite: foreign keys, WAL и busy_timeout (см. хук)."""
     engine = create_async_engine(async_db_url(db_path))
-    event.listen(engine.sync_engine, "connect", _enable_foreign_keys)
+    event.listen(engine.sync_engine, "connect", _configure_connection)
     return engine
 
 

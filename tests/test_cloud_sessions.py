@@ -50,6 +50,9 @@ class GatedProvider(ScriptedProvider):
     def __init__(self, turns: list[CompletionResult]) -> None:
         super().__init__(turns)
         self.gate = asyncio.Event()
+        # Выставляется на входе в complete(): тест может дождаться, пока loop
+        # действительно заблокируется в LLM-вызове, прежде чем действовать.
+        self.entered = asyncio.Event()
 
     async def complete(
         self,
@@ -58,6 +61,7 @@ class GatedProvider(ScriptedProvider):
         *,
         on_text_delta: Callable[[str], None] | None = None,
     ) -> CompletionResult:
+        self.entered.set()
         await self.gate.wait()
         self.gate.clear()
         return await super().complete(messages, tools, on_text_delta=on_text_delta)
@@ -185,6 +189,13 @@ async def test_cancel_running_cooperative(
     run_id = await service.create_run("долгая", None)
     assert (await service.get_run(run_id)).state == "running"
 
+    # Дождаться, пока нога заблокируется в LLM-вызове, — иначе хронология из
+    # docstring не гарантирована: cancel раньше верха итерации 1 отменил бы
+    # run, не потребив ни одного turn'а (len(turns) == 2). А синхронный
+    # client.post замораживает event loop — нога, застигнутая посреди
+    # commit'а, держала бы write-lock SQLite весь HTTP-вызов («database is
+    # locked» в cancel по busy_timeout).
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
     resp = client.post(f"/runs/{run_id}/cancel")
     assert resp.status_code == 200
     assert resp.json()["state"] == "cancelling"

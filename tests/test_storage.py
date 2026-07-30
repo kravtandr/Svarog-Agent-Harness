@@ -118,6 +118,20 @@ async def test_cascade_delete_session_removes_runs(engine: AsyncEngine) -> None:
         assert (await db.execute(select(Message))).scalars().all() == []
 
 
+async def test_wal_and_busy_timeout_configured(engine: AsyncEngine) -> None:
+    """Каждое соединение engine'а — WAL и явный busy_timeout.
+
+    Без WAL читатели (поллинг состояния run'а из gateway) блокируют commit
+    долгоживущей ноги loop'а и наоборот — «database is locked» под
+    конкурентным доступом (флейк test_cancel_running_cooperative).
+    """
+    async with engine.connect() as conn:
+        journal = (await conn.exec_driver_sql("PRAGMA journal_mode")).scalar()
+        timeout = (await conn.exec_driver_sql("PRAGMA busy_timeout")).scalar()
+    assert journal == "wal"
+    assert timeout == 5000
+
+
 async def test_foreign_keys_enforced(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     async with factory() as db:
