@@ -55,3 +55,22 @@ def test_missing_file_is_empty(tmp_path: Path) -> None:
     reg = WorkspaceRootsRegistry(tmp_path / "нет" / "reg.json")
     assert reg.roots() == []
     assert reg.roots_with_runs() == set()
+
+
+def test_heals_malformed_schema(tmp_path: Path) -> None:
+    """Запись должна лечить файл с синтаксически валидным JSON, но неправильной формой."""
+    path = tmp_path / "reg.json"
+    # Валидный JSON, но с неправильными типами в ключевых полях
+    path.write_text('{"roots": ["x"], "sessions": null, "runs": "broken"}', encoding="utf-8")
+    reg = WorkspaceRootsRegistry(path)
+    # Чтение толерирует неправильную форму
+    assert reg.roots() == []
+    assert reg.root_of_session("s") is None
+    # Запись должна лечить файл, не падая
+    root = tmp_path / "w"
+    root.mkdir()
+    reg.record_session("s", root)
+    assert reg.root_of_session("s") == root
+    # После чтения файл должен быть исправлен
+    reg2 = WorkspaceRootsRegistry(path)
+    assert reg2.root_of_session("s") == root

@@ -33,7 +33,10 @@ class WorkspaceRootsRegistry:
 
     def _touch_root(self, data: dict[str, Any], root: Path) -> None:
         """Обновить last_used корня; заодно лениво выкинуть исчезнувшие."""
-        roots = data.setdefault("roots", {})
+        # Нормализовать roots перед мутацией: может быть не-dict из битого файла
+        roots = data.get("roots")
+        roots = roots if isinstance(roots, dict) else {}
+        data["roots"] = roots
         for known in list(roots):
             if not Path(known).is_dir():
                 del roots[known]
@@ -41,13 +44,21 @@ class WorkspaceRootsRegistry:
 
     def record_session(self, session_id: str, root: Path) -> None:
         data = self._load()
-        data.setdefault("sessions", {})[session_id] = str(root)
+        # Нормализовать sessions перед мутацией: может быть не-dict из битого файла
+        sessions = data.get("sessions")
+        sessions = sessions if isinstance(sessions, dict) else {}
+        data["sessions"] = sessions
+        sessions[session_id] = str(root)
         self._touch_root(data, root)
         self._save(data)
 
     def record_run(self, run_id: str, root: Path) -> None:
         data = self._load()
-        data.setdefault("runs", {})[run_id] = str(root)
+        # Нормализовать runs перед мутацией: может быть не-dict из битого файла
+        runs = data.get("runs")
+        runs = runs if isinstance(runs, dict) else {}
+        data["runs"] = runs
+        runs[run_id] = str(root)
         self._touch_root(data, root)
         self._save(data)
 
@@ -60,11 +71,17 @@ class WorkspaceRootsRegistry:
         return [(Path(p), str(ts)) for p, ts in ordered]
 
     def root_of_session(self, session_id: str) -> Path | None:
-        value = self._load().get("sessions", {}).get(session_id)
+        sessions = self._load().get("sessions", {})
+        if not isinstance(sessions, dict):
+            return None
+        value = sessions.get(session_id)
         return Path(value) if isinstance(value, str) else None
 
     def root_of_run(self, run_id: str) -> Path | None:
-        value = self._load().get("runs", {}).get(run_id)
+        runs = self._load().get("runs", {})
+        if not isinstance(runs, dict):
+            return None
+        value = runs.get(run_id)
         return Path(value) if isinstance(value, str) else None
 
     def roots_with_runs(self) -> set[Path]:
