@@ -214,6 +214,12 @@ def create_app(
             except RootPathError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from None
             except RootGoneError as exc:
+                if request.method == "DELETE":
+                    # Удаление истории должно работать и без папки: строка
+                    # сессии живёт в общей БД default-корня независимо от
+                    # того, существует ли её каталог, — иначе зомби-сессию
+                    # с удалённым корнем нельзя убрать из списка никогда.
+                    return resolver.route()
                 raise HTTPException(status_code=410, detail=str(exc)) from None
         return svc
 

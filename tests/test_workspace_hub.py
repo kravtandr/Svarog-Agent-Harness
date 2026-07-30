@@ -1,12 +1,18 @@
 """Тесты WorkspaceHub: мультиплекс GatewayService по корням (спека 2026-07-30)."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
 from svarog_harness.config.loader import load_config
-from svarog_harness.gateway.hub import RootGoneError, RootPathError, WorkspaceHub
+from svarog_harness.gateway.hub import (
+    RootConfigError,
+    RootGoneError,
+    RootPathError,
+    WorkspaceHub,
+)
 from svarog_harness.gateway.models import CreateSessionRequest
 from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 
@@ -60,6 +66,17 @@ def test_service_for_rejects_bad_paths(hub: WorkspaceHub, tmp_path: Path) -> Non
         hub.service_for(as_file)
 
 
+def test_service_for_bad_config_is_root_path_error(hub: WorkspaceHub, tmp_path: Path) -> None:
+    """F1: ConfigError из load_config оборачивается в RootConfigError (подкласс RootPathError)."""
+    broken = tmp_path / "битый"
+    broken.mkdir()
+    (broken / "svarog.yaml").write_text("models: [оборванный", encoding="utf-8")
+    with pytest.raises(RootConfigError):
+        hub.service_for(broken)
+    with pytest.raises(RootPathError):  # существующие обработчики ловят по базовому классу
+        hub.service_for(broken)
+
+
 def test_route_by_session_and_miss(hub: WorkspaceHub, tmp_path: Path) -> None:
     other = tmp_path / "other"
     _write_root(other, tmp_path / "other.db")
@@ -86,6 +103,16 @@ def test_route_by_header_root(hub: WorkspaceHub, tmp_path: Path) -> None:
     assert hub.route(root=str(other)).workspace == other.resolve()
     with pytest.raises(RootPathError):
         hub.route(root=str(tmp_path / "нет"))
+
+
+def test_route_session_id_wins_over_header_root(hub: WorkspaceHub, tmp_path: Path) -> None:
+    """F6: сессионные запросы маршрутизируются по id, заголовок для них не главный."""
+    by_id = tmp_path / "by-id"
+    _write_root(by_id, tmp_path / "by-id.db")
+    by_header = tmp_path / "by-header"
+    _write_root(by_header, tmp_path / "by-header.db")
+    hub.registry.record_session("s1", by_id)
+    assert hub.route(session_id="s1", root=str(by_header)).workspace == by_id.resolve()
 
 
 def test_authenticate_bearer(hub: WorkspaceHub) -> None:
@@ -148,6 +175,18 @@ def test_recent_roots_marks_missing(hub: WorkspaceHub, tmp_path: Path) -> None:
     other.rmdir()
     recents = hub.recent_roots()
     assert [(r.path, r.exists) for r in recents] == [(str(other), False)]
+
+
+def test_recent_roots_tolerates_broken_last_used(hub: WorkspaceHub, tmp_path: Path) -> None:
+    """F5: битый last_used в roots.json — запись пропущена, не 500 на /fs/recent."""
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    hub.registry.record_session("s1", other)
+    data = json.loads(hub.registry.path.read_text(encoding="utf-8"))
+    for key in data["roots"]:
+        data["roots"][key] = "не-дата"
+    hub.registry.path.write_text(json.dumps(data), encoding="utf-8")
+    assert hub.recent_roots() == []  # реестр — кэш, битая запись не повод падать
 
 
 def test_create_requests_path_exclusive() -> None:

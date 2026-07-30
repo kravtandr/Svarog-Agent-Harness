@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from svarog_harness.config.loader import load_config
+from svarog_harness.config.loader import ConfigError, load_config
 from svarog_harness.config.paths import resolve_tenant_config, tenant_home
 from svarog_harness.config.schema import SvarogConfig
 from svarog_harness.gateway.models import FsEntryView, FsListingView, RecentRootView, SessionSummary
@@ -200,6 +200,16 @@ class RootGoneError(LookupError):
     """Корень сессии/run'а удалён с диска (410 Gone)."""
 
 
+class RootConfigError(RootPathError):
+    """Корень существует, но его svarog.yaml не читается (422, не 500).
+
+    Подкласс RootPathError, а не отдельная ветка: все существующие
+    обработчики (422 в api._require_service/_service_for_path, skip в
+    list_sessions) уже ловят RootPathError и покрывают этот случай без
+    нового кода на местах использования.
+    """
+
+
 @dataclass
 class WorkspaceHub:
     """Мультиплекс GatewayService по папкам-корням (спека 2026-07-30).
@@ -237,7 +247,16 @@ class WorkspaceHub:
             raise RootPathError(f"не каталог или не существует: {root}")
         svc = self._services.get(root)
         if svc is None:
-            svc = self._make_service(load_config(project_dir=root), root)
+            try:
+                cfg = load_config(project_dir=root)
+            except ConfigError as exc:
+                # Битый/невалидный svarog.yaml корня — это ввод (чужая папка
+                # с мусорным конфигом), а не сбой шлюза: RootConfigError —
+                # подкласс RootPathError, поэтому все места, уже ловящие
+                # RootPathError (422 в api, skip в list_sessions), покрывают
+                # и этот случай без изменений.
+                raise RootConfigError(f"конфиг корня не читается: {exc}") from exc
+            svc = self._make_service(cfg, root)
             self._services[root] = svc
         return svc
 
@@ -248,19 +267,25 @@ class WorkspaceHub:
         run_id: str | None = None,
         root: str | None = None,
     ) -> GatewayService:
-        """Сервис запроса: заголовок X-Svarog-Root → id → default_root.
+        """Сервис запроса: id → заголовок X-Svarog-Root → default_root.
+
+        Сессионные запросы маршрутизируются по id (спека: «сессионные — по
+        id») — известный id выигрывает у заголовка, даже если оба переданы
+        одновременно. Заголовок смотрим только когда id не задан или не
+        резолвится реестром (сессия до фичи, либо запрос вообще без id —
+        create с `path`, /fs и т.п.).
 
         Промах реестра — default_root: сессии, созданные до фичи, работают
         без миграции. Известный, но исчезнувший корень — RootGoneError (410).
         """
-        if root is not None:
-            return self.service_for(root)
         target: Path | None = None
         if session_id is not None:
             target = self.registry.root_of_session(session_id)
         elif run_id is not None:
             target = self.registry.root_of_run(run_id)
         if target is None:
+            if root is not None:
+                return self.service_for(root)
             return self._services[self.default_root]
         if not target.is_dir():
             raise RootGoneError(f"каталог сессии удалён: {target}")
@@ -342,11 +367,19 @@ class WorkspaceHub:
 
     def recent_roots(self) -> list[RecentRootView]:
         """Недавние корни для пикера; несуществующие помечены, не выброшены."""
-        return [
-            # registry.roots() отдаёт ISO-строку (сырое поле JSON) — парсим
-            # в datetime здесь, а не меняем контракт реестра ради одного поля.
-            RecentRootView(
-                path=str(root), exists=root.is_dir(), last_used=datetime.fromisoformat(ts)
+        entries: list[RecentRootView] = []
+        for root, ts in self.registry.roots():
+            try:
+                # registry.roots() отдаёт ISO-строку (сырое поле JSON) —
+                # парсим в datetime здесь, а не меняем контракт реестра ради
+                # одного поля.
+                last_used = datetime.fromisoformat(ts)
+            except ValueError:
+                # Реестр — кэш, не источник истины: битая строка last_used
+                # (например, ручная правка roots.json) — повод пропустить
+                # запись, а не уронить /fs/recent целиком.
+                continue
+            entries.append(
+                RecentRootView(path=str(root), exists=root.is_dir(), last_used=last_used)
             )
-            for root, ts in self.registry.roots()
-        ]
+        return entries

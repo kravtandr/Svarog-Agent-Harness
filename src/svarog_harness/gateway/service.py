@@ -771,7 +771,16 @@ class GatewayService:
     ) -> SessionView:
         """Сессия: workspace провижнится один раз и живёт всю серию runs."""
         workspace = await self._provision_workspace(title or "session", repo, workspace_name)
-        meta = {"workspace": str(workspace.expanduser().resolve())}
+        meta = {
+            "workspace": str(workspace.expanduser().resolve()),
+            # root — корень сервиса, обработавшего запрос: для path-сессий
+            # это выбранный корень (сервис создан WorkspaceHub.service_for
+            # ровно под него), для repo/named — root дефолтного сервиса.
+            # workspace — где физически работает агент (clone/task-каталог
+            # внутри этого root); для repo/named они не совпадают, поэтому
+            # заведено отдельное поле (спека 2026-07-30, финальное ревью).
+            "root": str(self.workspace.expanduser().resolve()),
+        }
 
         async def action(db: AsyncSession) -> Session:
             return await TraceRecorder(db).create_session(
@@ -921,6 +930,7 @@ class GatewayService:
                         session_id=session.id,
                         title=session.title or "",
                         workspace=(session.meta or {}).get("workspace"),
+                        root=(session.meta or {}).get("root"),
                         updated_at=session.updated_at,
                         runs_count=len(runs),
                         last_state=runs[-1].state.value if runs else None,

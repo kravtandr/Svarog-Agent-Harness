@@ -118,3 +118,80 @@ def test_hub_registry_survives_restart(tmp_path: Path) -> None:
     reborn = make_client()  # «рестарт»: свежий хаб, тот же файл реестра
     thread = reborn.get(f"/sessions/{session_id}/messages")
     assert thread.status_code == 200
+
+
+def test_create_session_bad_root_config_is_422(client: TestClient, tmp_path: Path) -> None:
+    """F1: битый svarog.yaml корня — 422, не 500 (ConfigError нигде не перехвачен)."""
+    broken = tmp_path / "битый"
+    broken.mkdir()
+    (broken / "svarog.yaml").write_text("models: [оборванный", encoding="utf-8")
+    resp = client.post("/sessions", json={"title": "x", "path": str(broken)})
+    assert resp.status_code == 422
+
+
+def test_list_sessions_skips_root_with_broken_config_after_restart(tmp_path: Path) -> None:
+    """F1(б): сессия default-корня видна, даже если чужой корень сломан после рестарта."""
+    default_root = tmp_path / "default"
+    _write_root(default_root, tmp_path / "default.db")
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    registry_path = tmp_path / "roots.json"
+
+    def make_client() -> TestClient:
+        hub = WorkspaceHub(
+            load_config(project_dir=default_root),
+            default_root,
+            registry=WorkspaceRootsRegistry(registry_path),
+        )
+        return TestClient(create_app(resolver=hub))
+
+    first = make_client()
+    default_session = first.post("/sessions", json={"title": "в default"}).json()["session_id"]
+    other_session = first.post("/sessions", json={"path": str(other)}).json()["session_id"]
+
+    # Корень ломается уже после того, как сессия в нём создана и записана в
+    # реестр; хаб пересоздан («рестарт serve»), чужой сервис не материализован.
+    (other / "svarog.yaml").write_text("models: [оборванный", encoding="utf-8")
+    reborn = make_client()
+
+    listed = reborn.get("/sessions")
+    assert listed.status_code == 200
+    ids = [s["session_id"] for s in listed.json()]
+    assert default_session in ids
+    assert other_session not in ids  # битый корень пропущен, а не 500
+
+    assert reborn.get(f"/sessions/{other_session}/messages").status_code == 422
+
+
+def test_delete_zombie_session_with_gone_root_succeeds(tmp_path: Path) -> None:
+    """F2: удалённый корень с общей БД default-корня — DELETE всё равно работает."""
+    default_root = tmp_path / "default"
+    _write_root(default_root, tmp_path / "default.db")
+    other = tmp_path / "other"
+    # Общая БД с default-корнем (как в test_list_sessions_aggregates_and_dedups):
+    # строка сессии переживает исчезновение папки other.
+    _write_root(other, tmp_path / "default.db")
+    hub = WorkspaceHub(
+        load_config(project_dir=default_root),
+        default_root,
+        registry=WorkspaceRootsRegistry(tmp_path / "roots.json"),
+    )
+    client = TestClient(create_app(resolver=hub))
+
+    session_id = client.post("/sessions", json={"path": str(other)}).json()["session_id"]
+    shutil.rmtree(other)
+
+    resp = client.delete(f"/sessions/{session_id}")
+    assert resp.status_code == 204
+    remaining = [s["session_id"] for s in client.get("/sessions").json()]
+    assert session_id not in remaining
+
+
+def test_created_session_reports_root(client: TestClient, tmp_path: Path) -> None:
+    """F4: GET /sessions отдаёт root сервиса, обработавшего path-сессию."""
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    session_id = client.post("/sessions", json={"path": str(other)}).json()["session_id"]
+    listed = client.get("/sessions").json()
+    [row] = [s for s in listed if s["session_id"] == session_id]
+    assert row["root"] == str(other.resolve())

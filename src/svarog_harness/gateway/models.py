@@ -290,6 +290,11 @@ class SessionSummary(BaseModel):
     session_id: str
     title: str
     workspace: str | None = None
+    # Корень сервиса, которому принадлежит сессия (спека 2026-07-30, финальное
+    # ревью): для path-сессий — выбранный корень, для repo/named — default.
+    # Отдельно от workspace (clone/task-каталог) — они расходятся для repo/named.
+    # None — сессии, созданные до этого поля (миграции нет).
+    root: str | None = None
     updated_at: datetime
     runs_count: int
     last_state: str | None = None
