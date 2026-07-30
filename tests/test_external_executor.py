@@ -709,7 +709,7 @@ async def test_autonomy_gate_fires_before_task_branch(
 
     runner = TaskRunner(load_config(project_dir=ws, user_config_path=tmp_path / "no-user.yaml"), ws)
     # Сужаем тест до порядка гейтов: sandbox-проверка не должна требовать docker.
-    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
+    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self, **kw: None)
     with pytest.raises(SandboxError, match="cooperative"):
         await runner.run_once("задача", AutonomyMode.SUPERVISED, hooks=RunHooks())
     branches = subprocess.run(

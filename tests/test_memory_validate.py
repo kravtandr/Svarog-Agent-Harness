@@ -21,6 +21,66 @@ def test_create_over_existing_file_rejected(tmp_path: Path) -> None:
     assert error is not None and "уже существует" in error
 
 
+def test_create_over_existing_allowed_with_overwrite_flag(tmp_path: Path) -> None:
+    """Proposal-путь (S21, 31.07.2026): create по существующей странице = полная
+    замена под ревью человека — это операция слияния дублей."""
+    (tmp_path / "user").mkdir()
+    (tmp_path / "user" / "profile.md").write_text("есть\n", encoding="utf-8")
+    error = validate_change(
+        tmp_path,
+        _req("user/profile.md", MemoryOperation.CREATE, content="новое"),
+        allow_overwrite=True,
+    )
+    assert error is None
+
+
+def test_sources_overwrite_forbidden_even_with_flag(tmp_path: Path) -> None:
+    """Неизменяемость raw-слоя не обходится перезаписью и в proposal-пути."""
+    (tmp_path / "sources" / "spec").mkdir(parents=True)
+    (tmp_path / "sources" / "spec" / "a.md").write_text("исходник\n", encoding="utf-8")
+    error = validate_change(
+        tmp_path,
+        _req("sources/spec/a.md", MemoryOperation.CREATE, content="подмена"),
+        allow_overwrite=True,
+    )
+    assert error is not None and "неизменяемый" in error
+
+
+def test_proposal_accepts_full_page_rewrite(tmp_path: Path) -> None:
+    """validate_proposal пропускает слияние: create по выжившей + архивация дубля.
+    Именно эта пара 7× отбивалась валидатором в Dream-прогоне 31.07.2026."""
+    from svarog_harness.memory.proposal import validate_proposal
+
+    for slug in ("animateyou", "animate-you"):
+        page = tmp_path / "projects" / slug / "overview.md"
+        page.parent.mkdir(parents=True)
+        page.write_text(
+            f"---\nname: {slug}\nslug: {slug}\nsummary: бот\nstatus: active\n---\nтело\n",
+            encoding="utf-8",
+        )
+    proposal = MemoryProposalRequest(
+        title="Слияние дублей AnimateYou",
+        rationale="animateyou и animate-you описывают один бот",
+        changes=(
+            _req(
+                "projects/animateyou/overview.md",
+                MemoryOperation.CREATE,
+                content=(
+                    "---\nname: AnimateYou\nslug: animateyou\nsummary: бот генерации "
+                    "медиа\nstatus: active\n---\nОбъединённое описание.\n"
+                ),
+            ),
+            _req(
+                "projects/animate-you/overview.md",
+                MemoryOperation.UPDATE_FIELD,
+                field="status",
+                content="archived",
+            ),
+        ),
+    )
+    assert validate_proposal(tmp_path, proposal) == []
+
+
 def test_replace_section_without_section_rejected(tmp_path: Path) -> None:
     error = validate_change(
         tmp_path, _req("user/profile.md", MemoryOperation.REPLACE_SECTION, content="тело")

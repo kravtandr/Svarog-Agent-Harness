@@ -338,7 +338,7 @@ async def test_run_once_external_continues_agent_session(
 
     # Docker/bridge не поднимаем: интеграция executor↔container покрыта
     # test_external_executor/test_external_docker, здесь — шов session-прокидки.
-    monkeypatch.setattr(runner, "assert_sandbox_available", lambda: None)
+    monkeypatch.setattr(runner, "assert_sandbox_available", lambda **kw: None)
     monkeypatch.setattr(runner, "assert_external_autonomy_supported", lambda a: None)
     monkeypatch.setattr(runner, "build_agent_infra", _FakeInfra)
     monkeypatch.setattr(runner, "prepare_agent_launch", lambda infra: None)

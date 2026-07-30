@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from svarog_harness.memory.curator import (
+    KIND_DUPLICATE,
     KIND_EMPTY,
     KIND_INVALID,
     KIND_ORPHAN,
@@ -32,6 +33,36 @@ def test_clean_memory_no_findings(tmp_path: Path) -> None:
     _write(tmp_path, "user/profile.md", "# Профиль\nфакт\n")
     report = audit_memory(tmp_path, stale_after_days=30, today=_TODAY)
     assert report.findings == []
+
+
+def test_duplicate_slugs_detected(tmp_path: Path) -> None:
+    """S21 (30.07.2026): animateyou/animate-you — один проект под двумя slug'ами.
+    LLM-слой Dream такие дубли стабильно пропускал — теперь это факт аудита."""
+    _write(tmp_path, "projects/animateyou/overview.md", _page("animateyou"))
+    _write(tmp_path, "projects/animate-you/overview.md", _page("animate-you"))
+    report = audit_memory(tmp_path, stale_after_days=30, today=_TODAY)
+    dups = [f for f in report.findings if f.kind == KIND_DUPLICATE]
+    assert len(dups) == 1
+    assert "projects/animate-you/" in dups[0].path
+    assert "projects/animateyou/" in dups[0].path
+    assert "слияние" in dups[0].detail
+
+
+def test_duplicate_by_frontmatter_name(tmp_path: Path) -> None:
+    """Разные slug'и, но одинаковый name во frontmatter — тоже дубль."""
+    _write(tmp_path, "projects/mediabot/overview.md", _page("mediabot").replace(
+        "name: mediabot", "name: AnimateYou"))
+    _write(tmp_path, "projects/animate-you/overview.md", _page("animate-you").replace(
+        "name: animate-you", "name: AnimateYou"))
+    report = audit_memory(tmp_path, stale_after_days=30, today=_TODAY)
+    assert any(f.kind == KIND_DUPLICATE for f in report.findings)
+
+
+def test_distinct_projects_are_not_duplicates(tmp_path: Path) -> None:
+    _write(tmp_path, "projects/payflow/overview.md", _page("payflow"))
+    _write(tmp_path, "projects/ledger-x/overview.md", _page("ledger-x"))
+    report = audit_memory(tmp_path, stale_after_days=30, today=_TODAY)
+    assert not any(f.kind == KIND_DUPLICATE for f in report.findings)
 
 
 def test_orphan_project_dir(tmp_path: Path) -> None:

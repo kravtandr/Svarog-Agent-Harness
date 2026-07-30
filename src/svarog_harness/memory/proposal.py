@@ -76,7 +76,9 @@ def validate_proposal(memory_dir: Path, request: MemoryProposalRequest) -> list[
         if change.operation is MemoryOperation.DELETE:
             error = _delete_allowed(memory_dir, change)
         else:
-            error = validate_change(memory_dir, change, pending_changes=seen)
+            # allow_overwrite: create по существующей странице = слияние/полная
+            # замена под ревью человека (S21) — прямой remember так не умеет.
+            error = validate_change(memory_dir, change, pending_changes=seen, allow_overwrite=True)
         if error is not None:
             errors.append(f"правка {index}: {error}")
             continue

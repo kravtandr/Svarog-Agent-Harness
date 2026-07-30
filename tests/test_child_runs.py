@@ -343,7 +343,7 @@ async def test_delegate_child_to_external_agent(
         run_assembly, "adapter_for", lambda cfg: _ScriptAgent(_external_agent_script(tmp_path))
     )
     # Fail-closed гейт docker-only тестируется отдельно; здесь исполняем локально.
-    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self: None)
+    monkeypatch.setattr(TaskRunner, "assert_sandbox_available", lambda self, **kw: None)
     runner = TaskRunner(load_config(project_dir=ws), ws)
     outcome = await runner.run_once("делегируй", AutonomyMode.YOLO, hooks=RunHooks())
     assert outcome.state is RunState.COMPLETED

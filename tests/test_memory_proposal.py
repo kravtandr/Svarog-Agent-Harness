@@ -70,14 +70,17 @@ def test_delete_outside_memory_rejected(tmp_path: Path) -> None:
 
 
 def test_change_level_error_is_reported_with_index(tmp_path: Path) -> None:
-    """Ошибка отдельной правки называет её номер — иначе непонятно, какая из пачки."""
+    """Ошибка отдельной правки называет её номер — иначе непонятно, какая из пачки.
+
+    Пример ошибки — replace_section без section: create по существующему файлу
+    в proposal-пути теперь легален (allow_overwrite, слияние дублей S21)."""
     (tmp_path / "notes.md").write_text("есть\n", encoding="utf-8")
     errors = validate_proposal(
         tmp_path,
         _proposal(
             _append("other.md"),
             MemoryChangeRequest(
-                file="notes.md", operation=MemoryOperation.CREATE, content="перезапись"
+                file="notes.md", operation=MemoryOperation.REPLACE_SECTION, content="тело"
             ),
         ),
     )

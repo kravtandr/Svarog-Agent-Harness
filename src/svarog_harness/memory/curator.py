@@ -22,6 +22,7 @@ KIND_ORPHAN = "orphan"  # папка проекта без overview.md
 KIND_INVALID = "invalid"  # overview.md не проходит контракт
 KIND_STALE = "stale"  # status active, но updated давно
 KIND_EMPTY = "empty"  # пустой .md-файл
+KIND_DUPLICATE = "duplicate"  # два проекта с совпадающим slug/name после нормализации
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,55 @@ def _audit_projects(memory_dir: Path, *, stale_after_days: int, today: date) -> 
     return findings
 
 
+def _normalize_key(value: str) -> str:
+    """Ключ сравнения slug/name: регистр и разделители не различают проекты.
+
+    animateyou / animate-you / Animate_You → «animateyou». Прогон S21
+    (30.07.2026) показал, что LLM-слой Dream такие дубли стабильно
+    пропускает — ловим детерминированно.
+    """
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _audit_duplicates(memory_dir: Path) -> list[MemoryFinding]:
+    """Дубли проектов: совпадение нормализованного slug'а или frontmatter name."""
+    root = memory_dir / "projects"
+    if not root.is_dir():
+        return []
+    by_key: dict[str, list[str]] = {}
+    for slug_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        keys = {_normalize_key(slug_dir.name)}
+        overview = slug_dir / "overview.md"
+        if overview.is_file():
+            try:
+                frontmatter, _ = split_frontmatter(overview.read_text(encoding="utf-8"))
+            except OSError:
+                frontmatter = {}
+            name = str(frontmatter.get("name", "")).strip()
+            if name:
+                keys.add(_normalize_key(name))
+        for key in keys:
+            if key:
+                by_key.setdefault(key, []).append(f"projects/{slug_dir.name}/")
+    findings: list[MemoryFinding] = []
+    seen_groups: set[tuple[str, ...]] = set()
+    for paths in by_key.values():
+        group = tuple(dict.fromkeys(paths))
+        if len(group) < 2 or group in seen_groups:
+            continue
+        seen_groups.add(group)
+        findings.append(
+            MemoryFinding(
+                KIND_DUPLICATE,
+                ", ".join(group),
+                "похоже, один и тот же проект под разными slug'ами — сравни "
+                "содержимое и предложи слияние (архивируй дубль через "
+                "update_field, не удаляй)",
+            )
+        )
+    return findings
+
+
 def _audit_empty(memory_dir: Path) -> list[MemoryFinding]:
     findings: list[MemoryFinding] = []
     for md in sorted(memory_dir.rglob("*.md")):
@@ -110,5 +160,6 @@ def audit_memory(
     """Структурный аудит памяти-wiki. Детерминированный, только чтение."""
     today = today or date.today()
     findings = _audit_projects(memory_dir, stale_after_days=stale_after_days, today=today)
+    findings += _audit_duplicates(memory_dir)
     findings += _audit_empty(memory_dir)
     return MemoryAuditReport(findings=findings)

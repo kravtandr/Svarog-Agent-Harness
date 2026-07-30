@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from svarog_harness.config.schema import SvarogConfig
+from svarog_harness.config.schema import AutonomyMode, SvarogConfig
 from svarog_harness.memory.curator import MemoryAuditReport, MemoryFinding
 from svarog_harness.memory.dream import build_dream_task
 from svarog_harness.runtime.orchestrator import RunProfile, TaskRunner
@@ -107,6 +107,124 @@ def test_dream_task_without_findings_still_asks_for_semantic_pass() -> None:
     task = build_dream_task(MemoryAuditReport(findings=[]))
     assert "находок нет" in task
     assert "противореч" in task
+
+
+async def test_drain_memory_proposals_skips_duplicate_operations(tmp_path: Path) -> None:
+    """S21 (30.07.2026): Dream оформлял одну операцию несколькими proposal'ами
+    (junk.md удалялся 3×). Дубли схлопываются при материализации."""
+    from svarog_harness.memory import MemoryChangeRequest
+    from svarog_harness.memory.change import MemoryOperation
+    from svarog_harness.memory.proposal import MemoryProposalRequest
+    from svarog_harness.memory.proposal_manager import MemoryProposalManager
+    from svarog_harness.runtime.orchestrator import RunHooks
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    runner = _runner(tmp_path)
+    (tmp_path / "memory" / "junk.md").write_text("", encoding="utf-8")
+    page = tmp_path / "memory" / "projects" / "x" / "overview.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\nname: x\nslug: x\nsummary: s\nstatus: active\n---\nтело\n", encoding="utf-8"
+    )
+    delete_junk = MemoryChangeRequest(file="junk.md", operation=MemoryOperation.DELETE)
+    sink = [
+        MemoryProposalRequest(title="удалить junk", rationale="пустой", changes=(delete_junk,)),
+        MemoryProposalRequest(title="почистить junk", rationale="мусор", changes=(delete_junk,)),
+        MemoryProposalRequest(
+            title="другое дело",
+            rationale="архивация",
+            changes=(
+                MemoryChangeRequest(
+                    file="projects/x/overview.md",
+                    operation=MemoryOperation.UPDATE_FIELD,
+                    field="status",
+                    content="archived",
+                ),
+            ),
+        ),
+    ]
+
+    async def scenario(db: AsyncSession) -> int:
+        run = await TraceRecorder(db).start_run(
+            task="dream", autonomy="yolo", model="m", workspace=str(tmp_path)
+        )
+        await runner.drain_memory_proposals(db, sink, run.id, RunHooks())
+        return await MemoryProposalManager(db, tmp_path / "memory").pending_count()
+
+    pending = await runner.with_db(scenario)
+    assert pending == 2  # дубль «почистить junk» схлопнут
+
+
+async def test_dream_runs_native_even_with_external_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0020: Dream — нативный run при ЛЮБОМ executor. При executor=external
+    прежний код молча гнал DREAM-профиль во внешний мост, где есть remember
+    (запись в память!) и нет propose_memory_change (трейс 30.07.2026: Dream
+    через opencode создавал index.md). Теперь профиль ≠ DEFAULT принуждает
+    native loop, а docker-гейт внешнего агента к Dream не применяется."""
+    from svarog_harness.llm.provider import CompletionResult, Usage
+    from svarog_harness.runtime import run_assembly
+    from svarog_harness.runtime.orchestrator import RunHooks
+    from svarog_harness.sandbox import SandboxError
+    from svarog_harness.storage.models import RunState
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cfg = SvarogConfig.model_validate(
+        {
+            "models": {
+                "default": "main",
+                "providers": {"main": {"base_url": "http://localhost:9", "model": "m"}},
+            },
+            "memory": {"path": str(tmp_path / "memory")},
+            "storage": {"db_path": str(tmp_path / "svarog.sqlite3")},
+            "sandbox": {"type": "local-trusted"},
+            "executor": {
+                "type": "external",
+                "external": {
+                    "adapter": "opencode",
+                    "image": "svarog/agent-opencode:latest",
+                    "base_url": "https://openrouter.ai/api",
+                    "model": "z-ai/glm-5.2",
+                },
+            },
+        }
+    )
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+    class OneShotProvider:
+        async def complete(self, messages, tools, *, on_text_delta=None):
+            return CompletionResult(content="проход завершён, предложений нет", usage=Usage(5, 5))
+
+    monkeypatch.setattr(
+        run_assembly,
+        "default_provider",
+        lambda models_cfg, store=None, workspace=None: OneShotProvider(),
+    )
+    runner = TaskRunner(cfg, ws)
+
+    # DEFAULT-профиль с external+local-trusted обязан падать fail-closed как раньше.
+    with pytest.raises(SandboxError):
+        await runner.run_once("обычная задача", AutonomyMode.YOLO, hooks=RunHooks())
+
+    # DREAM-профиль — нативный loop, внешний агент не поднимается вовсе.
+    outcome = await runner.run_once(
+        "консолидация", AutonomyMode.YOLO, hooks=RunHooks(), profile=RunProfile.DREAM
+    )
+    assert outcome.state is RunState.COMPLETED
+    assert "предложений нет" in outcome.final_answer
+
+
+def test_dream_task_mandates_reading_pages_and_forbids_duplicate_proposals() -> None:
+    """S21 (30.07.2026): семантический проход мимо — модель судила по названиям
+    и плодила дубли предложений. Промт обязан требовать чтение содержимого и
+    запрещать повторную операцию по тому же файлу."""
+    task = build_dream_task(MemoryAuditReport(findings=[]))
+    assert "read_memory" in task
+    assert "КАЖДУЮ страницу" in task
+    assert "duplicate" in task  # как обрабатывать находку аудита о дубле
+    assert "РОВНО один proposal" in task
 
 
 # --- системная джоба под гейтом конфига (блок C §7) --------------------------

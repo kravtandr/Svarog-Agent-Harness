@@ -234,21 +234,28 @@ class TaskRunner:
         finally:
             await engine.dispose()
 
-    def assert_sandbox_available(self) -> None:
+    def assert_sandbox_available(self, *, external_run: bool | None = None) -> None:
         """Fail-closed (ADR-0013/0014): docker-режим без доступного runtime — отказ.
 
         Для standard-тенанта sandbox.type заклампан в docker (ADR-0013), поэтому
         отсутствие docker/podman не откатывается на хостовое исполнение, а
         останавливает run явно и рано — до workspace prep и подключения MCP.
+
+        external_run — пойдёт ли ИМЕННО ЭТОТ run через внешний executor: Dream
+        (RunProfile.DREAM) исполняется нативным loop'ом даже при
+        executor.type='external' (ADR-0020), и docker-требование внешнего
+        агента к нему не относится. None — судим по конфигу (CLI-гейты).
         """
         if self._cfg.sandbox.type == "docker" and find_docker() is None:
             raise SandboxError(
                 "docker/podman недоступен, а sandbox.type=docker (fail-closed): "
                 "запуск отклонён без отката на local-trusted (ADR-0013)"
             )
+        if external_run is None:
+            external_run = self._cfg.executor.type == "external"
         # Внешний агент (ADR-0016 §2): границу безопасности держит только
         # sandbox-периметр, поэтому local-trusted для него не существует.
-        if self._cfg.executor.type == "external" and self._cfg.sandbox.type != "docker":
+        if external_run and self._cfg.sandbox.type != "docker":
             raise SandboxError(
                 "executor.type='external' требует sandbox.type='docker' (fail-closed, "
                 "ADR-0016): внешний агент исполняется только внутри контейнера"
@@ -584,21 +591,26 @@ class TaskRunner:
         resources — тёплый sandbox сессии (prepare_session_resources): env/
         infra/MCP не строятся и не убираются этим run'ом, ими владеет сессия.
         """
-        self.assert_sandbox_available()  # fail-closed до любой работы (ADR-0013)
+        # Dream (и любой не-DEFAULT профиль) всегда исполняется нативным
+        # loop'ом: у внешнего моста нет propose_memory_change, зато есть
+        # remember — external-путь дал бы Dream'у ЗАПИСЬ в память в обход
+        # read-only контракта (ADR-0020; трейс 30.07.2026: Dream через
+        # opencode создавал index.md через svarog_remember).
+        external = self._cfg.executor.type == "external" and profile is RunProfile.DEFAULT
+        # fail-closed до любой работы (ADR-0013)
+        self.assert_sandbox_available(external_run=external)
         assert_workspace_isolated(
             self._cfg, self._workspace, allow_overlap=self._allow_layout_overlap
         )  # раскладка (ADR-0015 §0.3)
         self._warn_layout_tradeoff(hooks)
         # Fail-closed гейты внешнего агента — ДО Flow C: отказ конфигурации не
         # должен оставлять мусорную task-ветку (S15a, кампания 21.07.2026).
-        if self._cfg.executor.type == "external":
+        if external:
             self.assert_external_autonomy_supported(autonomy)
         flow = WorkspaceFlow(GitRepo(self._workspace), self._cfg.git)
         prep = await flow.start(task)
         if hooks.on_workspace_prep is not None:
             hooks.on_workspace_prep(prep)
-
-        external = self._cfg.executor.type == "external"
         owned = resources is None  # владеем ли env/infra/MCP этим прогоном
         # MCP внешнему агенту не пробрасывается (у него свой MCP-сервер
         # Svarog через bridge, §4): host-side серверы зря не поднимаем.
@@ -1240,14 +1252,33 @@ class TaskRunner:
         run_id: str,
         hooks: RunHooks,
     ) -> None:
-        """Материализовать предложения правок памяти (блок C, ADR-0020)."""
+        """Материализовать предложения правок памяти (блок C, ADR-0020).
+
+        Перекрывающиеся предложения одного прогона схлопываются: Dream
+        (S21, 30.07.2026) оформлял одну и ту же операцию несколькими
+        proposal'ами (junk.md удалялся 3×) — на ревью это мусор, а частичное
+        одобрение дублей ломает идемпотентность применения.
+        """
         if not sink:
             return
         mem_dir = memory_dir(self._cfg)
         if mem_dir is None or not mem_dir.is_dir():
             return
         manager = MemoryProposalManager(db, mem_dir)
+        seen_ops: set[tuple[str, str, str, str, str]] = set()
         for request in sink:
+            signature = {
+                (c.file, c.operation.value, c.content, c.section, c.field)
+                for c in request.changes
+            }
+            if signature and signature <= seen_ops:
+                if hooks.on_notify is not None:
+                    hooks.on_notify(
+                        "memory.proposal",
+                        f"пропущен дубль предложения «{request.title}» (те же операции)",
+                    )
+                continue
+            seen_ops |= signature
             row = await manager.persist(replace(request, source_run_id=run_id))
             if hooks.on_memory_proposal is not None:
                 hooks.on_memory_proposal(row)

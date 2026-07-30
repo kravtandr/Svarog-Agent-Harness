@@ -23,6 +23,7 @@ def validate_change(
     request: MemoryChangeRequest,
     *,
     pending_changes: Mapping[str, list[MemoryChangeRequest]] | None = None,
+    allow_overwrite: bool = False,
 ) -> str | None:
     """Отловить предсказуемые ошибки применения до постановки в очередь.
 
@@ -34,6 +35,13 @@ def validate_change(
     накатываются на дисковое содержимое через тот же `_new_content`, которым
     пользуется single-writer, — иначе вторая `update_field` в цепочке не видит
     поле, добавленное первой. None — проверять строго по диску.
+
+    `allow_overwrite` — разрешить `create` по существующему файлу (полная
+    перезапись). Прямой путь `remember` держит запрет (защита от случайной
+    потери данных агентом), а proposal-путь Dream включает: перезапись — это
+    ровно операция слияния дублей, и человек видит полный новый текст на
+    ревью (S21, 31.07.2026). На sources/* не действует — исходники
+    неизменяемы в обоих путях.
     """
     pending = dict(pending_changes or {})
     try:
@@ -63,14 +71,28 @@ def validate_change(
         )
 
     if request.operation is MemoryOperation.CREATE and target.exists():
-        return (
-            f"файл '{request.file}' уже существует; create перезаписывает файл "
-            f"целиком — используй append или replace_section"
-        )
+        if request.file.split("/", 1)[0] == "sources":
+            # Неизменяемость raw-слоя не обходится и перезаписью в proposal.
+            return (
+                f"'{request.file}' в sources/ — неизменяемый исходник; "
+                f"правки запрещены, создай новый файл через create"
+            )
+        if not allow_overwrite:
+            return (
+                f"файл '{request.file}' уже существует; create перезаписывает файл "
+                f"целиком — используй append или replace_section"
+            )
 
     if request.operation is MemoryOperation.REPLACE_SECTION:
         if not request.section:
-            return "для replace_section нужно указать section"
+            hint = (
+                "; чтобы заменить страницу ЦЕЛИКОМ (например при слиянии "
+                "дублей), используй operation=create — в proposal он "
+                "перезаписывает файл"
+                if allow_overwrite
+                else ""
+            )
+            return f"для replace_section нужно указать section (заголовок секции без #){hint}"
         if target.exists():
             text = target.read_text(encoding="utf-8")
             if not has_section(text, request.section):
