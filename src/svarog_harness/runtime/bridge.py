@@ -284,9 +284,11 @@ class RunBridge:
             self._relay_response(req, upstream)
         finally:
             upstream.close()
-        self.usage.requests += 1
 
     def _relay_response(self, req: BaseHTTPRequestHandler, upstream: httpx.Response) -> None:
+        # Инвариант: usage коммитится ДО байтов, завершающих ответ клиенту
+        # (терминальный чанк / тело). Иначе клиент, дочитавший ответ, может
+        # застать несвежие счётчики — гонка ловилась флейком в CI.
         meter = _UsageMeter(self.upstream.wire_format)
         content_type = upstream.headers.get("content-type", "")
         req.send_response(upstream.status_code)
@@ -301,16 +303,21 @@ class RunBridge:
                 meter.feed(chunk)
                 req.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                 req.wfile.flush()
+            self._commit_usage(meter)
             req.wfile.write(b"0\r\n\r\n")
         else:
             payload = upstream.read()
             meter.feed(payload)
+            self._commit_usage(meter)
             req.send_header("Content-Length", str(len(payload)))
             req.end_headers()
             req.wfile.write(payload)
+
+    def _commit_usage(self, meter: "_UsageMeter") -> None:
         meter.finish()
         self.usage.input_tokens += meter.input_tokens
         self.usage.output_tokens += meter.output_tokens
+        self.usage.requests += 1
         if self._over_budget():
             self.usage.budget_exceeded = True
 

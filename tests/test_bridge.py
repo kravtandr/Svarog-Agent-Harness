@@ -5,6 +5,7 @@ grace → suspend, decision cache, инфраструктура run'а."""
 import asyncio
 import json
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -173,6 +174,37 @@ async def test_proxy_meters_sse_stream(upstream: _Upstream) -> None:
         assert "message_delta" in response.text  # стрим дошёл до клиента
         assert bridge.usage.input_tokens == 50
         assert bridge.usage.output_tokens == 30  # кумулятивный delta
+    finally:
+        bridge.stop()
+
+
+async def test_sse_usage_committed_before_client_sees_eof(
+    upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Флейк CI (31.07.2026): usage коммитился ПОСЛЕ терминального чанка —
+    клиент, дочитавший стрим, мог застать нулевые счётчики. Замедленный
+    finish() делает гонку детерминированной: при верном порядке терминальный
+    чанк уходит только после коммита, и клиент обязан видеть свежий usage."""
+    original_finish = _UsageMeter.finish
+
+    def slow_finish(self: _UsageMeter) -> None:
+        time.sleep(0.2)
+        original_finish(self)
+
+    monkeypatch.setattr(_UsageMeter, "finish", slow_finish)
+    bridge = _bridge(upstream.url, loop=asyncio.get_running_loop())
+    bridge.start()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{bridge.local_url()}/v1/messages/sse",
+                headers={"Authorization": f"Bearer {bridge.token}"},
+                json={"stream": True},
+            )
+        assert response.status_code == 200
+        assert bridge.usage.input_tokens == 50
+        assert bridge.usage.output_tokens == 30
+        assert bridge.usage.requests == 1
     finally:
         bridge.stop()
 
