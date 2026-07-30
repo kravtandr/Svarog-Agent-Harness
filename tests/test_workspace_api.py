@@ -96,3 +96,25 @@ def test_single_service_mode_has_no_fs_and_rejects_path(tmp_path: Path) -> None:
     plain = TestClient(create_app(service))
     assert plain.get("/fs").status_code == 404
     assert plain.post("/sessions", json={"title": "x", "path": str(root)}).status_code == 422
+
+
+def test_hub_registry_survives_restart(tmp_path: Path) -> None:
+    """Рестарт serve: новый хаб с тем же реестром маршрутизирует старую сессию."""
+    default_root = tmp_path / "default"
+    _write_root(default_root, tmp_path / "default.db")
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    registry_path = tmp_path / "roots.json"
+
+    def make_client() -> TestClient:
+        hub = WorkspaceHub(
+            load_config(project_dir=default_root),
+            default_root,
+            registry=WorkspaceRootsRegistry(registry_path),
+        )
+        return TestClient(create_app(resolver=hub))
+
+    session_id = make_client().post("/sessions", json={"path": str(other)}).json()["session_id"]
+    reborn = make_client()  # «рестарт»: свежий хаб, тот же файл реестра
+    thread = reborn.get(f"/sessions/{session_id}/messages")
+    assert thread.status_code == 200

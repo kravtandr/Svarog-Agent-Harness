@@ -1457,8 +1457,10 @@ def serve(
         import uvicorn
 
         from svarog_harness.config.paths import registry_path
-        from svarog_harness.gateway import GatewayService, JwtResolver, TenantHub
+        from svarog_harness.gateway import JwtResolver, TenantHub
         from svarog_harness.gateway.api import create_app
+        from svarog_harness.gateway.hub import WorkspaceHub
+        from svarog_harness.gateway.roots import WorkspaceRootsRegistry
         from svarog_harness.tenant import TenantRegistry
     except ImportError:
         console.print(
@@ -1481,7 +1483,12 @@ def serve(
             api = create_app(hub=hub)
             mode = f"multi-tenant (bearer) | реестр: {registry_path(cfg)}"
     else:
-        api = create_app(GatewayService(cfg, workspace), bearer_token=token)
+        # Single-tenant — через WorkspaceHub: рабочая папка выбирается в UI
+        # при создании чата (спека 2026-07-30), корень запуска — default_root.
+        workspace_registry = WorkspaceRootsRegistry(Path("~/.svarog/workspace-roots.json").expanduser())
+        api = create_app(
+            resolver=WorkspaceHub(cfg, workspace, registry=workspace_registry, bearer_token=token)
+        )
         mode = f"single-tenant | workspace: {workspace}"
     console.print(
         f"[green]Svarog gateway[/green] http://{host}:{port} | {mode}\n"
