@@ -95,3 +95,69 @@ describe("WorkspacePicker", () => {
     expect(onCancel).toHaveBeenCalled();
   });
 });
+
+describe("диалог пересечения с control-plane", () => {
+  function setupOverlap() {
+    const api = fakeApi({
+      fsRecent: vi.fn().mockResolvedValue([
+        {
+          path: "/home/u/proj/жив",
+          exists: true,
+          last_used: "2026-07-30T10:00:00Z",
+        },
+      ]),
+      fsInspect: vi.fn().mockImplementation((path: string) =>
+        Promise.resolve({
+          path,
+          overlap_warnings: [
+            "storage.db_path (…) пересекается с workspace (…)",
+          ],
+          blocking: true,
+        }),
+      ),
+    });
+    const onPick = vi.fn().mockResolvedValue(undefined);
+    const onCancel = vi.fn();
+    render(<WorkspacePicker api={api} onPick={onPick} onCancel={onCancel} />);
+    return { api, onPick, onCancel };
+  }
+
+  it("блокирующее пересечение показывает диалог вместо создания чата", async () => {
+    const { onPick } = setupOverlap();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj/жив" }),
+    );
+    expect(
+      await screen.findByText("В этой папке живут данные Сварога"),
+    ).toBeInTheDocument();
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it("«Принять риски» создаёт чат с accept_overlap", async () => {
+    const { onPick } = setupOverlap();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj/жив" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Принять риски и продолжить",
+      }),
+    );
+    expect(onPick).toHaveBeenCalledWith("/home/u/proj/жив", true);
+  });
+
+  it("«Выбрать другую папку» возвращает к пикеру без создания", async () => {
+    const { onPick } = setupOverlap();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "/home/u/proj/жив" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Выбрать другую папку" }),
+    );
+    expect(
+      screen.queryByText("В этой папке живут данные Сварога"),
+    ).not.toBeInTheDocument();
+    expect(await screen.findByText("Где работать?")).toBeInTheDocument();
+    expect(onPick).not.toHaveBeenCalled();
+  });
+});
