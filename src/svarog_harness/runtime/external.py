@@ -53,6 +53,18 @@ _RUN_RULES_PREAMBLE = (
     "вопросом или анонсом будущей работы run не завершай.\n\n"
 )
 
+# Инфрафлейк S17 (прогон 30.07.2026, воспроизводился 3/3): opencode после
+# упавшего tool может молча оборвать стрим — exit 0 без result-события и без
+# финального текста, хотя сессия агента жива. Вместо провала run'а — ровно
+# одно автопродолжение той же сессии этим prompt'ом.
+_MAX_RECOVERY_ATTEMPTS = 2
+_STREAM_RECOVERY_PROMPT = (
+    "[Svarog] Твой предыдущий ход оборвался до финального ответа (стрим "
+    "прервался). Продолжи задачу с места остановки и заверши её финальным "
+    "ответом текстом. Если инструмент вернул ошибку — не долби тот же вызов: "
+    "честно объясни ошибку и предложи, что делать дальше."
+)
+
 # Метки внешнего executor'а в Run.meta: по ним resume отличает внешний run
 # (фаза 3) и trace-viewer показывает исполнителя.
 EXECUTOR_META_KEY = "executor"
@@ -193,6 +205,34 @@ class ExternalAgentExecutor:
         )
         command = shlex.join(self._adapter.command(launch))
         result, gate_suspended = await self._stream_with_suspend(command, on_line)
+
+        recovery_attempts = 0
+        while (
+            not gate_suspended
+            and not state.saw_result
+            and result.exit_code == 0
+            and not result.timed_out
+            and state.agent_session is not None
+            and self._adapter.capabilities().resume
+            and recovery_attempts < _MAX_RECOVERY_ATTEMPTS
+        ):
+            # Обрыв стрима без result при живой сессии (см. _STREAM_RECOVERY_PROMPT).
+            # До двух продолжений: агент в продолжении может снова упереться в
+            # tool-fail (S17: read → bash cat того же пути) и оборвать стрим
+            # повторно. Синтетический prompt пишется в trace user-сообщением —
+            # продолжение видно в истории, а не выглядит телепатией агента.
+            recovery_attempts += 1
+            await self._recorder.add_message(
+                run, "user", {"content": _STREAM_RECOVERY_PROMPT}
+            )
+            relaunch = AgentLaunch(
+                task=_STREAM_RECOVERY_PROMPT,
+                session=state.agent_session,
+                mcp_config=self._mcp_config,
+                settings_file=self._settings_file,
+            )
+            command = shlex.join(self._adapter.command(relaunch))
+            result, gate_suspended = await self._stream_with_suspend(command, on_line)
 
         # Агент завершился, не отчитавшись по начатым tool calls — фиксируем.
         for record in state.pending.values():

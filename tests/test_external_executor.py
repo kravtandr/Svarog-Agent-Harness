@@ -281,6 +281,99 @@ async def test_end_to_end_completed_run(db: AsyncSession, tmp_path: Path) -> Non
     assert call.result == {"output": "hello.py"}
 
 
+async def test_stream_without_result_auto_continues_once(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Инфрафлейк S17 (30.07.2026): opencode после tool-fail обрывает стрим —
+    exit 0 без result-события. Сессия жива → executor делает ровно одно
+    автопродолжение (--resume той же сессии), и run завершается ответом агента."""
+    marker = tmp_path / "second_pass"
+    first = [_INIT, _ASSISTANT, _TOOL_RESULT]  # обрыв: result-события нет
+    second = [_INIT, {**_RESULT, "result": "после обрыва: граница workspace, файл не читается"}]
+    script = tmp_path / "flaky_agent.py"
+    script.write_text(
+        "import json, sys, pathlib\n"
+        f"marker = pathlib.Path({str(marker)!r})\n"
+        f"second = json.loads({json.dumps(json.dumps(second, ensure_ascii=False))})\n"
+        f"first = json.loads({json.dumps(json.dumps(first, ensure_ascii=False))})\n"
+        "lines = second if marker.exists() else first\n"
+        "marker.write_text('x')\n"
+        "for obj in lines:\n"
+        "    print(json.dumps(obj, ensure_ascii=False))\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    adapter = _ScriptAdapter([sys.executable, str(script)])
+    executor = ExternalAgentExecutor(
+        adapter,
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+    )
+    outcome = await executor.run("прочитай файл", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.error is None
+    assert "после обрыва" in outcome.final_answer
+    # Ровно два запуска: исходный + одно продолжение той же сессии агента.
+    assert len(adapter.launches) == 2
+    assert adapter.launches[1].session == "sess-1"
+    # Синтетический prompt продолжения виден в trace user-сообщением.
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    user_texts = [m.content.get("content", "") for m in messages if m.role == "user"]
+    assert any("оборвался" in t for t in user_texts)
+
+
+async def test_stream_recovery_retries_twice_then_gives_up(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Два обрыва подряд (S17B: read-fail → cat-fail) → успех с третьей подачи;
+    больше _MAX_RECOVERY_ATTEMPTS продолжений не бывает."""
+    counter = tmp_path / "attempts"
+    ok = [_INIT, {**_RESULT, "result": "финал с третьей попытки"}]
+    broken = [_INIT, _ASSISTANT, _TOOL_RESULT]
+    script = tmp_path / "flaky2_agent.py"
+    script.write_text(
+        "import json, sys, pathlib\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "n = int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(n + 1))\n"
+        f"ok = json.loads({json.dumps(json.dumps(ok, ensure_ascii=False))})\n"
+        f"broken = json.loads({json.dumps(json.dumps(broken, ensure_ascii=False))})\n"
+        "lines = ok if n >= 2 else broken\n"
+        "for obj in lines:\n"
+        "    print(json.dumps(obj, ensure_ascii=False))\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    adapter = _ScriptAdapter([sys.executable, str(script)])
+    executor = ExternalAgentExecutor(
+        adapter,
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    assert outcome.final_answer == "финал с третьей попытки"
+    assert len(adapter.launches) == 3  # исходный + ровно два продолжения
+
+
+async def test_stream_without_result_no_continue_on_nonzero_exit(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Ненулевой exit — реальная ошибка агента, автопродолжение не маскирует её."""
+    executor = _executor(db, tmp_path, [_INIT, _ASSISTANT, _TOOL_RESULT], exit_code=1)
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.FAILED
+    assert "кодом 1" in (outcome.error or "")
+
+
 async def test_reasoning_fallback_when_no_text_events(db: AsyncSession, tmp_path: Path) -> None:
     """gpt-oss/harmony: ответ уходит только в reasoning-канал (content пуст) —
     финал берётся из последнего reasoning, а не теряется как «(без ответа)»."""
