@@ -1,11 +1,13 @@
 """Тесты WorkspaceHub: мультиплекс GatewayService по корням (спека 2026-07-30)."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.gateway.hub import RootGoneError, RootPathError, WorkspaceHub
+from svarog_harness.gateway.models import CreateSessionRequest
 from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 
 
@@ -93,3 +95,62 @@ def test_authenticate_bearer(hub: WorkspaceHub) -> None:
     assert hub.authenticate("Bearer не-тот") is None
     assert hub.authenticate("Bearer секрет") is not None
     assert hub.authenticate(None, query_token="секрет") is not None
+
+
+def test_list_sessions_aggregates_and_dedups(hub: WorkspaceHub, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    # Общая БД с default-корнем — случай «корень без своего db_path»:
+    # одна сессия видна из двух сервисов, список не должен двоиться.
+    _write_root(other, tmp_path / "default.db")
+    default_svc = hub.service_for(tmp_path / "default")
+    other_svc = hub.service_for(other)
+
+    async def scenario() -> list:
+        await default_svc.create_session(title="в default")
+        await other_svc.create_session(title="в other")
+        return await hub.list_sessions()
+
+    listed = asyncio.run(scenario())
+    assert [s.title for s in listed] == ["в other", "в default"]  # свежие сверху, без дублей
+    assert listed[0].workspace == str(other.resolve())
+
+
+def test_list_sessions_skips_gone_roots(hub: WorkspaceHub, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    svc = hub.service_for(other)
+    asyncio.run(svc.create_session(title="обречённая"))
+    (other / "svarog.yaml").unlink()
+    other.rmdir()
+    hub._services.pop(other.resolve())  # рестарт serve: сервис не материализован
+    titles = [s.title for s in asyncio.run(hub.list_sessions())]
+    assert "обречённая" not in titles  # корень пропущен, а не 500
+
+
+def test_list_fs_dirs_only_hidden_filtered(hub: WorkspaceHub, tmp_path: Path) -> None:
+    base = tmp_path / "обзор"
+    (base / "видимая").mkdir(parents=True)
+    (base / ".скрытая").mkdir()
+    (base / "файл.txt").write_text("x", encoding="utf-8")
+    listing = hub.list_fs(str(base))
+    assert [e.name for e in listing.entries] == ["видимая"]
+    assert listing.path == str(base.resolve())
+    assert listing.parent == str(base.resolve().parent)
+    with pytest.raises(RootPathError):
+        hub.list_fs(str(base / "нет-такого"))
+
+
+def test_recent_roots_marks_missing(hub: WorkspaceHub, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+    hub.registry.record_session("s1", other)
+    (other / "svarog.yaml").unlink()
+    other.rmdir()
+    recents = hub.recent_roots()
+    assert [(r.path, r.exists) for r in recents] == [(str(other), False)]
+
+
+def test_create_requests_path_exclusive() -> None:
+    with pytest.raises(ValueError, match="path"):
+        CreateSessionRequest(title="x", path="/tmp", workspace="named")
+    assert CreateSessionRequest(title="x", path="/tmp").path == "/tmp"

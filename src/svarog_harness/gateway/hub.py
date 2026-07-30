@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from svarog_harness.config.loader import load_config
 from svarog_harness.config.paths import resolve_tenant_config, tenant_home
 from svarog_harness.config.schema import SvarogConfig
+from svarog_harness.gateway.models import FsEntryView, FsListingView, RecentRootView, SessionSummary
 from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 from svarog_harness.gateway.service import GatewayService
 from svarog_harness.tenant import TenantRegistry
@@ -291,3 +294,59 @@ class WorkspaceHub:
         """Закрыть тёплые sandbox'ы всех материализованных корней (ADR-0017)."""
         for svc in self._services.values():
             await svc.close_warm_sessions()
+
+    async def list_sessions(self, limit: int = 50) -> list[SessionSummary]:
+        """Агрегированный список: веер по корням реестра + default, дедуп по id.
+
+        Корни без своего db_path делят пользовательскую БД — одна сессия
+        приходит из нескольких сервисов; ряды идентичны (meta в строке БД),
+        так что первый занявший id выигрывает. Исчезнувший корень пропускаем:
+        его сессии вернутся вместе с папкой (реестр — кэш, не истина).
+        """
+        seen: dict[str, SessionSummary] = {}
+        candidates = [self.default_root] + [root for root, _ in self.registry.roots()]
+        for root in candidates:
+            try:
+                svc = self.service_for(root)
+            except RootPathError:
+                continue
+            for summary in await svc.list_sessions(limit=limit):
+                seen.setdefault(summary.session_id, summary)
+        ordered = sorted(seen.values(), key=lambda s: s.updated_at, reverse=True)
+        return ordered[:limit]
+
+    def list_fs(self, path: str | None) -> FsListingView:
+        """Подкаталоги для пикера: только каталоги, скрытые отфильтрованы."""
+        base = Path(path).expanduser() if path else Path.home()
+        try:
+            base = base.resolve(strict=True)
+        except OSError as exc:
+            raise RootPathError(f"нет такого каталога: {path}") from exc
+        if not base.is_dir():
+            raise RootPathError(f"не каталог: {base}")
+        try:
+            children = sorted(base.iterdir(), key=lambda p: p.name.lower())
+        except PermissionError as exc:
+            raise RootPathError(f"нет доступа: {base}") from exc
+        entries: list[FsEntryView] = []
+        for child in children:
+            try:
+                if child.name.startswith(".") or not child.is_dir():
+                    continue
+                accessible = os.access(child, os.R_OK | os.X_OK)
+            except OSError:
+                continue  # битый symlink и подобное — просто пропускаем
+            entries.append(FsEntryView(name=child.name, path=str(child), accessible=accessible))
+        parent = None if base == base.parent else str(base.parent)
+        return FsListingView(path=str(base), parent=parent, entries=entries)
+
+    def recent_roots(self) -> list[RecentRootView]:
+        """Недавние корни для пикера; несуществующие помечены, не выброшены."""
+        return [
+            # registry.roots() отдаёт ISO-строку (сырое поле JSON) — парсим
+            # в datetime здесь, а не меняем контракт реестра ради одного поля.
+            RecentRootView(
+                path=str(root), exists=root.is_dir(), last_used=datetime.fromisoformat(ts)
+            )
+            for root, ts in self.registry.roots()
+        ]
