@@ -127,6 +127,21 @@ class RecentRootView(BaseModel):
     last_used: datetime
 
 
+class RootInspectView(BaseModel):
+    """Проверка папки-кандидата до создания чата (ADR-0015 §0.3 + ADR-0018).
+
+    blocking=True — без явного согласия run в этой папке будет отклонён
+    (control-plane пересекается с workspace, sandbox не local-trusted):
+    пикер показывает диалог «принять риски». blocking=False с непустыми
+    warnings — режим local-trusted, где пересечение — документированный
+    trade-off и не блокирует.
+    """
+
+    path: str
+    overlap_warnings: list[str]
+    blocking: bool
+
+
 class FileEntry(BaseModel):
     name: str
     is_dir: bool
@@ -170,6 +185,9 @@ class CreateSessionRequest(BaseModel):
     # Абсолютный путь папки-корня (single-tenant, спека 2026-07-30);
     # взаимоисключающ с repo и workspace — это третий источник workspace.
     path: str | None = None
+    # Человек явно принял пересечение workspace с control-plane (ADR-0018):
+    # runs сессии пойдут с allow_layout_overlap. Только single-tenant.
+    accept_overlap: bool = False
 
     @model_validator(mode="after")
     def _one_workspace_source(self) -> "CreateSessionRequest":

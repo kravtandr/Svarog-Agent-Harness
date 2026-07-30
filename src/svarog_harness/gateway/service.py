@@ -218,6 +218,7 @@ class GatewayService:
         *,
         cfg: SvarogConfig | None = None,
         run_meta: dict[str, object] | None = None,
+        allow_overlap: bool = False,
     ) -> TaskRunner:
         """Runner для workspace run'а; workspace сервиса — общий self._runner.
 
@@ -226,6 +227,10 @@ class GatewayService:
         уже параметризована по workspace (ADR-0012). Общий runner переиспользуется
         только когда нет ни override-конфига, ни run_meta — иначе у run'а
         своя, производная конфигурация (override сообщения, задача 1).
+
+        allow_overlap — сессия с принятым пересечением control-plane
+        (ADR-0018): runner строится со своим флагом и общий self._runner
+        (собранный без флага) не переиспользуется.
         """
         ws = workspace.expanduser().resolve()
         # apply_override возвращает тот же объект, если override пуст (overrides.py):
@@ -233,10 +238,17 @@ class GatewayService:
         if (
             (cfg is None or cfg is self.cfg)
             and run_meta is None
+            and not allow_overlap
             and ws == self.workspace.expanduser().resolve()
         ):
             return self._runner
-        return TaskRunner(cfg or self.cfg, ws, role=self.role, run_meta=run_meta)
+        return TaskRunner(
+            cfg or self.cfg,
+            ws,
+            role=self.role,
+            run_meta=run_meta,
+            allow_layout_overlap=allow_overlap,
+        )
 
     async def _provision_workspace(
         self, task: str, repo: RepoSpec | None, name: str | None
@@ -290,6 +302,7 @@ class GatewayService:
         workspace: Path,
         autonomy: AutonomyMode,
         override: RunOverride = RunOverride(),
+        allow_overlap: bool = False,
     ) -> _WarmSlot | None:
         """Слот тёплого sandbox сессии; None — фича выключена (ttl=0).
 
@@ -318,7 +331,9 @@ class GatewayService:
             # resume'у (ADR-0015 §0.4).
             cfg, prices = await self._derive(override)
             run_meta = run_meta_for(override, prices)
-            runner = self._runner_for(workspace, cfg=cfg, run_meta=run_meta)
+            runner = self._runner_for(
+                workspace, cfg=cfg, run_meta=run_meta, allow_overlap=allow_overlap
+            )
             resources = await runner.prepare_session_resources(autonomy)
             slot = _WarmSlot(
                 workspace=workspace,
@@ -537,11 +552,16 @@ class GatewayService:
         же провайдера — а approval-гейт — это всегда resume (задача 2).
         """
 
-        async def action(db: AsyncSession) -> tuple[str | None, dict[str, object]]:
+        async def action(db: AsyncSession) -> tuple[str | None, dict[str, object], bool]:
             run = await find_run_by_prefix(db, run_id)
-            return run.workspace, dict(run.meta or {})
+            # Согласие на пересечение с control-plane — свойство сессии
+            # (ADR-0018): resume обязан собрать runner с тем же флагом, что и
+            # старт, иначе одобренный run упадёт на гейте раскладки.
+            session = await db.get(Session, run.session_id)
+            allow = bool(((session.meta if session else None) or {}).get("allow_overlap"))
+            return run.workspace, dict(run.meta or {}), allow
 
-        workspace, meta = await self._read(action)
+        workspace, meta, allow_overlap = await self._read(action)
         override = RunOverride.from_meta(meta)
         cfg = (
             apply_override(self.cfg, override, prices=prices_from_meta(meta))
@@ -549,8 +569,10 @@ class GatewayService:
             else None
         )
         if not workspace:
-            return self._runner if cfg is None else self._runner_for(self.workspace, cfg=cfg)
-        return self._runner_for(Path(workspace), cfg=cfg)
+            if cfg is None and not allow_overlap:
+                return self._runner
+            return self._runner_for(self.workspace, cfg=cfg, allow_overlap=allow_overlap)
+        return self._runner_for(Path(workspace), cfg=cfg, allow_overlap=allow_overlap)
 
     # --- события ----------------------------------------------------------
 
@@ -768,11 +790,13 @@ class GatewayService:
         title: str = "",
         repo: RepoSpec | None = None,
         workspace_name: str | None = None,
+        accept_overlap: bool = False,
     ) -> SessionView:
         """Сессия: workspace провижнится один раз и живёт всю серию runs."""
         workspace = await self._provision_workspace(title or "session", repo, workspace_name)
-        meta = {
-            "workspace": str(workspace.expanduser().resolve()),
+        workspace_str = str(workspace.expanduser().resolve())
+        meta: dict[str, object] = {
+            "workspace": workspace_str,
             # root — корень сервиса, обработавшего запрос: для path-сессий
             # это выбранный корень (сервис создан WorkspaceHub.service_for
             # ровно под него), для repo/named — root дефолтного сервиса.
@@ -781,6 +805,11 @@ class GatewayService:
             # заведено отдельное поле (спека 2026-07-30, финальное ревью).
             "root": str(self.workspace.expanduser().resolve()),
         }
+        if accept_overlap:
+            # Человек принял пересечение workspace с control-plane в пикере
+            # (ADR-0018): все runs сессии пойдут с allow_layout_overlap.
+            # Флаг живёт в meta сессии — согласие раз на сессию, не на run.
+            meta["allow_overlap"] = True
 
         async def action(db: AsyncSession) -> Session:
             return await TraceRecorder(db).create_session(
@@ -791,7 +820,7 @@ class GatewayService:
         if self.on_session_created is not None:
             self.on_session_created(session.id)
         return SessionView(
-            session_id=session.id, title=session.title or "", workspace=meta["workspace"], runs=[]
+            session_id=session.id, title=session.title or "", workspace=workspace_str, runs=[]
         )
 
     async def send_message(
@@ -865,9 +894,14 @@ class GatewayService:
             ]
         )
         mode = autonomy if autonomy is not None else cfg.runtime.autonomy
+        # Согласие на пересечение с control-plane — свойство сессии (ADR-0018,
+        # пишется в meta при создании через пикер): раскатывается на каждый run.
+        allow_overlap = bool((session.meta or {}).get("allow_overlap"))
         # Тёплый sandbox сессии (ADR-0017): env/infra/MCP переживают сообщение.
         run_meta = run_meta_for(override, prices)
-        warm = await self._acquire_warm(session.id, workspace, mode, override)
+        warm = await self._acquire_warm(
+            session.id, workspace, mode, override, allow_overlap=allow_overlap
+        )
         runner = (
             warm.runner
             if warm is not None
@@ -875,6 +909,7 @@ class GatewayService:
                 workspace,
                 cfg=cfg if not override.is_empty() else None,
                 run_meta=run_meta,
+                allow_overlap=allow_overlap,
             )
         )
         started: asyncio.Future[str] = asyncio.get_running_loop().create_future()

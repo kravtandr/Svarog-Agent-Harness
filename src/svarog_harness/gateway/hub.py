@@ -23,9 +23,19 @@ from pathlib import Path
 from typing import Protocol
 
 from svarog_harness.config.loader import ConfigError, load_config
-from svarog_harness.config.paths import resolve_tenant_config, tenant_home
+from svarog_harness.config.paths import (
+    resolve_tenant_config,
+    tenant_home,
+    workspace_layout_violations,
+)
 from svarog_harness.config.schema import SvarogConfig
-from svarog_harness.gateway.models import FsEntryView, FsListingView, RecentRootView, SessionSummary
+from svarog_harness.gateway.models import (
+    FsEntryView,
+    FsListingView,
+    RecentRootView,
+    RootInspectView,
+    SessionSummary,
+)
 from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 from svarog_harness.gateway.service import GatewayService
 from svarog_harness.tenant import TenantRegistry
@@ -364,6 +374,21 @@ class WorkspaceHub:
             entries.append(FsEntryView(name=child.name, path=str(child), accessible=accessible))
         parent = None if base == base.parent else str(base.parent)
         return FsListingView(path=str(base), parent=parent, entries=entries)
+
+    def inspect_root(self, path: str) -> RootInspectView:
+        """Проверить папку-кандидата до создания чата (ADR-0015 §0.3).
+
+        Пересечение workspace с control-plane находится здесь, в пикере, а не
+        422-й на первом сообщении: человек принимает риск осознанно и заранее
+        (ADR-0018), либо выбирает другую папку. В local-trusted пересечение
+        не блокирует run — warnings отдаём, но blocking=False, диалог не нужен.
+        """
+        svc = self.service_for(path)  # RootPathError/RootConfigError → 422 в api
+        warnings = workspace_layout_violations(svc.cfg, svc.workspace)
+        blocking = bool(warnings) and svc.cfg.sandbox.type != "local-trusted"
+        return RootInspectView(
+            path=str(svc.workspace), overlap_warnings=warnings, blocking=blocking
+        )
 
     def recent_roots(self) -> list[RecentRootView]:
         """Недавние корни для пикера; несуществующие помечены, не выброшены."""

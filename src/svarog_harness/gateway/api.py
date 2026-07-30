@@ -67,6 +67,7 @@ from svarog_harness.gateway.models import (
     ModelCardView,
     ProviderView,
     RecentRootView,
+    RootInspectView,
     RunDetail,
     RunDiffView,
     RunRef,
@@ -350,9 +351,19 @@ def create_app(
     @app.post("/sessions", response_model=SessionView, status_code=201)
     async def create_session(req: CreateSessionRequest, service: ServiceDep) -> SessionView:
         service = _service_for_path(req.path, service)
+        if req.accept_overlap and not isinstance(resolver, WorkspaceHub):
+            # Fail-closed (ADR-0018): согласие на пересечение с control-plane —
+            # решение человека в локальном single-tenant; tenant-пути его не носят.
+            raise HTTPException(
+                status_code=422,
+                detail="accept_overlap поддерживается только в single-tenant режиме",
+            )
         try:
             return await service.create_session(
-                title=req.title, repo=req.repo, workspace_name=req.workspace
+                title=req.title,
+                repo=req.repo,
+                workspace_name=req.workspace,
+                accept_overlap=req.accept_overlap,
             )
         except UnknownWorkspaceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
@@ -500,6 +511,19 @@ def create_app(
         )
         async def recent_roots() -> list[RecentRootView]:
             return hub_resolver.recent_roots()
+
+        @app.get(
+            "/fs/inspect",
+            response_model=RootInspectView,
+            dependencies=[Depends(_require_service)],
+        )
+        async def inspect_root(path: str) -> RootInspectView:
+            """Проверка папки до создания чата: пересечение с control-plane
+            показывается диалогом в пикере, а не 422-й на первом сообщении."""
+            try:
+                return hub_resolver.inspect_root(path)
+            except RootPathError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
 
     # --- named workspaces (ADR-0017 §1/§2) --------------------------------
 

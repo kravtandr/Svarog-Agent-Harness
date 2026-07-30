@@ -195,3 +195,84 @@ def test_created_session_reports_root(client: TestClient, tmp_path: Path) -> Non
     listed = client.get("/sessions").json()
     [row] = [s for s in listed if s["session_id"] == session_id]
     assert row["root"] == str(other.resolve())
+
+
+def _write_overlapping_root(root: Path, *, sandbox: str) -> None:
+    """Корень, у которого control-plane лежит ВНУТРИ workspace (ADR-0015 §0.3)."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        f"sandbox:\n  type: {sandbox}\n"
+        f"storage:\n  db_path: {root / '.svarog' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+
+
+def test_fs_inspect_reports_blocking_overlap(client: TestClient, tmp_path: Path) -> None:
+    """Пересечение с control-plane видно ДО создания чата (диалог в пикере)."""
+    overlapped = tmp_path / "overlapped"
+    _write_overlapping_root(overlapped, sandbox="docker")
+    resp = client.get("/fs/inspect", params={"path": str(overlapped)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["blocking"] is True
+    assert any("storage.db_path" in warning for warning in body["overlap_warnings"])
+
+
+def test_fs_inspect_local_trusted_not_blocking(client: TestClient, tmp_path: Path) -> None:
+    """В local-trusted пересечение — документированный trade-off: без диалога."""
+    overlapped = tmp_path / "trusted"
+    _write_overlapping_root(overlapped, sandbox="local-trusted")
+    body = client.get("/fs/inspect", params={"path": str(overlapped)}).json()
+    assert body["overlap_warnings"] != []
+    assert body["blocking"] is False
+
+
+def test_fs_inspect_clean_root(client: TestClient, tmp_path: Path) -> None:
+    other = tmp_path / "чистый"
+    _write_root(other, tmp_path / "чистый.db")
+    body = client.get("/fs/inspect", params={"path": str(other)}).json()
+    assert body == {"path": str(other.resolve()), "overlap_warnings": [], "blocking": False}
+
+
+def test_accept_overlap_marks_session_and_runner(tmp_path: Path) -> None:
+    """Согласие из пикера доезжает до раннера: runs сессии идут с allow_layout_overlap."""
+    import asyncio
+
+    from svarog_harness.trace.lookup import find_session_by_prefix
+
+    overlapped = tmp_path / "overlapped"
+    _write_overlapping_root(overlapped, sandbox="docker")
+    svc = GatewayService(load_config(project_dir=overlapped), overlapped)
+
+    async def scenario() -> tuple[bool, bool]:
+        view = await svc.create_session(title="x", accept_overlap=True)
+
+        async def read(db):  # type: ignore[no-untyped-def]
+            return await find_session_by_prefix(db, view.session_id)
+
+        session = await svc._read(read)
+        allow = bool((session.meta or {}).get("allow_overlap"))
+        # Сборка раннера ровно как в send_message: по meta сессии. Общий
+        # self._runner (без флага) переиспользоваться не должен.
+        built = svc._runner_for(svc.workspace, allow_overlap=allow)
+        return allow, built is not svc._runner and built._allow_layout_overlap
+
+    allow, runner_flagged = asyncio.run(scenario())
+    assert allow is True
+    assert runner_flagged is True
+
+
+def test_accept_overlap_rejected_without_hub(tmp_path: Path) -> None:
+    """Fail-closed: вне single-tenant согласие не принимается."""
+    root = tmp_path / "root"
+    _write_root(root, tmp_path / "root.db")
+    service = GatewayService(load_config(project_dir=root), root)
+    plain = TestClient(create_app(service))
+    resp = plain.post("/sessions", json={"title": "x", "accept_overlap": True})
+    assert resp.status_code == 422
