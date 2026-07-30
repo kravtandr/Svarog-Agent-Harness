@@ -326,6 +326,23 @@ def test_claude_context_steers_questions_to_ask_user() -> None:
     assert "не завершай" in text.lower()
 
 
+def test_opencode_context_routes_foreign_sources_to_memory() -> None:
+    """Регрессия S3 (30.07.2026, glm-5.2): «сохрани эту спеку как исходник» уходил
+    в нативный write вместо svarog_remember → sources/. Контекст обязан разводить
+    чужой материал (память sources/) и свой деливерабл (workspace)."""
+    text = OpencodeAdapter().context_files("", "")[".config/opencode/AGENTS.md"]
+    assert "sources/" in text
+    assert "деливерабл" in text.lower()
+    assert "неизменяем" in text.lower()
+
+
+def test_claude_context_routes_foreign_sources_to_memory() -> None:
+    """Тот же роутинг-гайд для claude-code (общая уязвимость «результат → Write»)."""
+    text = ClaudeCodeAdapter().context_files("", "")["CLAUDE.md"]
+    assert "sources/" in text
+    assert "mcp__svarog__remember" in text
+
+
 def test_opencode_context_includes_competency_honesty_guide() -> None:
     """S26: правило честности про пробелы в компетенциях доходит до opencode —
     иначе модель назначает ближайшего стек-соседа (React → mobile) без оговорки."""
