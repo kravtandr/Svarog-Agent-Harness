@@ -93,7 +93,7 @@ describe("экран диалога", () => {
     expect(client.sendMessage).toHaveBeenCalledWith(
       "s1",
       "прогони тесты",
-      "supervised",
+      "yolo",
       { provider: "", model: "" },
       [],
     );
@@ -117,7 +117,7 @@ describe("экран диалога", () => {
 
     await userEvent.selectOptions(
       screen.getByRole("combobox", { name: /автономия/i }),
-      "yolo",
+      "supervised",
     );
     await userEvent.type(
       screen.getByRole("combobox", { name: /написать/i }),
@@ -128,7 +128,7 @@ describe("экран диалога", () => {
     expect(client.sendMessage).toHaveBeenCalledWith(
       "s1",
       "жги",
-      "yolo",
+      "supervised",
       { provider: "", model: "" },
       [],
     );
@@ -346,7 +346,7 @@ describe("чистая установка", () => {
     expect(client.sendMessage).toHaveBeenCalledWith(
       "s-new",
       "первая задача",
-      "supervised",
+      "yolo",
       { provider: "", model: "" },
       [],
     );
@@ -390,7 +390,7 @@ describe("провайдер и модель", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       "s1",
       "привет",
-      "supervised",
+      "yolo",
       { provider: "router", model: "x/y" },
       [],
     );
@@ -439,7 +439,7 @@ describe("провайдер и модель", () => {
       1,
       "s1",
       "привет",
-      "supervised",
+      "yolo",
       { provider: "router", model: "x/y" },
       [],
     );
@@ -447,7 +447,7 @@ describe("провайдер и модель", () => {
       2,
       "s1",
       "ещё раз",
-      "supervised",
+      "yolo",
       { provider: "router", model: "x/y" },
       [],
     );
@@ -491,7 +491,7 @@ describe("провайдер и модель", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       "s1",
       "поехали",
-      "supervised",
+      "yolo",
       { provider: "backup", model: "m-backup" },
       [],
     );
@@ -538,7 +538,7 @@ describe("исполнитель из /executors", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       "s1",
       "старт",
-      "supervised",
+      "yolo",
       { executor: "external", adapter: "codex", provider: "", model: "" },
       [],
     );
@@ -591,7 +591,7 @@ describe("исполнитель из /executors", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       "s1",
       "старт",
-      "supervised",
+      "yolo",
       { executor: "external", adapter: "opencode", provider: "", model: "" },
       [],
     );
@@ -620,7 +620,7 @@ describe("исполнитель из /executors", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       "s1",
       "старт",
-      "supervised",
+      "yolo",
       { provider: "", model: "" },
       [],
     );

@@ -142,7 +142,9 @@ export function ChatScreen({
 }) {
   const [items, setItems] = useState<ThreadItem[]>([]);
   const [threadError, setThreadError] = useState<string | null>(null);
-  const [autonomy, setAutonomy] = useState<Autonomy>("supervised");
+  // yolo — дефолт конфига (ADR-0010, runtime.autonomy): селектор стартует с
+  // него же, иначе явно отправляемое supervised перекрывало бы конфиг.
+  const [autonomy, setAutonomy] = useState<Autonomy>("yolo");
   // Список исполнителей — с GET /executors; value конкретного варианта
   // ("native", "codex", …), а не ExecutorKind: одному kind соответствует
   // не один адаптер, кастовать value к ExecutorKind было бы молчаливо неверно.
