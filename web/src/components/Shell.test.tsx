@@ -203,18 +203,19 @@ describe("занятость и удаление чата", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /удалить чат/i }));
-    // Спрашиваем в строке, а не нативным confirm: тот блокирует страницу.
+    // Меню «⋯» разводит цели кликов; удаление в нём — сразу, без
+    // подтверждения (решение 2026-07-30).
+    await userEvent.click(screen.getByRole("button", { name: /меню чата/i }));
     expect(onDelete).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Удалить" }));
 
     expect(onDelete).toHaveBeenCalledWith("s1");
     expect(onPick).not.toHaveBeenCalled();
   });
 });
 
-describe("отмена удаления", () => {
-  it("даёт передумать и ничего не удаляет", async () => {
+describe("меню строки", () => {
+  it("повторный клик по «⋯» закрывает меню без удаления", async () => {
     const onDelete = vi.fn();
     render(
       <Nav
@@ -228,13 +229,34 @@ describe("отмена удаления", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /удалить чат/i }));
-    await userEvent.click(screen.getByRole("button", { name: "Отмена" }));
+    const more = screen.getByRole("button", { name: /меню чата/i });
+    await userEvent.click(more);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await userEvent.click(more);
 
     expect(onDelete).not.toHaveBeenCalled();
-    // Строка вернулась в обычный вид.
-    expect(
-      screen.getByRole("button", { name: /удалить чат/i }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("выбор чата закрывает раскрытое меню", async () => {
+    const onPick = vi.fn();
+    render(
+      <Nav
+        sessions={[session({})]}
+        activeId={null}
+        onPick={onPick}
+        onNew={() => {}}
+        onDelete={() => {}}
+        section="chat"
+        onSection={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /меню чата/i }));
+    // Имя кнопки меню содержит заголовок чата — кликаем по самому заголовку.
+    await userEvent.click(screen.getByText("FTS-поиск по памяти"));
+
+    expect(onPick).toHaveBeenCalledWith("s1");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });

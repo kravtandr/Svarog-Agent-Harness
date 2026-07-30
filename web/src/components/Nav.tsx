@@ -85,9 +85,10 @@ export function Nav({
   onSection: (section: Section) => void;
 }) {
   let lastLabel = "";
-  // Какой чат сейчас спрашивает подтверждение. Нативный confirm блокирует
-  // страницу и выбивается из интерфейса — спрашиваем в самой строке.
-  const [confirming, setConfirming] = useState<string | null>(null);
+  // Какой чат раскрыл меню «⋯». Удаление — сразу, без подтверждения
+  // (решение 2026-07-30): бейдж корня прижимал крестик, и промахи по нему
+  // раздражали сильнее, чем риск лишнего клика; меню разводит цели кликов.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
 
   return (
     <nav className="nav">
@@ -114,7 +115,10 @@ export function Nav({
                 <button
                   type="button"
                   className="nav__item"
-                  onClick={() => onPick(session.session_id)}
+                  onClick={() => {
+                    setMenuFor(null); // выбор чата закрывает раскрытое меню
+                    onPick(session.session_id);
+                  }}
                 >
                   <span
                     className="heat"
@@ -133,35 +137,36 @@ export function Nav({
                     </span>
                   )}
                 </button>
-                {confirming === session.session_id ? (
-                  <>
+                <button
+                  type="button"
+                  className="nav__more"
+                  aria-label={`Меню чата «${session.title}»`}
+                  aria-haspopup="menu"
+                  aria-expanded={menuFor === session.session_id}
+                  onClick={() =>
+                    setMenuFor((current) =>
+                      current === session.session_id
+                        ? null
+                        : session.session_id,
+                    )
+                  }
+                >
+                  ⋯
+                </button>
+                {menuFor === session.session_id && (
+                  <div className="nav__menu" role="menu">
                     <button
                       type="button"
-                      className="nav__confirm"
+                      role="menuitem"
+                      className="nav__menu-item nav__menu-item--danger"
                       onClick={() => {
-                        setConfirming(null);
+                        setMenuFor(null);
                         onDelete(session.session_id);
                       }}
                     >
                       Удалить
                     </button>
-                    <button
-                      type="button"
-                      className="nav__cancel"
-                      onClick={() => setConfirming(null)}
-                    >
-                      Отмена
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="nav__delete"
-                    aria-label={`Удалить чат «${session.title}»`}
-                    onClick={() => setConfirming(session.session_id)}
-                  >
-                    ×
-                  </button>
+                  </div>
                 )}
               </div>
             </div>

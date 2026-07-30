@@ -37,6 +37,7 @@
 }
 /* Строка = чат + кнопка удаления; подсветка на всю строку. */
 .nav__row {
+  position: relative; /* якорь для выпадающего меню «⋯» */
   display: flex;
   align-items: center;
   margin: 0 10px;
@@ -72,7 +73,7 @@
   white-space: nowrap;
 }
 
-.nav__delete {
+.nav__more {
   flex: 0 0 auto;
   width: 26px;
   height: 26px;
@@ -84,35 +85,48 @@
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  /* Видна только при наведении на строку: иначе крестики шумят в списке. */
+  /* Видна только при наведении на строку: иначе кнопки шумят в списке. */
   opacity: 0;
 }
-.nav__row:hover .nav__delete,
-.nav__delete:focus-visible {
+.nav__row:hover .nav__more,
+.nav__more:focus-visible,
+.nav__more[aria-expanded="true"] {
   opacity: 1;
 }
-.nav__delete:hover {
-  color: var(--bad);
+.nav__more:hover {
+  color: var(--text);
 }
 
-/* Подтверждение в строке: удаление истории необратимо. */
-.nav__confirm,
-.nav__cancel {
-  flex: 0 0 auto;
-  padding: 4px 8px;
+/* Выпадающее меню строки: удаление — сразу, без подтверждения. */
+.nav__menu {
+  position: absolute;
+  right: 6px;
+  top: 100%;
+  z-index: 10;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.35);
+}
+.nav__menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
   border: 0;
   border-radius: 6px;
   background: none;
   font-family: var(--sans);
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
-.nav__confirm {
+.nav__menu-item--danger {
   color: var(--bad);
 }
-.nav__cancel {
-  margin-right: 4px;
-  color: var(--faint);
+.nav__menu-item:hover {
+  background: var(--surface);
 }
 .nav__section:disabled {
   color: var(--faint);
@@ -170,8 +184,8 @@
 }
 
 @media (max-width: 899px) {
-  /* На тач-экране наведения нет — крестик показываем всегда. */
-  .nav__delete {
+  /* На тач-экране наведения нет — кнопку меню показываем всегда. */
+  .nav__more {
     opacity: 1;
     width: 44px;
     height: 44px;
