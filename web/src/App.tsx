@@ -79,8 +79,10 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
   }, []);
 
   const createIn = useCallback(
-    async (path: string) => {
-      const created = await api.createSession("Новый чат", path);
+    async (path: string, acceptOverlap?: boolean) => {
+      const created = acceptOverlap
+        ? await api.createSession("Новый чат", path, true)
+        : await api.createSession("Новый чат", path);
       setPicking(false);
       setActiveId(created.session_id);
       await reload();

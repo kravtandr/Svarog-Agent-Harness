@@ -12,6 +12,7 @@ import type {
   ModelCard,
   ProviderCard,
   RecentRoot,
+  RootInspect,
   RunDetail,
   RunDiff,
   RunOverride,
@@ -46,7 +47,11 @@ export interface ClientOptions {
 export interface Api {
   listSessions(): Promise<SessionSummary[]>;
   sessionThread(sessionId: string): Promise<SessionThread>;
-  createSession(title: string, path?: string): Promise<{ session_id: string }>;
+  createSession(
+    title: string,
+    path?: string,
+    acceptOverlap?: boolean,
+  ): Promise<{ session_id: string }>;
   deleteSession(sessionId: string): Promise<void>;
   sendMessage(
     sessionId: string,
@@ -75,6 +80,7 @@ export interface Api {
   providerModels(name: string): Promise<ModelCard[]>;
   fs(path?: string): Promise<FsListing>;
   fsRecent(): Promise<RecentRoot[]>;
+  fsInspect(path: string): Promise<RootInspect>;
   /** Копия клиента с X-Svarog-Root: workspace-экраны активной сессии. */
   withRoot(root: string | null): Api;
 }
@@ -111,10 +117,14 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
       request<SessionThread>(
         `/sessions/${encodeURIComponent(sessionId)}/messages`,
       ),
-    createSession: (title, path) =>
+    createSession: (title, path, acceptOverlap) =>
       request<{ session_id: string }>("/sessions", {
         method: "POST",
-        body: JSON.stringify({ title, ...(path ? { path } : {}) }),
+        body: JSON.stringify({
+          title,
+          ...(path ? { path } : {}),
+          ...(acceptOverlap ? { accept_overlap: true } : {}),
+        }),
       }),
     deleteSession: async (sessionId) => {
       // 204 без тела — request<T> ждёт JSON, поэтому отдельным вызовом.
@@ -199,6 +209,8 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
     fs: (path) =>
       request<FsListing>(path ? `/fs?path=${encodeURIComponent(path)}` : "/fs"),
     fsRecent: () => request<RecentRoot[]>("/fs/recent"),
+    fsInspect: (path) =>
+      request<RootInspect>(`/fs/inspect?path=${encodeURIComponent(path)}`),
     withRoot: (nextRoot) =>
       nextRoot ? createClient({ baseUrl, token, root: nextRoot }) : api,
   };

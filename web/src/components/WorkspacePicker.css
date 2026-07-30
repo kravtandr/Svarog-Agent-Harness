@@ -154,3 +154,26 @@
     min-height: 44px;
   }
 }
+
+/* Диалог «принять риски» (ADR-0018): пересечение с control-plane. */
+.workspace-picker__overlap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+}
+.workspace-picker__overlap-text {
+  margin: 0;
+  color: var(--text);
+}
+.workspace-picker__overlap-details {
+  font-size: 0.85em;
+  color: var(--muted);
+}
+.workspace-picker__overlap-details ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}

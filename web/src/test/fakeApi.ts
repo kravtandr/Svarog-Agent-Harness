@@ -66,6 +66,13 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       .fn()
       .mockResolvedValue({ path: "/home/u", parent: "/home", entries: [] }),
     fsRecent: vi.fn().mockResolvedValue([]),
+    // Эхо пути: confirm пикера создаёт чат по inspect.path — фиксированное
+    // значение в моке подменяло бы выбранную папку в каждом тесте.
+    fsInspect: vi
+      .fn()
+      .mockImplementation((path: string) =>
+        Promise.resolve({ path, overlap_warnings: [], blocking: false }),
+      ),
     withRoot: vi.fn().mockReturnThis(),
     ...over,
   };

@@ -215,3 +215,11 @@ export interface RecentRoot {
   exists: boolean;
   last_used: string;
 }
+
+/** Проверка папки из GET /fs/inspect: пересечение с control-plane (ADR-0015). */
+export interface RootInspect {
+  path: string;
+  overlap_warnings: string[];
+  // true — без явного согласия run будет отклонён: пикер показывает диалог.
+  blocking: boolean;
+}

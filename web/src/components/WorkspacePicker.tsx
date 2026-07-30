@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { type Api } from "../api/client";
-import type { FsListing, RecentRoot } from "../api/types";
+import type { FsListing, RecentRoot, RootInspect } from "../api/types";
 import {
   Completion,
   COMPLETION_LISTBOX_ID,
@@ -22,7 +22,7 @@ export function WorkspacePicker({
   onCancel,
 }: {
   api: Api;
-  onPick: (path: string) => Promise<void>;
+  onPick: (path: string, acceptOverlap?: boolean) => Promise<void>;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState("");
@@ -31,6 +31,9 @@ export function WorkspacePicker({
   const [recents, setRecents] = useState<RecentRoot[]>([]);
   const [listing, setListing] = useState<FsListing | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Папка, где control-plane пересекается с workspace (ADR-0015 §0.3):
+  // вместо создания чата показываем диалог «принять риски» (ADR-0018).
+  const [overlap, setOverlap] = useState<RootInspect | null>(null);
 
   useEffect(() => {
     api
@@ -80,11 +83,29 @@ export function WorkspacePicker({
     return () => window.clearTimeout(timer.current);
   }, [api, value]);
 
-  const confirm = (path: string) => {
+  const create = (path: string, acceptOverlap?: boolean) => {
     setError(null);
-    onPick(path).catch((exc: unknown) => {
+    const picked = acceptOverlap ? onPick(path, true) : onPick(path);
+    picked.catch((exc: unknown) => {
       setError(exc instanceof Error ? exc.message : "Не удалось создать чат.");
     });
+  };
+
+  const confirm = (path: string) => {
+    setError(null);
+    // Проверка папки до создания: пересечение с control-plane показывается
+    // диалогом здесь, а не страшной 422-й на первом сообщении.
+    api
+      .fsInspect(path)
+      .then((inspect) => {
+        if (inspect.blocking) setOverlap(inspect);
+        else create(inspect.path);
+      })
+      .catch((exc: unknown) => {
+        setError(
+          exc instanceof Error ? exc.message : "Не удалось проверить папку.",
+        );
+      });
   };
 
   const browseTo = (path: string) => {
@@ -113,6 +134,55 @@ export function WorkspacePicker({
             ],
             [],
           );
+
+  if (overlap !== null) {
+    // Диалог согласия вместо остального пикера: решение одно и осознанное,
+    // отвлекающих элементов рядом быть не должно.
+    return (
+      <div className="workspace-picker">
+        <section
+          className="workspace-picker__overlap"
+          role="alertdialog"
+          aria-label="В этой папке живут данные Сварога"
+        >
+          <h2 className="workspace-picker__title">
+            В этой папке живут данные Сварога
+          </h2>
+          <p className="workspace-picker__overlap-text">
+            База, память или скиллы Сварога лежат внутри выбранной папки —
+            агент, работая здесь, сможет их читать и менять. Это риск для
+            целостности его собственных данных. Можно продолжить, приняв риск, —
+            все возможности сохранятся.
+          </p>
+          <details className="workspace-picker__overlap-details">
+            <summary>Что именно пересекается</summary>
+            <ul>
+              {overlap.overlap_warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </details>
+          <footer className="workspace-picker__actions">
+            <button
+              type="button"
+              className="workspace-picker__confirm"
+              onClick={() => create(overlap.path, true)}
+            >
+              Принять риски и продолжить
+            </button>
+            <button
+              type="button"
+              className="workspace-picker__cancel"
+              onClick={() => setOverlap(null)}
+            >
+              Выбрать другую папку
+            </button>
+          </footer>
+          {error !== null && <p className="workspace-picker__error">{error}</p>}
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="workspace-picker">
