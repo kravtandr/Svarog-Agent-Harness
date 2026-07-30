@@ -162,6 +162,11 @@ class _WarmSlot:
     resources: SessionResources
     last_used: float
     override: RunOverride = RunOverride()
+    # Автономия, под которой поднят слот: policy-мост внешнего агента живёт в
+    # ресурсах слота, и сообщение с другой автономией обязано пересобрать их —
+    # иначе смена supervised → yolo в композере не долетает до policy (гейты
+    # продолжают спрашивать, находка 2026-07-30).
+    autonomy: AutonomyMode = AutonomyMode.YOLO
 
 
 @dataclass
@@ -317,12 +322,13 @@ class GatewayService:
             return None
         async with self._warm_lock:
             slot = self._warm.get(session_id)
-            if slot is not None and slot.override == override:
+            if slot is not None and slot.override == override and slot.autonomy == autonomy:
                 slot.last_used = time.monotonic()
                 return slot
             if slot is not None:
-                # Слот держит env/MCP, поднятые под прошлым конфигом: с другим
-                # исполнителем или провайдером это чужой sandbox.
+                # Слот держит env/MCP, поднятые под прошлым конфигом ИЛИ прошлой
+                # автономией (policy-мост агента зафиксировал её при подъёме):
+                # с другим исполнителем, провайдером или режимом это чужой sandbox.
                 await self._drop_warm(session_id)
             # Через _derive, а не голый apply_override: этот слот держит
             # runner, от cfg которого при старте посчитается config_hash —
@@ -341,6 +347,7 @@ class GatewayService:
                 resources=resources,
                 last_used=time.monotonic(),
                 override=override,
+                autonomy=autonomy,
             )
             self._warm[session_id] = slot
             return slot
