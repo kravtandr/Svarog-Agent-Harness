@@ -36,7 +36,12 @@ from svarog_harness.gateway.attachments import (
     verify_attachment,
 )
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
-from svarog_harness.gateway.executors import ExecutorOption, executor_options
+from svarog_harness.gateway.executors import (
+    ExecutorOption,
+    SandboxOption,
+    executor_options,
+    sandbox_options,
+)
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
@@ -395,8 +400,12 @@ class GatewayService:
         ]
 
     def executor_options(self) -> list[ExecutorOption]:
-        """Варианты исполнителя по текущему конфигу и наличию CLI адаптеров."""
+        """Варианты исполнителя по текущему конфигу и наличию CLI/образов."""
         return executor_options(self.cfg)
+
+    def sandbox_options(self) -> list[SandboxOption]:
+        """Варианты sandbox по текущему конфигу и наличию docker-runtime."""
+        return sandbox_options(self.cfg)
 
     async def provider_models(self, name: str) -> list[ModelCard]:
         """Список моделей провайдера с TTL-кэшем; CatalogError → 502.

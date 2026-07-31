@@ -7,6 +7,8 @@ import type {
   FileSuggestion,
   ModelCard,
   ProviderCard,
+  SandboxKind,
+  SandboxOption,
   SlashCommand,
 } from "../api/types";
 import {
@@ -28,7 +30,9 @@ import "./Composer.css";
     русских подписей больше нет: значение показывается как есть. */
 const AUTONOMY_MODES: Autonomy[] = ["supervised", "auto", "yolo"];
 
-const UNAVAILABLE_HINT = "CLI этого агента не найден в PATH";
+const UNAVAILABLE_HINT =
+  "Ни CLI агента в PATH, ни собранного docker-образа не найдено";
+const SANDBOX_UNAVAILABLE_HINT = "docker/podman не найден на хосте";
 
 export function Composer({
   onSend,
@@ -37,6 +41,8 @@ export function Composer({
   onAutonomyChange,
   executors,
   onExecutorChange,
+  sandboxes,
+  onSandboxChange,
   providers,
   provider,
   onProviderChange,
@@ -62,6 +68,9 @@ export function Composer({
       is_active помечает текущий выбор, available — установлен ли его CLI. */
   executors: ExecutorOption[];
   onExecutorChange: (value: string) => void;
+  /** GET /sandboxes: docker/local-trusted; available — есть ли docker-runtime. */
+  sandboxes: SandboxOption[];
+  onSandboxChange: (value: SandboxKind) => void;
   providers: ProviderCard[];
   provider: string;
   onProviderChange: (name: string) => void;
@@ -343,6 +352,38 @@ export function Composer({
                     // человек без codex в PATH решит, что Сварог его не умеет.
                     disabled={!option.available}
                     title={option.available ? undefined : UNAVAILABLE_HINT}
+                  >
+                    {option.value}
+                  </option>
+                ))}
+              </select>
+              <span className="composer__dot" aria-hidden="true">
+                ·
+              </span>
+              <select
+                className="composer__select"
+                aria-label="Sandbox"
+                value={
+                  sandboxes.find((option) => option.is_active)?.value ?? ""
+                }
+                disabled={sandboxes.length === 0}
+                onChange={(event) =>
+                  onSandboxChange(event.target.value as SandboxKind)
+                }
+              >
+                {sandboxes.length === 0 && (
+                  <option value="" disabled>
+                    sandbox…
+                  </option>
+                )}
+                {sandboxes.map((option) => (
+                  <option
+                    key={option.value}
+                    value={option.value}
+                    disabled={!option.available}
+                    title={
+                      option.available ? undefined : SANDBOX_UNAVAILABLE_HINT
+                    }
                   >
                     {option.value}
                   </option>

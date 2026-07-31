@@ -209,6 +209,8 @@ class SendMessageRequest(BaseModel):
     # Адаптер внешнего агента — тоже выбор в поле ввода, а не правка
     # svarog.yaml; None — взять адаптер из конфига (см. RunOverride.adapter).
     adapter: Literal["claude-code", "codex", "opencode"] | None = None
+    # Sandbox — свойство сообщения (зеркало executor); None — из конфига.
+    sandbox: Literal["docker", "local-trusted"] | None = None
     # Относительные пути из `.attachments/` этой сессии (задача 7).
     attachments: list[str] = []
 
@@ -272,6 +274,14 @@ class ExecutorOptionView(BaseModel):
     value: str
     kind: Literal["native", "external"]
     adapter: str | None = None
+    available: bool
+    is_active: bool
+
+
+class SandboxOptionView(BaseModel):
+    """Вариант sandbox для селекта поля ввода (зеркало ExecutorOptionView)."""
+
+    value: Literal["docker", "local-trusted"]
     available: bool
     is_active: bool
 

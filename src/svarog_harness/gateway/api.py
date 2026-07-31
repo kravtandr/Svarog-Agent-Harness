@@ -72,6 +72,7 @@ from svarog_harness.gateway.models import (
     RunDiffView,
     RunRef,
     RunSummary,
+    SandboxOptionView,
     SecretView,
     SendMessageRequest,
     SessionSummary,
@@ -328,6 +329,10 @@ def create_app(
     async def list_executors(service: ServiceDep) -> list[ExecutorOptionView]:
         return [ExecutorOptionView(**vars(option)) for option in service.executor_options()]
 
+    @app.get("/sandboxes", response_model=list[SandboxOptionView])
+    async def list_sandboxes(service: ServiceDep) -> list[SandboxOptionView]:
+        return [SandboxOptionView(**vars(option)) for option in service.sandbox_options()]
+
     # --- каталог моделей (задача 6) ---------------------------------------
 
     @app.get("/models", response_model=list[ProviderView])
@@ -467,6 +472,7 @@ def create_app(
                     provider=req.provider,
                     model=req.model,
                     adapter=req.adapter,
+                    sandbox=req.sandbox,
                 ),
                 attachments=req.attachments,
             )

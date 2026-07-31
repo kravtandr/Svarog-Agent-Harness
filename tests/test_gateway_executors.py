@@ -168,10 +168,44 @@ def test_configured_adapter_is_available_even_without_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("svarog_harness.gateway.executors.adapter_available", lambda _: False)
+    monkeypatch.setattr("svarog_harness.gateway.executors._image_present", lambda _: False)
     options = {o.value: o for o in executor_options(_config(tmp_path))}
     assert options["claude-code"].available is True, "прописан в конфиге"
     assert options["opencode"].available is False
     assert "codex" in options, "недоступный адаптер показывается, а не прячется"
+
+
+def test_adapter_available_via_local_docker_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """31.07.2026: собранный svarog/agent-opencode:latest показывался
+    недоступным только потому, что host-CLI opencode не стоял — а исполняется
+    адаптер В КОНТЕЙНЕРЕ (ADR-0016), host-CLI ему не нужен."""
+    monkeypatch.setattr("svarog_harness.gateway.executors.adapter_available", lambda _: False)
+    monkeypatch.setattr(
+        "svarog_harness.gateway.executors._image_present",
+        lambda image: image == DEFAULT_OPENCODE_IMAGE,
+    )
+    options = {o.value: o for o in executor_options(_config(tmp_path))}
+    assert options["opencode"].available is True, "образ собран локально"
+    assert options["codex"].available is False, "у codex нет ни CLI, ни образа"
+
+
+def test_sandbox_options_reflect_docker_presence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from svarog_harness.gateway.executors import sandbox_options
+
+    monkeypatch.setattr("svarog_harness.gateway.executors.find_docker", lambda: "/usr/bin/docker")
+    options = {o.value: o for o in sandbox_options(_config(tmp_path))}
+    assert options["docker"].available is True
+    assert options["docker"].is_active is True  # конфиг фикстуры — docker
+    assert options["local-trusted"].available is True
+    assert options["local-trusted"].is_active is False
+
+    monkeypatch.setattr("svarog_harness.gateway.executors.find_docker", lambda: None)
+    options = {o.value: o for o in sandbox_options(_config(tmp_path))}
+    assert options["docker"].available is False, "runtime нет — но вариант виден"
 
 
 def test_executors_endpoint(service: GatewayService) -> None:
@@ -179,6 +213,35 @@ def test_executors_endpoint(service: GatewayService) -> None:
     body = client.get("/executors").json()
     assert body[0]["value"] == "native"
     assert all("available" in o and "is_active" in o for o in body)
+
+
+def test_sandboxes_endpoint(service: GatewayService) -> None:
+    client = TestClient(create_app(service=service))
+    body = client.get("/sandboxes").json()
+    assert [o["value"] for o in body] == ["docker", "local-trusted"]
+    assert all("available" in o and "is_active" in o for o in body)
+
+
+def test_sandbox_override_switches_type_and_round_trips(tmp_path: Path) -> None:
+    """sandbox — свойство сообщения: docker-конфиг + override local-trusted
+    (native) даёт производный конфиг с local-trusted, meta восстанавливается."""
+    cfg = _config(tmp_path)
+    ov = RunOverride(executor="native", sandbox="local-trusted")
+    derived = apply_override(cfg, ov)
+    assert derived.sandbox.type == "local-trusted"
+    assert cfg.sandbox.type == "docker"  # исходный конфиг не мутируется
+    restored = RunOverride.from_meta({OVERRIDE_META_KEY: ov.to_meta()})
+    assert restored.sandbox == "local-trusted"
+
+
+def test_sandbox_local_trusted_with_external_is_rejected(tmp_path: Path) -> None:
+    """ADR-0016 по эффективной паре: и «local-trusted при external-конфиге»,
+    и «external при local-trusted» — отказ, а не тихая несовместимость."""
+    cfg = _config(tmp_path)  # executor external
+    with pytest.raises(OverrideError, match="docker"):
+        apply_override(cfg, RunOverride(sandbox="local-trusted"))
+    with pytest.raises(OverrideError, match="docker"):
+        apply_override(cfg, RunOverride(adapter="opencode", sandbox="local-trusted"))
 
 
 # --- adapter из composer'а должен доходить до запуска (2026-07-27) --------

@@ -53,6 +53,7 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     providers: vi.fn().mockResolvedValue([]),
     providerModels: vi.fn().mockResolvedValue([]),
     executors: vi.fn().mockResolvedValue([]),
+    sandboxes: vi.fn().mockResolvedValue([]),
     commands: vi.fn().mockResolvedValue([]),
     sessionFiles: vi.fn().mockResolvedValue([]),
     uploadAttachment: vi.fn().mockResolvedValue({

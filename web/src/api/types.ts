@@ -148,6 +148,18 @@ export interface RunOverride {
   // сузил их до Literal (gateway/models.py), молчаливое расхождение здесь
   // было бы багом.
   adapter?: "claude-code" | "codex" | "opencode";
+  // Sandbox — свойство сообщения (зеркало executor); отсутствие поля —
+  // «взять из конфига».
+  sandbox?: SandboxKind;
+}
+
+export type SandboxKind = "docker" | "local-trusted";
+
+/** Одна запись из GET /sandboxes: значение выбора sandbox в композере. */
+export interface SandboxOption {
+  value: SandboxKind;
+  available: boolean;
+  is_active: boolean;
 }
 
 export interface ProviderCard {

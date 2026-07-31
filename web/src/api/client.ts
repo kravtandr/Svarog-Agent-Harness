@@ -18,6 +18,7 @@ import type {
   RunOverride,
   RunRef,
   RunSummary,
+  SandboxOption,
   SecretView,
   SessionSummary,
   SessionThread,
@@ -62,6 +63,7 @@ export interface Api {
   ): Promise<RunRef>;
   decideApproval(approvalId: string, approved: boolean): Promise<RunRef>;
   executors(): Promise<ExecutorOption[]>;
+  sandboxes(): Promise<SandboxOption[]>;
   commands(): Promise<SlashCommand[]>;
   sessionFiles(sessionId: string, q: string): Promise<FileSuggestion[]>;
   uploadAttachment(sessionId: string, file: File): Promise<Attachment>;
@@ -159,6 +161,7 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
           ...(override?.provider ? { provider: override.provider } : {}),
           ...(override?.model ? { model: override.model } : {}),
           ...(override?.adapter ? { adapter: override.adapter } : {}),
+          ...(override?.sandbox ? { sandbox: override.sandbox } : {}),
           ...(attachments?.length ? { attachments } : {}),
         }),
       }),
@@ -193,6 +196,7 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
     providerModels: (name) =>
       request<ModelCard[]>(`/models/${encodeURIComponent(name)}`),
     executors: () => request<ExecutorOption[]>("/executors"),
+    sandboxes: () => request<SandboxOption[]>("/sandboxes"),
     commands: () => request<SlashCommand[]>("/commands"),
     sessionFiles: (sessionId, q) =>
       request<FileSuggestion[]>(

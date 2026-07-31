@@ -13,6 +13,7 @@ import type {
   ExecutorOption,
   FileSuggestion,
   ProviderCard,
+  SandboxOption,
   SlashCommand,
 } from "../api/types";
 import { Composer } from "./Composer";
@@ -28,6 +29,8 @@ const base = {
   onAutonomyChange: () => {},
   executors: [] as ExecutorOption[],
   onExecutorChange: () => {},
+  sandboxes: [] as SandboxOption[],
+  onSandboxChange: () => {},
   providers: [] as ProviderCard[],
   provider: "",
   onProviderChange: () => {},
@@ -41,6 +44,51 @@ const base = {
   onAttach: () => {},
   onRemoveAttachment: () => {},
 };
+
+describe("селект sandbox", () => {
+  const SANDBOXES: SandboxOption[] = [
+    { value: "docker", available: true, is_active: true },
+    { value: "local-trusted", available: true, is_active: false },
+  ];
+
+  it("показывает варианты и отдаёт выбор наружу", () => {
+    const onSandboxChange = vi.fn();
+    render(
+      <Composer
+        {...base}
+        sandboxes={SANDBOXES}
+        onSandboxChange={onSandboxChange}
+      />,
+    );
+    const select = screen.getByLabelText("Sandbox");
+    fireEvent.change(select, { target: { value: "local-trusted" } });
+    expect(onSandboxChange).toHaveBeenCalledWith("local-trusted");
+  });
+
+  it("недоступный docker виден, но выключен, с подсказкой", () => {
+    render(
+      <Composer
+        {...base}
+        sandboxes={[
+          { value: "docker", available: false, is_active: false },
+          { value: "local-trusted", available: true, is_active: true },
+        ]}
+      />,
+    );
+    const option = within(screen.getByLabelText("Sandbox")).getByRole(
+      "option",
+      { name: "docker" },
+    ) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(option.title).toContain("docker");
+  });
+
+  it("пустой список — заглушка и выключенный селект", () => {
+    render(<Composer {...base} sandboxes={[]} />);
+    const select = screen.getByLabelText("Sandbox") as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+  });
+});
 
 describe("поле ввода", () => {
   it("отправляет текст и очищает поле", async () => {

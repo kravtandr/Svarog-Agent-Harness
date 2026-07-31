@@ -10,6 +10,8 @@ import type {
   ModelCard,
   ProviderCard,
   RunOverride,
+  SandboxKind,
+  SandboxOption,
   SlashCommand,
 } from "../api/types";
 import { Composer } from "../components/Composer";
@@ -150,6 +152,10 @@ export function ChatScreen({
   // не один адаптер, кастовать value к ExecutorKind было бы молчаливо неверно.
   const [executorOptions, setExecutorOptions] = useState<ExecutorOption[]>([]);
   const [executorValue, setExecutorValue] = useState<string | null>(null);
+  // Sandbox — зеркало исполнителя: список с GET /sandboxes, выбор — свойство
+  // сообщения (override), конфиг остаётся значением по умолчанию.
+  const [sandboxOptions, setSandboxOptions] = useState<SandboxOption[]>([]);
+  const [sandboxValue, setSandboxValue] = useState<SandboxKind | null>(null);
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [providers, setProviders] = useState<ProviderCard[]>([]);
@@ -206,6 +212,19 @@ export function ChatScreen({
       })
       .catch(() => {
         // Список не пришёл — тот же принцип: остаёмся пустыми, не гадаем.
+      });
+  }, [api]);
+
+  useEffect(() => {
+    api
+      .sandboxes()
+      .then((list) => {
+        setSandboxOptions(list);
+        const active = list.find((option) => option.is_active);
+        if (active !== undefined) setSandboxValue(active.value);
+      })
+      .catch(() => {
+        // Как с /executors: нет списка — селект пуст, override без sandbox.
       });
   }, [api]);
 
@@ -447,6 +466,9 @@ export function ChatScreen({
                   adapter: (selectedExecutor.adapter ??
                     undefined) as RunOverride["adapter"],
                 }),
+            // Sandbox — тот же принцип: не пришёл список или выбора нет —
+            // поле опускаем, сервер берёт конфиг.
+            ...(sandboxValue === null ? {} : { sandbox: sandboxValue }),
             provider,
             model,
           },
@@ -478,6 +500,7 @@ export function ChatScreen({
       autonomy,
       executorOptions,
       executorValue,
+      sandboxValue,
       provider,
       model,
       watch,
@@ -558,6 +581,11 @@ export function ChatScreen({
   const executors: ExecutorOption[] = executorOptions.map((option) => ({
     ...option,
     is_active: option.value === executorValue,
+  }));
+
+  const sandboxes: SandboxOption[] = sandboxOptions.map((option) => ({
+    ...option,
+    is_active: option.value === sandboxValue,
   }));
 
   const shown = error ?? threadError ?? sendError;
@@ -676,6 +704,8 @@ export function ChatScreen({
         onAutonomyChange={setAutonomy}
         executors={executors}
         onExecutorChange={setExecutorValue}
+        sandboxes={sandboxes}
+        onSandboxChange={setSandboxValue}
         providers={providers}
         provider={provider}
         onProviderChange={pickProvider}

@@ -32,12 +32,16 @@ class OverrideError(Exception):
     """Override несовместим с конфигом; наружу уходит как HTTP 422."""
 
 
+SandboxKind = Literal["docker", "local-trusted"]
+
+
 @dataclass(frozen=True)
 class RunOverride:
     executor: ExecutorKind | None = None
     provider: str | None = None
     model: str | None = None
     adapter: str | None = None
+    sandbox: SandboxKind | None = None
 
     def is_empty(self) -> bool:
         return (
@@ -45,6 +49,7 @@ class RunOverride:
             and self.provider is None
             and self.model is None
             and self.adapter is None
+            and self.sandbox is None
         )
 
     def to_meta(self) -> dict[str, str]:
@@ -54,6 +59,7 @@ class RunOverride:
             "provider": self.provider,
             "model": self.model,
             "adapter": self.adapter,
+            "sandbox": self.sandbox,
         }
         return {key: value for key, value in raw.items() if value is not None}
 
@@ -71,11 +77,13 @@ class RunOverride:
         provider = raw.get("provider")
         model = raw.get("model")
         adapter = raw.get("adapter")
+        sandbox = raw.get("sandbox")
         return cls(
             executor=executor if executor in ("native", "external") else None,
             provider=provider if isinstance(provider, str) else None,
             model=model if isinstance(model, str) else None,
             adapter=adapter if adapter in EXTERNAL_ADAPTERS else None,
+            sandbox=sandbox if sandbox in ("docker", "local-trusted") else None,
         )
 
 
@@ -148,6 +156,13 @@ def apply_override(
 
     update: dict[str, object] = {}
 
+    # Sandbox — свойство сообщения, как и исполнитель. Эффективное значение
+    # участвует в external-гейте ниже: override docker при конфиге
+    # local-trusted легализует внешний агент для этого сообщения, и наоборот.
+    effective_sandbox = ov.sandbox if ov.sandbox is not None else cfg.sandbox.type
+    if ov.sandbox is not None and ov.sandbox != cfg.sandbox.type:
+        update["sandbox"] = cfg.sandbox.model_copy(update={"type": ov.sandbox})
+
     if ov.adapter is not None:
         if ov.adapter not in EXTERNAL_ADAPTERS:
             raise OverrideError(
@@ -180,17 +195,23 @@ def apply_override(
             update={"type": "external", "external": external}
         )
 
-    if ov.executor == "external":
-        if cfg.executor.external is None:
-            raise OverrideError(
-                "внешний агент требует секцию executor.external в svarog.yaml "
-                "(адаптер и образ sandbox, ADR-0016)"
-            )
-        if cfg.sandbox.type != "docker":
-            raise OverrideError(
-                f"внешний агент требует sandbox.type='docker', сейчас "
-                f"'{cfg.sandbox.type}' (fail-closed, ADR-0016)"
-            )
+    if ov.executor == "external" and cfg.executor.external is None:
+        raise OverrideError(
+            "внешний агент требует секцию executor.external в svarog.yaml "
+            "(адаптер и образ sandbox, ADR-0016)"
+        )
+    # Гейт ADR-0016 по ЭФФЕКТИВНОЙ паре executor×sandbox: ловит и «external
+    # override при local-trusted конфиге», и «sandbox=local-trusted override
+    # при external конфиге» — внешний агент без контейнера не существует.
+    effective_kind = ov.executor if ov.executor is not None else cfg.executor.type
+    if ov.adapter is not None:
+        effective_kind = "external"
+    if effective_kind == "external" and effective_sandbox != "docker":
+        raise OverrideError(
+            f"внешний агент требует sandbox.type='docker', сейчас "
+            f"'{effective_sandbox}' (fail-closed, ADR-0016): выберите sandbox "
+            f"docker или исполнителя native"
+        )
     # Ветка ov.executor ниже не должна затирать результат адаптера выше: если
     # adapter задан, executor уже учтён в update["executor"].
     if ov.executor is not None and ov.adapter is None:
