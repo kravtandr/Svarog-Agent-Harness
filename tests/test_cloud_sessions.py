@@ -706,3 +706,76 @@ async def test_parallel_runs_in_different_workspaces(
     thread = await service.session_thread(a.session_id)
     assert thread.live_run_id is None
     assert any(item.kind == "say" for item in thread.items)
+
+
+async def test_parallel_chats_in_same_git_folder_use_worktrees(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Параллельные чаты в ОДНОЙ git-папке (31.07.2026): папка занята run'ом
+    чата A → чат B автоматически переезжает в собственный worktree
+    (`<parent>/.worktrees/<имя>-chat-<sid>`) и работает параллельно; сам чат B
+    при живом run'е по-прежнему отказывает."""
+    import subprocess
+
+    from svarog_harness.trace.recorder import WorkspaceBusyError
+
+    ws = service.workspace
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i", "--allow-empty"],
+    ):
+        subprocess.run(args, cwd=ws, check=True)
+
+    provider = GatedProvider([_final("готово A"), _final("готово B")])
+    _install_provider(monkeypatch, provider)
+    a = await service.create_session(title="чат A")
+    b = await service.create_session(title="чат B")
+
+    run_a = await service.send_message(a.session_id, "задача A", None)
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+    provider.entered.clear()
+
+    # Папка занята A — B получает свой worktree и стартует ПАРАЛЛЕЛЬНО.
+    run_b = await service.send_message(b.session_id, "задача B", None)
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+    assert (await service.get_run(run_a)).state == "running"
+    assert (await service.get_run(run_b)).state == "running"
+
+    summaries = {s.session_id: s for s in await service.list_sessions()}
+    ws_b = summaries[b.session_id].workspace or ""
+    assert ".worktrees" in ws_b, "B работает в своём worktree"
+    assert f"chat-{b.session_id[:8]}" in ws_b
+
+    # Сам чат B занят своим run'ом — второй send отказывает, worktree не плодится.
+    with pytest.raises(WorkspaceBusyError):
+        await service.send_message(b.session_id, "ещё", None)
+
+    provider.gate.set()
+    assert await _wait_state(service, run_a, {"completed"}) == "completed"
+    assert await _wait_state(service, run_b, {"completed"}) == "completed"
+
+    # Следующее сообщение B остаётся в его worktree (изоляция закреплена).
+    provider.turns.append(_final("ещё B"))
+    run_b2 = await service.send_message(b.session_id, "продолжай", None)
+    provider.gate.set()
+    assert await _wait_state(service, run_b2, {"completed"}) == "completed"
+    summaries = {s.session_id: s for s in await service.list_sessions()}
+    assert ".worktrees" in (summaries[b.session_id].workspace or "")
+
+
+async def test_parallel_chats_refused_in_non_git_folder(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Не-git папку изолировать нечем — второй чат честно получает отказ."""
+    from svarog_harness.trace.recorder import WorkspaceBusyError
+
+    provider = GatedProvider([_final("готово")])
+    _install_provider(monkeypatch, provider)
+    a = await service.create_session(title="чат A")
+    b = await service.create_session(title="чат B")
+    await service.send_message(a.session_id, "задача A", None)
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+    with pytest.raises(WorkspaceBusyError, match="git"):
+        await service.send_message(b.session_id, "задача B", None)
+    provider.gate.set()

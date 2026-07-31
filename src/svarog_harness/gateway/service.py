@@ -13,6 +13,7 @@ import os
 import tarfile
 import tempfile
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -292,6 +293,51 @@ class GatewayService:
             return value
         return store.get(DEFAULT_GIT_CREDENTIALS_REF) or None
 
+    async def _parallel_worktree(self, session: Session, workspace: Path) -> Path:
+        """Перевести чат в собственный git-worktree, когда папка занята другим.
+
+        Параллельные чаты в ОДНОЙ папке (31.07.2026): per-workspace lease
+        (ADR-0015 §0.5) остаётся законом — параллельность достигается тем, что
+        у каждого чата своё рабочее дерево. Worktree — сосед папки
+        (`<parent>/.worktrees/<имя>-chat-<sid>`, конвенция child-run'ов §0.2),
+        своя ветка `svarog/chat-<sid>`: результаты идут в неё, слияние — обычным
+        git-flow (svarog push / merge). Не git, пустой репозиторий или занят
+        уже СВОЙ worktree — прежний честный отказ.
+        """
+        meta = dict(session.meta or {})
+        sid = session.id[:8]
+        if meta.get("chat_worktree"):
+            raise WorkspaceBusyError(f"в сессии {sid} ещё выполняется предыдущий run")
+        repo = GitRepo(workspace)
+        toplevel = await repo.toplevel()
+        if (
+            toplevel is None
+            or toplevel.resolve() != workspace.resolve()
+            or not await repo.has_commits()
+        ):
+            raise WorkspaceBusyError(
+                f"папка занята run'ом другого чата, а параллельная работа в ней "
+                f"возможна только для git-репозитория с коммитами: "
+                f"{workspace} — дождитесь завершения или откройте другую папку"
+            )
+        worktree = workspace.parent / ".worktrees" / f"{workspace.name}-chat-{sid}"
+        if not worktree.is_dir():
+            # Уникальный суффикс ветки: ветка прошлой жизни чата (meta
+            # потеряна/сессия пересоздана) не должна блокировать add -b.
+            branch = f"svarog/chat-{sid}-{uuid.uuid4().hex[:4]}"
+            await repo.add_worktree(worktree, branch)
+        meta["chat_worktree"] = str(worktree)
+        meta["workspace"] = str(worktree)
+
+        async def persist(db: AsyncSession) -> None:
+            found = await find_session_by_prefix(db, session.id)
+            found.meta = meta
+            await db.commit()
+
+        await self._read(persist)
+        session.meta = meta
+        return worktree
+
     async def _workspace_busy(self, path: Path) -> bool:
         """Есть ли живой run в workspace (lease-семантика ADR-0015 §0.5)."""
 
@@ -327,7 +373,15 @@ class GatewayService:
             return None
         async with self._warm_lock:
             slot = self._warm.get(session_id)
-            if slot is not None and slot.override == override and slot.autonomy == autonomy:
+            if (
+                slot is not None
+                and slot.override == override
+                and slot.autonomy == autonomy
+                and slot.workspace == workspace
+            ):
+                # workspace в условии обязателен: сессия могла переехать в
+                # свой worktree (параллельные чаты в одной папке) — env слота
+                # смонтирован на ПРЕЖНЮЮ директорию.
                 slot.last_used = time.monotonic()
                 return slot
             if slot is not None:
@@ -898,7 +952,10 @@ class GatewayService:
                 verify_attachment(workspace, rel)  # AttachmentPathError → 400
             text = f"{text}\n\n{attachments_note(list(attachments))}"
         if await self._workspace_busy(workspace):
-            raise WorkspaceBusyError(f"в сессии {session.id[:8]} ещё выполняется предыдущий run")
+            # Папка занята run'ом ДРУГОГО чата → параллельность через
+            # собственный git-worktree сессии; занят СВОЙ worktree (или папка
+            # не git) — честный отказ, как раньше.
+            workspace = await self._parallel_worktree(session, workspace)
         history = (
             None
             if external
