@@ -33,8 +33,14 @@ _CONTEXT_FILE = ".config/opencode/AGENTS.md"
 
 
 class OpencodeAdapter:
-    def __init__(self, binary: str = "opencode") -> None:
+    def __init__(self, binary: str = "opencode", mcp_timeout_sec: int = 180) -> None:
         self._binary = binary
+        # Таймаут MCP-запросов клиента opencode (McpRemoteConfig.timeout, мс).
+        # Обязан покрывать человеческий гейт ask_user/approval целиком
+        # (approval_grace_sec + запас, см. adapter_for): дефолтные 60с клиента
+        # убивали вопрос раньше ответа человека — tool «ошибка», а ответ,
+        # данный позже, уходил в пустоту (найдено 31.07.2026).
+        self._mcp_timeout_sec = mcp_timeout_sec
 
     @property
     def name(self) -> str:
@@ -148,6 +154,7 @@ class OpencodeAdapter:
                         "url": url,
                         "headers": {"Authorization": f"Bearer {token}"},
                         "enabled": True,
+                        "timeout": self._mcp_timeout_sec * 1000,
                     }
                 }
             }

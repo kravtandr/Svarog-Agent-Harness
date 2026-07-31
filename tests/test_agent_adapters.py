@@ -300,6 +300,29 @@ def test_opencode_mcp_client_config_remote_section() -> None:
     assert section["url"] == "http://bridge:8080/svarog/mcp"
     assert section["headers"]["Authorization"] == "Bearer tok-1"
     assert section["enabled"] is True
+    # Дефолт адаптера покрывает дефолтный approval_grace_sec (120с) с запасом.
+    assert section["timeout"] == 180_000
+
+
+def test_opencode_mcp_timeout_covers_human_gate() -> None:
+    """31.07.2026: дефолтный 60с MCP-таймаут клиента opencode убивал ask_user
+    раньше ответа человека. Клиентский таймаут = grace + запас (контракт
+    hook_timeout_sec claude-code)."""
+    from svarog_harness.config.schema import ExternalExecutorConfig
+    from svarog_harness.runtime.agents import CLIENT_GATE_TIMEOUT_MARGIN_SEC, adapter_for
+
+    cfg = ExternalExecutorConfig.model_validate(
+        {
+            "adapter": "opencode",
+            "image": "svarog/agent-opencode:latest",
+            "base_url": "https://openrouter.ai/api",
+            "approval_grace_sec": 300,
+        }
+    )
+    adapter = adapter_for(cfg)
+    patches = adapter.mcp_client_config("http://bridge/svarog/mcp", "t")
+    timeout_ms = patches[".config/opencode/opencode.jsonc"]["mcp"]["svarog"]["timeout"]
+    assert timeout_ms == (300 + CLIENT_GATE_TIMEOUT_MARGIN_SEC) * 1000
 
 
 def test_claude_and_codex_mcp_client_config_empty() -> None:

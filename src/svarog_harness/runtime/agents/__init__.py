@@ -52,7 +52,13 @@ def adapter_for(cfg: ExternalExecutorConfig) -> AgentAdapter:
         case "codex":
             return CodexAdapter()
         case "opencode":
-            return OpencodeAdapter()
+            # Тот же контракт, что hook_timeout_sec у claude-code: MCP-клиент
+            # opencode обязан ждать дольше, чем человеческий гейт держит вызов
+            # (grace + suspend), иначе ask_user/approval умирает клиентским
+            # таймаутом (60с) раньше ответа человека (найдено 31.07.2026).
+            return OpencodeAdapter(
+                mcp_timeout_sec=cfg.approval_grace_sec + CLIENT_GATE_TIMEOUT_MARGIN_SEC
+            )
     raise ValueError(f"неизвестный адаптер внешнего агента: {cfg.adapter}")
 
 
