@@ -33,7 +33,7 @@ _CONTEXT_FILE = ".config/opencode/AGENTS.md"
 
 
 class OpencodeAdapter:
-    def __init__(self, binary: str = "opencode", mcp_timeout_sec: int = 180) -> None:
+    def __init__(self, binary: str = "opencode", mcp_timeout_sec: int = 1860) -> None:
         self._binary = binary
         # Таймаут MCP-запросов клиента opencode (McpRemoteConfig.timeout, мс).
         # Обязан покрывать человеческий гейт ask_user/approval целиком

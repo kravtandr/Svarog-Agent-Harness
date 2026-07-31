@@ -423,8 +423,11 @@ class ExternalExecutorConfig(StrictModel):
     # Tier 2 (ADR-0016 §6): cooperative подключает hook-мост Policy Engine
     # (managed-настройки + PreToolUse → bridge). containment — только периметр.
     enforcement: Literal["containment", "cooperative"] = "containment"
-    # Grace-ожидание решения человека до suspend всего run (§7).
-    approval_grace_sec: int = Field(default=120, gt=0)
+    # Grace-ожидание решения человека до suspend всего run (§7). 30 минут:
+    # человек отвечает на ask_user/approval в своём темпе, не теряя живой
+    # стрим; клиентские таймауты агента (hook у claude-code, MCP у opencode)
+    # выводятся из этого значения с запасом (adapter_for).
+    approval_grace_sec: int = Field(default=1800, gt=0)
 
     # Адаптеры с openai-совместимым LLM-трафиком (wire=openai): дефолтный
     # anthropic-endpoint для них — гарантированная ошибка в рантайме

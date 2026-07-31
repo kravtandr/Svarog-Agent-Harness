@@ -300,8 +300,8 @@ def test_opencode_mcp_client_config_remote_section() -> None:
     assert section["url"] == "http://bridge:8080/svarog/mcp"
     assert section["headers"]["Authorization"] == "Bearer tok-1"
     assert section["enabled"] is True
-    # Дефолт адаптера покрывает дефолтный approval_grace_sec (120с) с запасом.
-    assert section["timeout"] == 180_000
+    # Дефолт адаптера покрывает дефолтный approval_grace_sec (30 мин) с запасом.
+    assert section["timeout"] == 1_860_000
 
 
 def test_opencode_mcp_timeout_covers_human_gate() -> None:

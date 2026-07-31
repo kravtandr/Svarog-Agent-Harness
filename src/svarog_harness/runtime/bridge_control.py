@@ -112,7 +112,7 @@ class BridgeControl:
         proposal_sink: list[SkillProposalRequest],
         schedule_sink: list[ScheduleRequest] | None = None,
         secret_values: frozenset[str] = frozenset(),
-        approval_grace_sec: float = 120.0,
+        approval_grace_sec: float = 1800.0,
         ask_user_timeout_sec: int = 3600,
         on_notify: Callable[[str, str], None] | None = None,
         on_approval_prompt: Callable[[Approval], Awaitable[None]] | None = None,
