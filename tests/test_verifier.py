@@ -60,6 +60,38 @@ async def test_secret_scan_clean(tmp_path: Path) -> None:
     assert scan.status is CheckStatus.PASSED
 
 
+async def test_secret_scan_skips_files_older_than_run(tmp_path: Path) -> None:
+    """31.07.2026 (run в ~/Downloads): секретоподобный файл, существовавший ДО
+    run'а (ключи Telegram Desktop), не должен валить run — скан ловит то, что
+    run записал сам."""
+    import os
+    from datetime import datetime, timedelta
+
+    from svarog_harness.storage.models import utcnow
+
+    secret = tmp_path / "id_rsa"
+    secret.write_text("key = AKIAIOSFODNN7EXAMPLE\n", encoding="utf-8")
+    old = (datetime.now() - timedelta(hours=2)).timestamp()
+    os.utime(secret, (old, old))
+
+    outcomes = await _verifier(tmp_path).run([], secret_scan=True, modified_since=utcnow())
+    scan = next(o for o in outcomes if o.name == "secret-scan")
+    assert scan.status is CheckStatus.PASSED, "файл старше run'а — не его продукт"
+
+
+async def test_secret_scan_catches_files_written_during_run(tmp_path: Path) -> None:
+    """Свежая запись секрета (после старта run'а) ловится и с фильтром по mtime."""
+    from datetime import timedelta
+
+    from svarog_harness.storage.models import utcnow
+
+    started = utcnow() - timedelta(minutes=5)
+    (tmp_path / "leak.txt").write_text("key = AKIAIOSFODNN7EXAMPLE\n", encoding="utf-8")
+    outcomes = await _verifier(tmp_path).run([], secret_scan=True, modified_since=started)
+    scan = next(o for o in outcomes if o.name == "secret-scan")
+    assert scan.status is CheckStatus.FAILED
+
+
 def test_skill_checks_only_for_loaded(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "checked-skill"
     skill_dir.mkdir(parents=True)

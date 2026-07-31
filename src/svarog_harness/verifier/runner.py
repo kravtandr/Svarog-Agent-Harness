@@ -8,6 +8,7 @@ sandbox и secret scan рабочего дерева. Детерминирова
 
 import fnmatch
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from svarog_harness.config.schema import CheckSpec
@@ -55,12 +56,19 @@ class Verifier:
         *,
         secret_scan: bool = True,
         known_values: frozenset[str] = frozenset(),
+        modified_since: datetime | None = None,
     ) -> list[CheckOutcome]:
+        """modified_since — старт run'а: скан ловит секреты, которые run МОГ
+        записать, а не всё содержимое workspace. Без него run в обычной
+        пользовательской папке (Downloads с ключами Telegram Desktop,
+        31.07.2026) вечно failed из-за файлов, к которым агент не прикасался,
+        а rglob читает гигабайты чужого дерева. None — прежнее поведение
+        (полный скан)."""
         outcomes: list[CheckOutcome] = []
         for spec in checks:
             outcomes.append(await self._run_command(spec))
         if secret_scan:
-            outcomes.append(self._secret_scan(known_values))
+            outcomes.append(self._secret_scan(known_values, modified_since))
         return outcomes
 
     async def _run_command(self, spec: CheckSpec) -> CheckOutcome:
@@ -74,12 +82,23 @@ class Verifier:
         status = CheckStatus.PASSED if result.exit_code == 0 else CheckStatus.FAILED
         return CheckOutcome(spec.name, status, output)
 
-    def _secret_scan(self, known_values: frozenset[str]) -> CheckOutcome:
+    def _secret_scan(
+        self, known_values: frozenset[str], modified_since: datetime | None
+    ) -> CheckOutcome:
+        # Небольшой запас на гранулярность mtime файловых систем (FAT — 2с) и
+        # рассинхронизацию часов контейнера с хостом.
+        since_ts = (
+            modified_since.replace(tzinfo=UTC).timestamp() - 2.0
+            if modified_since is not None
+            else None
+        )
         files: dict[str, str] = {}
         for path in self._workspace.rglob("*"):
             if not path.is_file() or self._skipped(path):
                 continue
             try:
+                if since_ts is not None and path.stat().st_mtime < since_ts:
+                    continue  # существовал до run'а — не его продукт
                 files[str(path.relative_to(self._workspace))] = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue  # бинарные/нечитаемые файлы пропускаем

@@ -16,6 +16,7 @@ import type {
 } from "../api/types";
 import { Composer } from "../components/Composer";
 import { Gate } from "../components/Gate";
+import { Markdown } from "../components/Markdown";
 import { ToolCalls } from "../components/ToolCalls";
 import { parseCommand, type ParsedCommand } from "../model/completion";
 import { applyEvent, fromHistory, type ThreadItem } from "../model/thread";
@@ -173,6 +174,10 @@ export function ChatScreen({
   const [pendingUploads, setPendingUploads] = useState(0);
   const [, setRunId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  // «Сварог работает…» — от отправки до ПЕРВОГО события стрима: у внешнего
+  // агента между стартом (boot контейнера) и первым tool call проходят
+  // десятки секунд, и без индикатора лента выглядит зависшей (31.07.2026).
+  const [thinking, setThinking] = useState(false);
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
   const commandSeq = useRef(0);
@@ -280,9 +285,12 @@ export function ChatScreen({
   const watch = useCallback(
     (runId: string) => {
       unsubscribe.current?.();
-      unsubscribe.current = subscribeRun(baseUrl, runId, token, (event) =>
-        setItems((current) => applyEvent(current, event)),
-      );
+      unsubscribe.current = subscribeRun(baseUrl, runId, token, (event) => {
+        // Первое же событие стрима гасит индикатор «работает»: дальше
+        // прогресс виден по самим событиям (чипы, дельты текста).
+        setThinking(false);
+        setItems((current) => applyEvent(current, event));
+      });
     },
     [baseUrl, token],
   );
@@ -296,6 +304,7 @@ export function ChatScreen({
     setItems([]);
     setThreadError(null);
     setSendError(null);
+    setThinking(false);
     stickToBottom.current = true; // новая сессия открывается свежим низом
     // Эта сессия теперь известна родителю — общему резолверу больше не за
     // что держаться. Следующий раз, когда sessionId снова станет null
@@ -436,6 +445,7 @@ export function ChatScreen({
         { kind: "user", id: optimisticId, text, attachments: attachmentPaths },
       ]);
       setSendError(null);
+      setThinking(true);
       try {
         // Тот же резолвер, что у attach(): сессия, которую уже завела (или
         // заводит прямо сейчас) загрузка вложения, а не вторая новая поверх
@@ -484,6 +494,7 @@ export function ChatScreen({
       } catch (exc: unknown) {
         // Молчаливый провал — худший исход: реплика висит в ленте, а агент
         // не запущен. Например, автономия, которую исполнитель не умеет.
+        setThinking(false);
         setSendError(
           exc instanceof ApiError
             ? exc.message
@@ -658,7 +669,7 @@ export function ChatScreen({
             if (entry.kind === "say")
               return (
                 <div key={entry.id} className="chat__say">
-                  {entry.text}
+                  <Markdown text={entry.text} />
                 </div>
               );
             if (entry.kind === "status")
@@ -682,6 +693,11 @@ export function ChatScreen({
               );
             return null;
           })}
+          {thinking && (
+            <p className="chat__hint chat__thinking" role="status">
+              Сварог работает…
+            </p>
+          )}
         </div>
       </div>
       {uploadError !== null && (

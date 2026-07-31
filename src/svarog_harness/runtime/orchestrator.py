@@ -1102,7 +1102,14 @@ class TaskRunner:
             return 0
         verifier = Verifier(environment, self._workspace)
         outcomes = await verifier.run(
-            checks, secret_scan=cfg.verifier.secret_scan, known_values=self.known_secret_values()
+            checks,
+            secret_scan=cfg.verifier.secret_scan,
+            known_values=self.known_secret_values(),
+            # Скан ловит секреты, записанные ЭТИМ run'ом, а не всё дерево
+            # workspace: run в обычной папке пользователя (Downloads с ключами
+            # Telegram Desktop, 31.07.2026) не должен вечно падать из-за
+            # файлов, к которым агент не прикасался.
+            modified_since=run.started_at or run.created_at,
         )
         failed = [o for o in outcomes if not o.passed]
         for check in outcomes:

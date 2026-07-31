@@ -102,3 +102,18 @@
     padding: 0 14px;
   }
 }
+
+/* «Сварог работает…» — пульс до первого события стрима: у внешнего агента
+   boot контейнера + первый LLM-ход дают десятки секунд тишины. */
+.chat__thinking {
+  animation: chat-thinking 1.6s ease-in-out infinite;
+}
+@keyframes chat-thinking {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}

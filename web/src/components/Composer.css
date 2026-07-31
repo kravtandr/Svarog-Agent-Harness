@@ -68,8 +68,19 @@
 .composer__modes {
   display: flex;
   align-items: center;
-  gap: 16px;
+  /* Контролов стало много (автономия · исполнитель · sandbox · провайдер ·
+     модель) — группа переносится сама и на широком экране, не выталкивая
+     кнопки действий на отдельную строку. */
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px 16px;
   min-width: 0;
+}
+.composer__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 .composer__dot {
   display: none;
@@ -98,6 +109,12 @@
   font-family: var(--sans);
   font-size: inherit;
   cursor: pointer;
+  /* Длинный id модели (deepseek/deepseek-v4-flash) не должен распирать
+     подвал — обрезаем с многоточием, полное имя в title у пикера. */
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .composer__model:hover:not(:disabled) {
   background: var(--raised);

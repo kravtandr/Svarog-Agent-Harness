@@ -425,52 +425,57 @@ export function Composer({
               </button>
             </span>
             <span className="composer__spacer" />
-            <input
-              ref={fileInput}
-              type="file"
-              multiple
-              className="composer__hidden"
-              // Управляется только кнопкой рядом: собственного имени ей не
-              // нужно, а видимой для скринридера — тем более, второй контрол
-              // с тем же смыслом только запутает.
-              aria-hidden="true"
-              tabIndex={-1}
-              onChange={(event) => {
-                attach(event.target.files);
-                event.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              className="composer__icon"
-              aria-label="Прикрепить файл"
-              onClick={() => fileInput.current?.click()}
-            >
-              📎
-            </button>
-            {/* Место под голос занято сразу: включение не потребует переверстки. */}
-            <button
-              type="button"
-              className="composer__icon"
-              aria-label="Голосовой ввод"
-              aria-describedby="mic-hint"
-              disabled
-            >
-              ●
-            </button>
-            <span id="mic-hint" className="composer__hidden">
-              Голосовой ввод появится позже
+            {/* Кнопки действий — одной группой: при переносе строки они
+                уходят вместе и остаются прижаты вправо, а не рассыпаются
+                (send падал на отдельную строку после добавления sandbox). */}
+            <span className="composer__actions">
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                className="composer__hidden"
+                // Управляется только кнопкой рядом: собственного имени ей не
+                // нужно, а видимой для скринридера — тем более, второй контрол
+                // с тем же смыслом только запутает.
+                aria-hidden="true"
+                tabIndex={-1}
+                onChange={(event) => {
+                  attach(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                className="composer__icon"
+                aria-label="Прикрепить файл"
+                onClick={() => fileInput.current?.click()}
+              >
+                📎
+              </button>
+              {/* Место под голос занято сразу: включение не потребует переверстки. */}
+              <button
+                type="button"
+                className="composer__icon"
+                aria-label="Голосовой ввод"
+                aria-describedby="mic-hint"
+                disabled
+              >
+                ●
+              </button>
+              <span id="mic-hint" className="composer__hidden">
+                Голосовой ввод появится позже
+              </span>
+              <button
+                type="button"
+                className="composer__icon composer__icon--send"
+                aria-label="Отправить"
+                disabled={uploading}
+                title={uploading ? "Дождитесь загрузки файла" : undefined}
+                onClick={send}
+              >
+                ↑
+              </button>
             </span>
-            <button
-              type="button"
-              className="composer__icon composer__icon--send"
-              aria-label="Отправить"
-              disabled={uploading}
-              title={uploading ? "Дождитесь загрузки файла" : undefined}
-              onClick={send}
-            >
-              ↑
-            </button>
           </div>
         </div>
       </div>

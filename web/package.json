@@ -11,6 +11,8 @@
     "format": "prettier --write src"
   },
   "dependencies": {
+    "dompurify": "^3.4.12",
+    "marked": "^18.0.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -23,9 +25,9 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
+    "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.0",
-    "vitest": "^3.0.0",
-    "prettier": "^3.4.2"
+    "vitest": "^3.0.0"
   }
 }

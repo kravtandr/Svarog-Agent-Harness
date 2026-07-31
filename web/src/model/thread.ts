@@ -153,6 +153,17 @@ export function applyEvent(
     return items;
   }
 
+  if (event.type === "notify") {
+    // Служебные вести run'а (мост памяти, старт контейнера, планировщик) —
+    // тусклой строкой: у внешнего агента до первого tool call проходит
+    // десятки секунд (boot контейнера + первый LLM-ход, диагностика
+    // 31.07.2026), и без этих строк лента выглядит зависшей.
+    const { tool, reason } = event as { tool?: string; reason?: string };
+    const text = [tool, reason].filter(Boolean).join(": ");
+    if (!text) return items;
+    return [...items, { kind: "status", id: nextId(), text, failed: false }];
+  }
+
   if (event.type === "run_finished") {
     const { state, error, final_answer } = event as {
       state?: string;
