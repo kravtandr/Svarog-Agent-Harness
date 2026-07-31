@@ -229,6 +229,134 @@ describe("экран настроек", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("переключает провайдера по умолчанию из списка", async () => {
+    const api = fakeApi({
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+        {
+          name: "LiteLLM",
+          base_url: "https://lite/v1",
+          model: "qwen3",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    // Кнопка есть только у не-дефолтного провайдера.
+    await userEvent.click(
+      await screen.findByRole("button", { name: "По умолчанию" }),
+    );
+
+    await waitFor(() =>
+      expect(api.executorDefaults).toHaveBeenCalledWith({
+        executor: "native",
+        provider: "LiteLLM",
+      }),
+    );
+    expect(
+      screen.getByText(/Теперь по умолчанию — «LiteLLM»/),
+    ).toBeInTheDocument();
+  });
+
+  it("разворачивает каталог сохранённого провайдера и подставляет модель в форму", async () => {
+    const api = fakeApi({
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+      ]),
+      providerModels: vi.fn().mockResolvedValue([
+        {
+          id: "qwen3-32b",
+          name: "Qwen3 32B",
+          context_length: 32768,
+          input_usd_per_mtok: null,
+          output_usd_per_mtok: null,
+        },
+      ]),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Модели" }),
+    );
+    await userEvent.click(await screen.findByText("Qwen3 32B"));
+
+    expect(api.providerModels).toHaveBeenCalledWith("local");
+    expect(screen.getByLabelText("Имя")).toHaveValue("local");
+    expect(screen.getByLabelText("Base URL (с /v1)")).toHaveValue(
+      "https://x/v1",
+    );
+    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue(
+      "qwen3-32b",
+    );
+  });
+
+  it("сканирует /models по данным формы и честно показывает ошибку", async () => {
+    const { ApiError } = await import("../api/client");
+    const api = fakeApi({
+      scanModels: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            id: "lite/qwen",
+            name: null,
+            context_length: null,
+            input_usd_per_mtok: null,
+            output_usd_per_mtok: null,
+          },
+        ])
+        .mockRejectedValueOnce(new ApiError(502, "провайдер ответил 401")),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Base URL (с /v1)"),
+      "https://lite/v1",
+    );
+    await userEvent.type(screen.getByLabelText(/API-ключ/), "sk-x");
+    await userEvent.click(screen.getByRole("button", { name: "Сканировать" }));
+
+    await waitFor(() =>
+      expect(api.scanModels).toHaveBeenCalledWith({
+        base_url: "https://lite/v1",
+        api_key: "sk-x",
+      }),
+    );
+    // Клик по найденной модели заполняет поле.
+    await userEvent.click(await screen.findByText("lite/qwen"));
+    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue(
+      "lite/qwen",
+    );
+
+    // Второй скан падает — ошибка на экране, поле не затирается.
+    await userEvent.click(screen.getByRole("button", { name: "Сканировать" }));
+    expect(
+      await screen.findByText("провайдер ответил 401"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue(
+      "lite/qwen",
+    );
+  });
+
   it("показывает имена секретов без значений", async () => {
     render(<SettingsScreen api={fakeApi()} />);
 

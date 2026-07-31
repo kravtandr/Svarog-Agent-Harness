@@ -288,6 +288,17 @@ class AddProviderRequest(BaseModel):
     api_key: str | None = None
 
 
+class ScanModelsRequest(BaseModel):
+    """Скан `/models` по данным формы — до сохранения провайдера.
+
+    Ключ приходит в теле POST (не в URL) и дальше уходит только в заголовок
+    запроса к провайдеру; нигде не сохраняется.
+    """
+
+    base_url: str = Field(min_length=1)
+    api_key: str | None = None
+
+
 class ExecutorDefaultsRequest(BaseModel):
     """Дефолты модели/провайдера для executor'а (настройки)."""
 

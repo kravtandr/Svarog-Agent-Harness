@@ -6,6 +6,7 @@ import type {
   ConfigField,
   ConfigView,
   DiffLine,
+  ModelCard,
   ProviderCard,
   SecretView,
 } from "../api/types";
@@ -138,6 +139,66 @@ function DiffPane({
   );
 }
 
+/** «163840» → «164K»; строке каталога важен порядок величины, не точность. */
+function contextLabel(length: number | null): string {
+  if (length === null) return "";
+  return length >= 1000 ? `${Math.round(length / 1000)}K` : String(length);
+}
+
+function priceLabel(card: ModelCard): string {
+  if (card.input_usd_per_mtok === null) return "";
+  return `$${card.input_usd_per_mtok}/${card.output_usd_per_mtok ?? "?"} за Mtok`;
+}
+
+/** Каталог `/models` с фильтром: у OpenRouter и LiteLLM моделей десятки и
+    сотни, простой список без поиска нечитаем. Клик отдаёт id наружу. */
+function CatalogList({
+  cards,
+  onPick,
+}: {
+  cards: ModelCard[];
+  onPick: (id: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const shown = cards.filter(
+    (card) =>
+      needle === "" ||
+      card.id.toLowerCase().includes(needle) ||
+      (card.name ?? "").toLowerCase().includes(needle),
+  );
+  return (
+    <div className="catalog">
+      {cards.length > 8 && (
+        <input
+          className="field__control"
+          aria-label="Фильтр моделей"
+          placeholder={`Фильтр — ${counted(cards.length, "модель", "модели", "моделей")}`}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      )}
+      <ul className="catalog__list">
+        {shown.map((card) => (
+          <li key={card.id}>
+            <button
+              type="button"
+              className="catalog__row"
+              onClick={() => onPick(card.id)}
+            >
+              <span className="catalog__name">{card.name ?? card.id}</span>
+              <span className="catalog__meta">
+                {contextLabel(card.context_length)} {priceLabel(card)}
+              </span>
+            </button>
+          </li>
+        ))}
+        {shown.length === 0 && <li className="catalog__empty">Пусто.</li>}
+      </ul>
+    </div>
+  );
+}
+
 function ProvidersPane({ api }: { api: Api }) {
   const [providers, setProviders] = useState<ProviderCard[]>([]);
   const [name, setName] = useState("");
@@ -145,6 +206,13 @@ function ProvidersPane({ api }: { api: Api }) {
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  // Каталоги: развёрнутый сохранённый провайдер + результат скана формы.
+  const [openCatalog, setOpenCatalog] = useState<string | null>(null);
+  const [catalogs, setCatalogs] = useState<
+    Record<string, ModelCard[] | string>
+  >({});
+  const [scan, setScan] = useState<ModelCard[] | string | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const reload = useCallback(() => {
     api
@@ -168,6 +236,8 @@ function ProvidersPane({ api }: { api: Api }) {
       setBaseUrl("");
       setModel("");
       setApiKey("");
+      setScan(null);
+      setCatalogs({});
       reload();
     } catch (exc: unknown) {
       setStatus(
@@ -178,24 +248,126 @@ function ProvidersPane({ api }: { api: Api }) {
     }
   };
 
+  const makeDefault = async (provider: string) => {
+    setStatus(null);
+    try {
+      await api.executorDefaults({ executor: "native", provider });
+      setStatus(`Теперь по умолчанию — «${provider}».`);
+      reload();
+    } catch (exc: unknown) {
+      setStatus(
+        exc instanceof ApiError
+          ? exc.message
+          : "Не удалось переключить провайдера.",
+      );
+    }
+  };
+
+  const toggleCatalog = (provider: string) => {
+    if (openCatalog === provider) {
+      setOpenCatalog(null);
+      return;
+    }
+    setOpenCatalog(provider);
+    if (catalogs[provider] !== undefined) return;
+    api
+      .providerModels(provider)
+      .then((cards) =>
+        setCatalogs((current) => ({ ...current, [provider]: cards })),
+      )
+      .catch((exc: unknown) =>
+        setCatalogs((current) => ({
+          ...current,
+          [provider]:
+            exc instanceof ApiError ? exc.message : "каталог недоступен",
+        })),
+      );
+  };
+
+  const runScan = async () => {
+    setScanning(true);
+    setScan(null);
+    try {
+      setScan(
+        await api.scanModels({
+          base_url: baseUrl.trim(),
+          ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        }),
+      );
+    } catch (exc: unknown) {
+      setScan(
+        exc instanceof ApiError ? exc.message : "не удалось получить /models",
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
+
   return (
     <>
       <h2 className="settings__title">Провайдеры</h2>
       <p className="field__help">
         OpenAI-совместимые endpoints для native/opencode/codex. Ключ уходит в
         хранилище секретов, в svarog.yaml пишется только ссылка на него.
+        Переключить активного — «по умолчанию»; разовый выбор на один запуск
+        есть прямо в строке чата.
       </p>
-      {providers.map((card) => (
-        <div key={card.name} className="secret">
-          <span>
-            {card.name}
-            {card.is_default ? " · по умолчанию" : ""}
-          </span>
-          <span className="secret__state">
-            {card.model} · {card.base_url}
-          </span>
-        </div>
-      ))}
+      {providers.map((card) => {
+        const catalog = catalogs[card.name];
+        return (
+          <div key={card.name} className="provider">
+            <div className="secret">
+              <span>
+                {card.name}
+                {card.is_default ? " · по умолчанию" : ""}
+              </span>
+              <span className="secret__state">
+                {card.model} · {card.base_url}
+              </span>
+              <span className="provider__actions">
+                {!card.is_default && (
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    onClick={() => void makeDefault(card.name)}
+                  >
+                    По умолчанию
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--small"
+                  onClick={() => toggleCatalog(card.name)}
+                >
+                  {openCatalog === card.name ? "Скрыть модели" : "Модели"}
+                </button>
+              </span>
+            </div>
+            {openCatalog === card.name &&
+              (catalog === undefined ? (
+                <p className="field__help">Загружаем каталог…</p>
+              ) : typeof catalog === "string" ? (
+                <p className="field__error">{catalog}</p>
+              ) : (
+                <>
+                  <p className="field__help">
+                    Клик по модели подставит её в форму ниже — «Сохранить
+                    провайдера» сделает её моделью «{card.name}».
+                  </p>
+                  <CatalogList
+                    cards={catalog}
+                    onPick={(id) => {
+                      setName(card.name);
+                      setBaseUrl(card.base_url);
+                      setModel(id);
+                      setStatus(null);
+                    }}
+                  />
+                </>
+              ))}
+          </div>
+        );
+      })}
       <h3 className="settings__title">Добавить / обновить</h3>
       <div className="field">
         <label className="field__label" htmlFor="prov-name">
@@ -222,18 +394,6 @@ function ProvidersPane({ api }: { api: Api }) {
         />
       </div>
       <div className="field">
-        <label className="field__label" htmlFor="prov-model">
-          Модель
-        </label>
-        <input
-          id="prov-model"
-          className="field__control"
-          value={model}
-          placeholder="llama-3.3-70b-versatile"
-          onChange={(e) => setModel(e.target.value)}
-        />
-      </div>
-      <div className="field">
         <label className="field__label" htmlFor="prov-key">
           API-ключ (опционально)
         </label>
@@ -244,6 +404,36 @@ function ProvidersPane({ api }: { api: Api }) {
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
         />
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="prov-model">
+          Модель по умолчанию
+        </label>
+        <p className="field__help">
+          «Сканировать» спросит у провайдера список /models — клик по модели
+          заполнит поле.
+        </p>
+        <div className="settings__executor-row">
+          <input
+            id="prov-model"
+            className="field__control"
+            value={model}
+            placeholder="llama-3.3-70b-versatile"
+            onChange={(e) => setModel(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn"
+            disabled={!baseUrl.trim() || scanning}
+            onClick={() => void runScan()}
+          >
+            {scanning ? "Сканируем…" : "Сканировать"}
+          </button>
+        </div>
+        {typeof scan === "string" && <p className="field__error">{scan}</p>}
+        {Array.isArray(scan) && (
+          <CatalogList cards={scan} onPick={(id) => setModel(id)} />
+        )}
       </div>
       <button
         type="button"

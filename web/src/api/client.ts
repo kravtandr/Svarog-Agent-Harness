@@ -107,6 +107,11 @@ export interface Api {
   runDiff(runId: string): Promise<RunDiff>;
   providers(): Promise<ProviderCard[]>;
   providerModels(name: string): Promise<ModelCard[]>;
+  /** Каталог /models по данным формы — до сохранения провайдера. */
+  scanModels(body: {
+    base_url: string;
+    api_key?: string;
+  }): Promise<ModelCard[]>;
   fs(path?: string): Promise<FsListing>;
   fsRecent(): Promise<RecentRoot[]>;
   fsInspect(path: string): Promise<RootInspect>;
@@ -247,6 +252,11 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
     providers: () => request<ProviderCard[]>("/models"),
     providerModels: (name) =>
       request<ModelCard[]>(`/models/${encodeURIComponent(name)}`),
+    scanModels: (body) =>
+      request<ModelCard[]>("/models/scan", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
     executors: () => request<ExecutorOption[]>("/executors"),
     sandboxes: () => request<SandboxOption[]>("/sandboxes"),
     commands: () => request<SlashCommand[]>("/commands"),

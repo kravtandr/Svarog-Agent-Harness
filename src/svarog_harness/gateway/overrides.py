@@ -204,9 +204,7 @@ def apply_override(
             # из выбранной в композере карточки моделей — ровно того, что
             # человек и выбрал рядом с адаптером.
             current = cfg.executor.external
-            unusable = (
-                current.auth != "api-key" or current.base_url == "https://api.anthropic.com"
-            )
+            unusable = current.auth != "api-key" or current.base_url == "https://api.anthropic.com"
             if unusable:
                 provider_name = ov.provider if ov.provider is not None else cfg.models.default
                 provider = cfg.models.providers.get(provider_name)

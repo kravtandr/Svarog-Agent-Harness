@@ -88,6 +88,84 @@ def test_add_provider_rejects_bad_input(client: TestClient) -> None:
     )
 
 
+def test_add_provider_in_workspace_without_own_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Проектный svarog.yaml частичен или отсутствует — правка обязана пройти.
+
+    Полный конфиг живёт на user-уровне (~/.svarog/svarog.yaml), load_config
+    мержит проектный поверх. До фикса 31.07.2026 _write_deep валидировал
+    фрагмент в одиночку и падал «Field required» на models.default.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    ws = tmp_path / "desktop"
+    ws.mkdir()  # своего svarog.yaml нет — как папка, открытая через пикер
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    resp = app_client.post(
+        "/models/providers",
+        json={
+            "name": "LiteLLM",
+            "base_url": "https://litellm.example:9443/v1",
+            "model": "qwen3-32b",
+            "api_key": "sk-lite",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Проектный файл создан и остался частичным: только новый провайдер.
+    written = yaml.safe_load(svc.config_path.read_text(encoding="utf-8"))
+    assert written["models"]["providers"]["LiteLLM"]["model"] == "qwen3-32b"
+    assert "default" not in written["models"]
+    # Эффективный конфиг видит обоих провайдеров.
+    names = [p["name"] for p in app_client.get("/models").json()]
+    assert sorted(names) == ["LiteLLM", "local"]
+
+
+def test_scan_models_returns_catalog_of_unsaved_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from svarog_harness.gateway.catalog import CatalogError, ModelCard
+
+    seen: dict[str, object] = {}
+
+    async def fake_fetch(provider, api_key, **kw):
+        seen["base_url"] = provider.base_url
+        seen["api_key"] = api_key
+        return [ModelCard(id="qwen3-32b", name="Qwen3 32B", context_length=32768)]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    resp = client.post(
+        "/models/scan",
+        json={"base_url": "https://litellm.example:9443/v1", "api_key": "sk-x"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert [card["id"] for card in resp.json()] == ["qwen3-32b"]
+    assert seen == {"base_url": "https://litellm.example:9443/v1", "api_key": "sk-x"}
+
+    async def broken_fetch(provider, api_key, **kw):
+        raise CatalogError("провайдер ответил 401")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", broken_fetch)
+    resp = client.post("/models/scan", json={"base_url": "https://litellm.example:9443/v1"})
+    assert resp.status_code == 502
+    assert "401" in resp.json()["detail"]
+
+
 def test_executor_defaults_native_switches_provider_and_model(
     client: TestClient, service: GatewayService
 ) -> None:

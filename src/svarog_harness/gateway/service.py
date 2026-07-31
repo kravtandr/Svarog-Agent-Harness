@@ -27,12 +27,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from svarog_harness.cli.chat_completion import Suggestion, at_suggestions
-from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
+from svarog_harness.config.loader import (
+    PROJECT_CONFIG_NAME,
+    USER_CONFIG_PATH,
+    ConfigError,
+    deep_merge,
+    load_config,
+)
 from svarog_harness.config.paths import memory_dir, skills_dirs
 from svarog_harness.config.schema import (
     AutonomyMode,
     MCPConfig,
     MCPServerConfig,
+    ProviderConfig,
     SvarogConfig,
     TenantRole,
 )
@@ -504,6 +511,18 @@ class GatewayService:
         self._catalog[name] = (now, cards)
         self._catalog_failures.pop(name, None)
         return cards
+
+    async def scan_models(self, base_url: str, api_key: str | None = None) -> list[ModelCard]:
+        """Каталог `/models` ещё не сохранённого провайдера (форма настроек).
+
+        Без кэша: скан — явное действие человека по свежевведённому URL,
+        отдавать вчерашний список или кэшировать чужой ключ тут нечем и
+        незачем. Ключ живёт только в теле запроса и заголовке к провайдеру.
+        """
+        if not base_url.startswith(("http://", "https://")):
+            raise CatalogError("base_url должен начинаться с http(s)://")
+        probe = ProviderConfig(base_url=base_url.rstrip("/"), model="scan")
+        return await fetch_models(probe, api_key or None)
 
     async def _model_prices(self, provider: str, model: str) -> tuple[float, float] | None:
         """Цены модели из каталога; каталог недоступен — цены из конфига."""
@@ -1305,13 +1324,29 @@ class GatewayService:
             current = self.cfg
         return describe_config(current, str(self.config_path))
 
+    def _validate_effective(self, project_raw: dict[str, Any]) -> None:
+        """Проверить правку так, как её увидит load_config: merge поверх user-уровня.
+
+        Проектный svarog.yaml имеет право быть частичным (§13): в воркспейсе
+        без полного конфига он дополняет ~/.svarog/svarog.yaml. Валидировать
+        его в одиночку нельзя — любая правка падала бы «Field required»
+        (найдено 31.07.2026 на добавлении провайдера из настроек).
+        """
+        user_path = USER_CONFIG_PATH.expanduser()
+        base: dict[str, Any] = {}
+        if user_path.is_file() and user_path.resolve() != self.config_path.resolve():
+            loaded = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                base = loaded
+        SvarogConfig.model_validate(deep_merge(base, project_raw))
+
     def _updated_config_text(self, values: dict[str, Any]) -> tuple[str, str]:
         """Текст файла до и после правки; заодно проверяет результат схемой."""
         raw, before = self._config_yaml()
         # apply_values проверяет, что путь вообще разрешён форме.
         merged = apply_values(raw, values)
         try:
-            SvarogConfig(**merged)
+            self._validate_effective(merged)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
         # Правим текст построчно, а не пересобираем: иначе из файла пропадут
@@ -1380,7 +1415,7 @@ class GatewayService:
             after = remove_deep_key(after, path)
         parsed = yaml.safe_load(after) or {}
         try:
-            SvarogConfig.model_validate(parsed)
+            self._validate_effective(parsed)
         except ValidationError as exc:
             first = exc.errors()[0].get("msg", str(exc)) if exc.errors() else str(exc)
             raise ValueError(f"правка делает конфиг невалидным: {first}") from exc

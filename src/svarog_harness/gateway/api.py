@@ -79,6 +79,7 @@ from svarog_harness.gateway.models import (
     RunRef,
     RunSummary,
     SandboxOptionView,
+    ScanModelsRequest,
     SecretView,
     SendMessageRequest,
     SessionSummary,
@@ -706,6 +707,14 @@ def create_app(
             return await service.write_config(req.values)
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/models/scan", response_model=list[ModelCardView])
+    async def scan_models(req: ScanModelsRequest, service: ServiceDep) -> list[ModelCardView]:
+        try:
+            cards = await service.scan_models(req.base_url, api_key=req.api_key)
+        except CatalogError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return [ModelCardView(**vars(card)) for card in cards]
 
     @app.post("/models/providers", response_model=ConfigDiffView)
     async def add_provider(req: AddProviderRequest, service: ServiceDep) -> ConfigDiffView:

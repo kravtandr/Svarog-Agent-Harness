@@ -50,3 +50,4 @@ agent-home/
 web/node_modules/
 web/dist/
 node_modules/
+web/tsconfig.tsbuildinfo
