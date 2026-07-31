@@ -1032,8 +1032,24 @@ class GatewayService:
                 .all()
             )
             recorder = TraceRecorder(db)
+            # Живой run отдаётся ОТДЕЛЬНО от items: клиент переподписывается
+            # на его WS, и реплей истории событий восстанавливает ленту —
+            # включать его частичный трейс в items значило бы задвоить её
+            # (параллельные чаты, 31.07.2026). Живость — как у lease:
+            # RUNNING со свежим heartbeat, протухший не в счёт.
+            live = await recorder.live_run_on_workspace(runs[-1].workspace) if runs else None
+            live_run = (
+                runs[-1]
+                if runs
+                and live is not None
+                and live.id == runs[-1].id
+                and runs[-1].state == RunState.RUNNING
+                else None
+            )
             items: list[ThreadItemView] = []
             for run in runs:
+                if live_run is not None and run.id == live_run.id:
+                    continue
                 items.append(ThreadItemView(kind="user", text=run.task))
                 calls = (
                     (
@@ -1065,7 +1081,13 @@ class GatewayService:
                 answer = await recorder.last_assistant_text(run)
                 if answer:
                     items.append(ThreadItemView(kind="say", text=answer))
-            return SessionThread(session_id=session.id, title=session.title or "", items=items)
+            return SessionThread(
+                session_id=session.id,
+                title=session.title or "",
+                items=items,
+                live_run_id=live_run.id if live_run is not None else None,
+                live_task=live_run.task if live_run is not None else None,
+            )
 
         return await self._read(action)
 

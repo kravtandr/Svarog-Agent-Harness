@@ -28,6 +28,11 @@ export interface SessionThread {
   session_id: string;
   title: string;
   items: ThreadItemView[];
+  // Живой run сессии (параллельные чаты): его лента не входит в items —
+  // клиент рисует пузырь live_task и переподписывается на WS run'а,
+  // реплей событий восстанавливает вызовы/текст.
+  live_run_id?: string | null;
+  live_task?: string | null;
 }
 
 export interface RunRef {

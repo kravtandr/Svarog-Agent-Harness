@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -242,6 +248,61 @@ describe("подписка на поток", () => {
     vi.unstubAllGlobals();
   });
 
+  it("переподписывается на живой run сессии при открытии (параллельные чаты)", async () => {
+    const opened: string[] = [];
+    class FakeSocket {
+      static last: FakeSocket | null = null;
+      onmessage: ((e: MessageEvent<string>) => void) | null = null;
+      constructor(public url: string | URL) {
+        opened.push(String(url));
+        FakeSocket.last = this;
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+
+    const client = api({
+      sessionThread: () =>
+        Promise.resolve({
+          session_id: "s1",
+          title: "t",
+          items: [],
+          live_run_id: "r-live",
+          live_task: "долгая задача",
+        }),
+    });
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
+
+    // Пузырь задачи живого run'а виден сразу, подписка идёт на его WS.
+    await waitFor(() =>
+      expect(screen.getByText("долгая задача")).toBeInTheDocument(),
+    );
+    expect(opened.some((url) => url.includes("r-live"))).toBe(true);
+    // Пока run жив — отправка заблокирована с подсказкой.
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+    // Реплей событий восстанавливает ленту; run_finished разблокирует ввод.
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({ type: "text", delta: "готово: сделано" }),
+      } as MessageEvent<string>),
+    );
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({ type: "run_finished", state: "completed" }),
+      } as MessageEvent<string>),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/готово: сделано/)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
+
   it("переподписывается после решения по гейту", async () => {
     const opened: string[] = [];
     class FakeSocket {
@@ -397,6 +458,17 @@ describe("провайдер и модель", () => {
   });
 
   it("сохраняет выбор между сообщениями", async () => {
+    // Пока run первого сообщения жив, отправка заблокирована (параллельные
+    // чаты) — завершаем его событием run_finished через фейковый сокет.
+    class FakeSocket {
+      static last: FakeSocket | null = null;
+      onmessage: ((e: MessageEvent<string>) => void) | null = null;
+      constructor(public url: string | URL) {
+        FakeSocket.last = this;
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
     const sendMessage = vi
       .fn()
       .mockResolvedValue({ run_id: "r1", state: "running" });
@@ -427,6 +499,12 @@ describe("провайдер и модель", () => {
     await userEvent.type(
       screen.getByLabelText("Написать Сварогу"),
       "привет{Enter}",
+    );
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({ type: "run_finished", state: "completed" }),
+      } as MessageEvent<string>),
     );
     await userEvent.type(
       screen.getByLabelText("Написать Сварогу"),

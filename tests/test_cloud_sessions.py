@@ -659,3 +659,50 @@ def test_stream_survives_waiting_approval() -> None:
         "text:",
         "run_finished:completed",
     ]
+
+
+# --- параллельные чаты (31.07.2026) ----------------------------------------
+
+
+async def test_parallel_runs_in_different_workspaces(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run'ы разных сессий с разными workspace идут ОДНОВРЕМЕННО; второй run
+    в том же workspace — честный WorkspaceBusyError; thread живой сессии
+    отдаёт live_run_id/live_task, а его частичный трейс НЕ дублируется в
+    items (клиент восстановит ленту WS-реплеем)."""
+    from svarog_harness.trace.recorder import WorkspaceBusyError
+
+    provider = GatedProvider([_final("готово A"), _final("готово B")])
+    _install_provider(monkeypatch, provider)
+    await service.create_workspace("wa")
+    await service.create_workspace("wb")
+    a = await service.create_session(title="чат A", workspace_name="wa")
+    b = await service.create_session(title="чат B", workspace_name="wb")
+
+    run_a = await service.send_message(a.session_id, "задача A", None)
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+    provider.entered.clear()
+
+    # Пока A заблокирован в LLM-вызове — чат B стартует параллельно.
+    run_b = await service.send_message(b.session_id, "задача B", None)
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+    assert (await service.get_run(run_a)).state == "running"
+    assert (await service.get_run(run_b)).state == "running"
+
+    thread = await service.session_thread(a.session_id)
+    assert thread.live_run_id == run_a
+    assert thread.live_task == "задача A"
+    assert thread.items == []  # частичный трейс живого run'а не задваивается
+
+    # Тот же workspace занят живым run'ом — отказ, а не второй run.
+    with pytest.raises(WorkspaceBusyError):
+        await service.send_message(a.session_id, "ещё одну", None)
+
+    provider.gate.set()  # Event будит обоих ожидающих — оба run'а доезжают
+    assert await _wait_state(service, run_a, {"completed"}) == "completed"
+    assert await _wait_state(service, run_b, {"completed"}) == "completed"
+
+    thread = await service.session_thread(a.session_id)
+    assert thread.live_run_id is None
+    assert any(item.kind == "say" for item in thread.items)

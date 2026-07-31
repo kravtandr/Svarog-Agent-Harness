@@ -178,6 +178,10 @@ export function ChatScreen({
   // агента между стартом (boot контейнера) и первым tool call проходят
   // десятки секунд, и без индикатора лента выглядит зависшей (31.07.2026).
   const [thinking, setThinking] = useState(false);
+  // Живой run этой сессии (от отправки/переподключения до run_finished):
+  // пока он идёт, отправка заблокирована — сервер всё равно ответит 409
+  // «workspace занят», честнее не давать нажать (параллельные чаты).
+  const [running, setRunning] = useState(false);
   const unsubscribe = useRef<(() => void) | null>(null);
   const sendSeq = useRef(0);
   const commandSeq = useRef(0);
@@ -289,6 +293,7 @@ export function ChatScreen({
         // Первое же событие стрима гасит индикатор «работает»: дальше
         // прогресс виден по самим событиям (чипы, дельты текста).
         setThinking(false);
+        if (event.type === "run_finished") setRunning(false);
         setItems((current) => applyEvent(current, event));
       });
     },
@@ -326,11 +331,33 @@ export function ChatScreen({
       // их результат не должен долететь до attachments уже новой.
       sessionEpoch.current += 1;
     }
+    setRunning(false);
     api
       .sessionThread(sessionId)
-      .then((thread) => setItems(fromHistory(thread.items)))
+      .then((thread) => {
+        const history = fromHistory(thread.items);
+        if (thread.live_run_id) {
+          // В сессии прямо сейчас идёт run (параллельные чаты): рисуем
+          // пузырь его задачи и переподписываемся — WS-реплей истории
+          // событий восстановит вызовы и текст, дальше лента живая.
+          setItems([
+            ...history,
+            {
+              kind: "user",
+              id: `live-${thread.live_run_id}`,
+              text: thread.live_task ?? "",
+              attachments: [],
+            },
+          ]);
+          setThinking(true);
+          setRunning(true);
+          watch(thread.live_run_id);
+        } else {
+          setItems(history);
+        }
+      })
       .catch(() => setThreadError("Не удалось загрузить историю этой сессии."));
-  }, [api, sessionId]);
+  }, [api, sessionId, watch]);
 
   useEffect(() => () => unsubscribe.current?.(), []);
 
@@ -446,6 +473,7 @@ export function ChatScreen({
       ]);
       setSendError(null);
       setThinking(true);
+      setRunning(true);
       try {
         // Тот же резолвер, что у attach(): сессия, которую уже завела (или
         // заводит прямо сейчас) загрузка вложения, а не вторая новая поверх
@@ -495,6 +523,7 @@ export function ChatScreen({
         // Молчаливый провал — худший исход: реплика висит в ленте, а агент
         // не запущен. Например, автономия, которую исполнитель не умеет.
         setThinking(false);
+        setRunning(false);
         setSendError(
           exc instanceof ApiError
             ? exc.message
@@ -716,6 +745,7 @@ export function ChatScreen({
       <Composer
         onSend={(text, atts) => void send(text, atts)}
         uploading={pendingUploads > 0}
+        busy={running}
         autonomy={autonomy}
         onAutonomyChange={setAutonomy}
         executors={executors}

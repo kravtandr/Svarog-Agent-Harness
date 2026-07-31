@@ -37,6 +37,7 @@ const SANDBOX_UNAVAILABLE_HINT = "docker/podman не найден на хост�
 export function Composer({
   onSend,
   uploading = false,
+  busy = false,
   autonomy,
   onAutonomyChange,
   executors,
@@ -62,6 +63,10 @@ export function Composer({
       (Finding 8 обзора). По умолчанию false — экраны без вложений (если
       такие появятся) не обязаны про это думать. */
   uploading?: boolean;
+  /** В сессии прямо сейчас идёт run: отправка заблокирована — сервер всё
+      равно ответит 409 «workspace занят» (параллельные чаты: пишите в
+      другой чат, этот доделает и освободится). */
+  busy?: boolean;
   autonomy: Autonomy;
   onAutonomyChange: (autonomy: Autonomy) => void;
   /** GET /executors: нативный цикл плюс по одной записи на адаптер;
@@ -197,7 +202,7 @@ export function Composer({
     // Хоть одна загрузка ещё не ответила — путь для неё ещё не существует.
     // Отправить сейчас значит молча уйти без этого файла (Finding 8
     // обзора); правильнее подождать ответа, будь он успехом или ошибкой.
-    if (uploading) return;
+    if (uploading || busy) return;
     const trimmed = text.trim();
     if (!trimmed) return;
     onSend(
@@ -469,8 +474,14 @@ export function Composer({
                 type="button"
                 className="composer__icon composer__icon--send"
                 aria-label="Отправить"
-                disabled={uploading}
-                title={uploading ? "Дождитесь загрузки файла" : undefined}
+                disabled={uploading || busy}
+                title={
+                  busy
+                    ? "В этом чате идёт run — дождитесь или напишите в другой чат"
+                    : uploading
+                      ? "Дождитесь загрузки файла"
+                      : undefined
+                }
                 onClick={send}
               >
                 ↑

@@ -306,6 +306,12 @@ class SessionThread(BaseModel):
     session_id: str
     title: str
     items: list[ThreadItemView]
+    # Живой (RUNNING со свежим heartbeat) run сессии: его лента НЕ входит в
+    # items — клиент рисует пузырь задачи из live_task и переподписывается на
+    # WS run'а, реплей истории событий восстанавливает вызовы/текст без
+    # дублей (параллельные чаты, 31.07.2026). None — живого run'а нет.
+    live_run_id: str | None = None
+    live_task: str | None = None
 
 
 class SessionSummary(BaseModel):
