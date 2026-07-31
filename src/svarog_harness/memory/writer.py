@@ -93,6 +93,7 @@ class MemoryWriter:
         if not pending:
             return []
 
+        await self._ensure_own_repo(known_values=known_values)
         await self._repo.ensure_identity()
         processed: list[MemoryChange] = []
         entries: list[str] = []
@@ -103,6 +104,30 @@ class MemoryWriter:
             processed.append(row)
         await self._reindex(entries, known_values=known_values)
         return processed
+
+    async def _ensure_own_repo(self, *, known_values: frozenset[str]) -> None:
+        """Каталог памяти обязан быть СОБСТВЕННЫМ git-репозиторием.
+
+        `GitRepo(memory_dir)` без своего .git резолвится в родительский
+        репозиторий (git ищет toplevel вверх): add_all/commit уехали бы в
+        ЧУЖОЙ репозиторий человека — либо, если память лежит в ignored-каталоге
+        (agent-home/ внутри чекаута Svarog), git add падает «paths are ignored»
+        и валит run загадочной ошибкой (найдено 31.07.2026, web-run на Desktop).
+        Зеркало skill_repo.ready() (кампания 23.07.2026), но память чинится
+        сама: git init + базовый коммит — ровно то, что делает svarog init.
+        """
+        toplevel = await self._repo.toplevel()
+        if toplevel is not None and toplevel.resolve() == self._memory_dir.resolve():
+            return
+        await self._repo.init()
+        await self._repo.ensure_identity()
+        await self._repo.add_all()
+        if await self._repo.has_staged_changes():
+            # Базовый коммит существующего содержимого — через тот же
+            # secret-gate, что и все коммиты памяти (ADR-0006).
+            await commit_guarded(
+                self._repo, "memory: baseline (auto-init)", known_values=known_values
+            )
 
     async def _reindex(self, entries: list[str], *, known_values: frozenset[str]) -> None:
         """Автоген index.md/log.md после применённых заявок (ADR-0011).

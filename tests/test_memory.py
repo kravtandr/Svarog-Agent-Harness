@@ -239,6 +239,52 @@ async def _memory_repo(tmp_path: Path) -> Path:
     return memory_dir
 
 
+async def test_writer_auto_inits_memory_nested_in_foreign_repo(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Память без своего .git внутри чужого репозитория (agent-home/memory в
+    чекаутe Svarog, 31.07.2026): git add уезжал в родительский репо и падал
+    «paths are ignored» (agent-home в .gitignore), заваливая run. Теперь writer
+    сам делает git init + baseline — коммиты живут в СОБСТВЕННОМ репо памяти,
+    родительский не тронут."""
+    parent = tmp_path / "checkout"
+    (parent / "agent-home" / "memory" / "user").mkdir(parents=True)
+    parent_repo = GitRepo(parent)
+    await parent_repo.init()
+    await parent_repo.ensure_identity()
+    (parent / ".gitignore").write_text("agent-home/\n", encoding="utf-8")
+    (parent / "README.md").write_text("проект\n", encoding="utf-8")
+    memory_dir = parent / "agent-home" / "memory"
+    (memory_dir / "user" / "profile.md").write_text("# Профиль\n", encoding="utf-8")
+    await parent_repo.add_all()
+    await parent_repo.commit("init")
+
+    writer = MemoryWriter(db, memory_dir)
+    run_id = await _make_run(db, "запись в память")
+    await writer.enqueue(
+        MemoryChangeRequest(
+            file="user/profile.md",
+            operation=MemoryOperation.APPEND,
+            content="любит Python\n",
+            source_run_id=run_id,
+        )
+    )
+    processed = await writer.drain()
+    assert len(processed) == 1
+    assert processed[0].status is MemoryChangeStatus.APPLIED
+
+    # У памяти теперь собственный репозиторий с baseline и коммитом заявки.
+    memory_repo = GitRepo(memory_dir)
+    toplevel = await memory_repo.toplevel()
+    assert toplevel is not None and toplevel.resolve() == memory_dir.resolve()
+    _, log, _ = await memory_repo._git("log", "--format=%s")
+    assert "memory: baseline (auto-init)" in log
+    # Родительский репозиторий не получил ни коммитов, ни staged-изменений.
+    _, parent_log, _ = await parent_repo._git("log", "--format=%s")
+    assert parent_log.strip().splitlines() == ["init"]
+    assert not await parent_repo.has_staged_changes()
+
+
 async def test_writer_applies_and_commits_sequentially(db: AsyncSession, tmp_path: Path) -> None:
     memory_dir = await _memory_repo(tmp_path)
     writer = MemoryWriter(db, memory_dir)
