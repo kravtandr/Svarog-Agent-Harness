@@ -96,18 +96,34 @@ async def fetch_models(
     timeout: float = CATALOG_TIMEOUT_SEC,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[ModelCard]:
-    """Список моделей провайдера. Ключ уходит только в заголовок запроса."""
-    url = f"{provider.base_url.rstrip('/')}/models"
+    """Список моделей провайдера. Ключ уходит только в заголовок запроса.
+
+    base_url без `/v1` — частая ошибка конфига (OpenRouter отдаёт HTML на
+    /api/models, найдено 31.07.2026): после провала пробуем `{base}/v1/models`
+    и, если там живой каталог, отвечаем им — вместо загадочного «ответ не
+    JSON». Ошибка первого URL сохраняется в тексте, чтобы конфиг всё же
+    поправили.
+    """
+    base = provider.base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    try:
-        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        raise CatalogError(f"{url}: {exc}") from None
-    if response.status_code >= 400:
-        raise CatalogError(f"{url}: провайдер ответил {response.status_code}")
-    try:
-        payload = response.json()
-    except ValueError:
-        raise CatalogError(f"{url}: ответ не JSON") from None
-    return parse_models(payload if isinstance(payload, dict) else {})
+    urls = [f"{base}/models"]
+    if not base.endswith("/v1"):
+        urls.append(f"{base}/v1/models")
+    last_error = ""
+    async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        for url in urls:
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                last_error = f"{url}: {exc}"
+                continue
+            if response.status_code >= 400:
+                last_error = f"{url}: провайдер ответил {response.status_code}"
+                continue
+            try:
+                payload = response.json()
+            except ValueError:
+                last_error = f"{url}: ответ не JSON (base_url без /v1?)"
+                continue
+            return parse_models(payload if isinstance(payload, dict) else {})
+    raise CatalogError(last_error or f"{base}: список моделей недоступен")

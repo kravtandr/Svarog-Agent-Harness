@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { ModelCard } from "../api/types";
+import type { ModelCard, ProviderCard } from "../api/types";
 import "./ModelPicker.css";
 
 /** «163840» → «164K»: в строке списка важен порядок, а не точность. */
@@ -20,12 +20,20 @@ export function ModelPicker({
   error,
   onPick,
   onClose,
+  providers = [],
+  provider = "",
+  onProviderChange = () => {},
 }: {
   models: ModelCard[];
   current: string;
   error: string | null;
   onPick: (id: string) => void;
   onClose: () => void;
+  /** Провайдеры для переключения прямо в окошке: смена провайдера
+      перезагружает список моделей (модели живут у провайдера). */
+  providers?: ProviderCard[];
+  provider?: string;
+  onProviderChange?: (name: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const field = useRef<HTMLInputElement>(null);
@@ -55,6 +63,20 @@ export function ModelPicker({
 
   return (
     <div className="picker" role="dialog" aria-label="Выбор модели">
+      {providers.length > 1 && (
+        <select
+          className="picker__provider"
+          aria-label="Провайдер моделей"
+          value={provider}
+          onChange={(event) => onProviderChange(event.target.value)}
+        >
+          {providers.map((card) => (
+            <option key={card.name} value={card.name}>
+              {card.name}
+            </option>
+          ))}
+        </select>
+      )}
       <input
         ref={field}
         className="picker__search"

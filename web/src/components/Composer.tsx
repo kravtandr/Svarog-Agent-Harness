@@ -227,6 +227,9 @@ export function Composer({
               models={models}
               current={model}
               error={modelsError}
+              providers={providers}
+              provider={provider}
+              onProviderChange={onProviderChange}
               onPick={(id) => {
                 onModelChange(id);
                 setPicking(false);

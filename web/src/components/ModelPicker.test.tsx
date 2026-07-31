@@ -23,6 +23,62 @@ const MODELS: ModelCard[] = [
 ];
 
 describe("ModelPicker", () => {
+  it("переключает провайдера прямо в окошке", async () => {
+    const onProviderChange = vi.fn();
+    render(
+      <ModelPicker
+        models={MODELS}
+        current=""
+        error={null}
+        onPick={() => {}}
+        onClose={() => {}}
+        providers={[
+          {
+            name: "local",
+            base_url: "https://x/v1",
+            model: "m",
+            is_default: true,
+          },
+          {
+            name: "groq",
+            base_url: "https://y/v1",
+            model: "g",
+            is_default: false,
+          },
+        ]}
+        provider="local"
+        onProviderChange={onProviderChange}
+      />,
+    );
+    await userEvent.selectOptions(
+      screen.getByLabelText("Провайдер моделей"),
+      "groq",
+    );
+    expect(onProviderChange).toHaveBeenCalledWith("groq");
+  });
+
+  it("без второго провайдера селект не показывается", () => {
+    render(
+      <ModelPicker
+        models={MODELS}
+        current=""
+        error={null}
+        onPick={() => {}}
+        onClose={() => {}}
+        providers={[
+          {
+            name: "local",
+            base_url: "https://x/v1",
+            model: "m",
+            is_default: true,
+          },
+        ]}
+        provider="local"
+      />,
+    );
+    expect(screen.queryByLabelText("Провайдер моделей")).toBeNull();
+  });
+
   it("фильтрует по id и по имени", async () => {
     render(
       <ModelPicker

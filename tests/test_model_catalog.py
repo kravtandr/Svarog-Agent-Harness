@@ -127,6 +127,41 @@ async def test_fetch_uses_base_url_as_is_and_sends_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_retries_with_v1_when_base_url_lacks_it() -> None:
+    """31.07.2026: base_url без /v1 (openrouter.ai/api) отдаёт HTML на /models —
+    пробуем {base}/v1/models прежде чем сдаться «ответ не JSON»."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if str(request.url).endswith("/api/models"):
+            return httpx.Response(200, text="<html>not json</html>")
+        return httpx.Response(200, json={"data": [{"id": "m1"}]})
+
+    cards = await fetch_models(
+        _provider("https://openrouter.ai/api"), None, transport=httpx.MockTransport(handler)
+    )
+    assert seen == [
+        "https://openrouter.ai/api/models",
+        "https://openrouter.ai/api/v1/models",
+    ]
+    assert [c.id for c in cards] == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_error_mentions_v1_hint_when_both_fail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html></html>")
+
+    with pytest.raises(CatalogError, match="не JSON"):
+        await fetch_models(
+            _provider("https://openrouter.ai/api"),
+            None,
+            transport=httpx.MockTransport(handler),
+        )
+
+
+@pytest.mark.asyncio
 async def test_fetch_without_key_sends_no_auth_header() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") is None
