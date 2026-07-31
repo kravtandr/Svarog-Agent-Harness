@@ -136,6 +136,26 @@ def test_add_provider_in_workspace_without_own_config(
     assert sorted(names) == ["LiteLLM", "local"]
 
 
+def test_broken_user_config_gives_422_not_500(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """~/.svarog/svarog.yaml сломали после старта serve — правка отвечает 422.
+
+    _validate_effective читает user-файл на каждую правку; кривой YAML в нём
+    не должен ронять запрос в 500 из недр парсера.
+    """
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True, exist_ok=True)
+    user_cfg.write_text("models: [это, не, mapping\n", encoding="utf-8")
+
+    resp = client.post(
+        "/models/providers",
+        json={"name": "lite", "base_url": "https://x/v1", "model": "m"},
+    )
+    assert resp.status_code == 422
+    assert "не читается" in resp.json()["detail"]
+
+
 def test_scan_models_returns_catalog_of_unsaved_provider(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

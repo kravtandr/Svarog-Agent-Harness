@@ -1335,7 +1335,14 @@ class GatewayService:
         user_path = USER_CONFIG_PATH.expanduser()
         base: dict[str, Any] = {}
         if user_path.is_file() and user_path.resolve() != self.config_path.resolve():
-            loaded = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            try:
+                loaded = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                # Пользовательский файл сломали после старта serve: без него
+                # merge не проверить — честный 422, а не 500 из недр yaml.
+                raise ValueError(
+                    f"не могу проверить правку: {user_path} не читается: {exc}"
+                ) from exc
             if isinstance(loaded, dict):
                 base = loaded
         SvarogConfig.model_validate(deep_merge(base, project_raw))

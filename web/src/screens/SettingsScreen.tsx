@@ -237,6 +237,9 @@ function ProvidersPane({ api }: { api: Api }) {
       setModel("");
       setApiKey("");
       setScan(null);
+      // Кэш каталогов сброшен — держать секцию развёрнутой нельзя: она
+      // застряла бы на «Загружаем…» без повторного запроса.
+      setOpenCatalog(null);
       setCatalogs({});
       reload();
     } catch (exc: unknown) {

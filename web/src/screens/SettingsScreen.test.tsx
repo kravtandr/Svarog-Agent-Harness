@@ -305,6 +305,15 @@ describe("экран настроек", () => {
     expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue(
       "qwen3-32b",
     );
+
+    // Сохранение сбрасывает кэш каталогов — секция обязана свернуться,
+    // иначе она застряла бы на «Загружаем…» без повторного запроса.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить провайдера" }),
+    );
+    await waitFor(() => expect(api.addProvider).toHaveBeenCalled());
+    expect(screen.queryByText(/Загружаем каталог/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Модели" })).toBeInTheDocument();
   });
 
   it("сканирует /models по данным формы и честно показывает ошибку", async () => {
