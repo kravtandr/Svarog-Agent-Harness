@@ -278,6 +278,52 @@ class ExecutorOptionView(BaseModel):
     is_active: bool
 
 
+class AddProviderRequest(BaseModel):
+    """Новый/обновляемый провайдер (настройки). Ключ уходит в SecretStore,
+    в yaml пишется только ref (ADR-0006)."""
+
+    name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    api_key: str | None = None
+
+
+class ExecutorDefaultsRequest(BaseModel):
+    """Дефолты модели/провайдера для executor'а (настройки)."""
+
+    executor: Literal["native", "claude-code", "codex", "opencode"]
+    provider: str | None = None
+    model: str | None = None
+
+
+class McpServerView(BaseModel):
+    name: str
+    command: str
+    args: list[str] = []
+    env_refs: list[str] = []
+    risk: str = "high"
+
+
+class AddMcpRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    command: str = Field(min_length=1)
+    args: list[str] = []
+    env_refs: list[str] = []
+    risk: Literal["low", "medium", "high", "critical"] = "high"
+
+
+class McpTestRequest(BaseModel):
+    command: str = Field(min_length=1)
+    args: list[str] = []
+    env_refs: list[str] = []
+
+
+class McpTestView(BaseModel):
+    ok: bool
+    tools: list[str] = []
+    error: str | None = None
+
+
 class SandboxOptionView(BaseModel):
     """Вариант sandbox для селекта поля ввода (зеркало ExecutorOptionView)."""
 

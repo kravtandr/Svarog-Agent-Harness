@@ -322,6 +322,115 @@ def patch_yaml_text(text: str, values: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _block_bounds(
+    lines: list[str], start: int, end: int, indent: int
+) -> dict[str, tuple[int, int]]:
+    """Ключи mapping-блока на данном отступе → (строка ключа, конец блока)."""
+    key_re = re.compile(rf"^{' ' * indent}(?P<name>[A-Za-z_][\w.\-/]*):\s*(?P<rest>.*)$")
+    bounds: dict[str, tuple[int, int]] = {}
+    current: str | None = None
+    block_start = start
+    for index in range(start, end):
+        line = lines[index]
+        if line.strip() == "" or line.lstrip().startswith("#"):
+            continue
+        current_indent = len(line) - len(line.lstrip(" "))
+        if current_indent < indent:
+            break
+        if current_indent > indent:
+            continue
+        match = key_re.match(line)
+        if match is None:
+            continue
+        if current is not None:
+            bounds[current] = (block_start, index)
+        current = match.group("name")
+        block_start = index
+    if current is not None:
+        # Конец последнего блока — первая строка с МЕНЬШИМ отступом (или end).
+        stop = end
+        for index in range(block_start + 1, end):
+            line = lines[index]
+            if line.strip() == "" or line.lstrip().startswith("#"):
+                continue
+            if len(line) - len(line.lstrip(" ")) < indent:
+                stop = index
+                break
+        bounds[current] = (block_start, stop)
+    return bounds
+
+
+def _render_chain(chain: list[str], value: Any, indent: int) -> list[str]:
+    """Недостающий хвост пути как вложенный yaml-блок."""
+    rendered: list[str] = []
+    for depth, key in enumerate(chain):
+        prefix = " " * (indent + 2 * depth)
+        if depth == len(chain) - 1:
+            rendered.append(f"{prefix}{key}: {_scalar(value)}")
+        else:
+            rendered.append(f"{prefix}{key}:")
+    return rendered
+
+
+def set_deep_value(text: str, path: str, value: Any) -> str:
+    """Записать значение по dotted-пути любой глубины, не трогая остальной файл.
+
+    В отличие от `patch_yaml_text` (плоские `секция.поле` формы настроек),
+    работает с вложенными путями (`models.providers.x.base_url`,
+    `mcp.servers.y.command`): недостающие промежуточные mapping'и создаются.
+    Комментарии и порядок существующих строк сохраняются — файл ведут руками.
+    """
+    lines = text.splitlines()
+    keys = path.split(".")
+    start, end, indent = 0, len(lines), 0
+    for depth, key in enumerate(keys):
+        bounds = _block_bounds(lines, start, end, indent)
+        span = bounds.get(key)
+        if span is None:
+            # Дальше пути в файле нет — дописываем недостающую цепочку в конец
+            # текущего блока (или файла).
+            insert_at = end
+            chain = _render_chain(keys[depth:], value, indent)
+            lines[insert_at:insert_at] = chain
+            return "\n".join(lines) + "\n"
+        head, stop = span
+        if depth == len(keys) - 1:
+            line = lines[head]
+            tail = line.split(":", 1)[1]
+            comment = ""
+            hash_at = tail.find("#")
+            if hash_at != -1:
+                comment = "   " + tail[hash_at:].rstrip()
+            lines[head] = f"{' ' * indent}{key}: {_scalar(value)}{comment}"
+            return "\n".join(lines) + "\n"
+        start, end, indent = head + 1, stop, indent + 2
+    return "\n".join(lines) + "\n"
+
+
+def set_deep_values(text: str, values: dict[str, Any]) -> str:
+    for path, value in values.items():
+        text = set_deep_value(text, path, value)
+    return text
+
+
+def remove_deep_key(text: str, path: str) -> str:
+    """Удалить ключ (со всем вложенным блоком) по dotted-пути; нет — no-op."""
+    lines = text.splitlines()
+    keys = path.split(".")
+    start, end, indent = 0, len(lines), 0
+    for depth, key in enumerate(keys):
+        bounds = _block_bounds(lines, start, end, indent)
+        span = bounds.get(key)
+        if span is None:
+            return text
+        head, stop = span
+        if depth == len(keys) - 1:
+            del lines[head:stop]
+            return "\n".join(lines) + "\n"
+        start, end, indent = head + 1, stop, indent + 2
+    return text
+
+
 def diff_lines(before: str, after: str) -> list[DiffLine]:
     """Построчный дифф двух версий файла для панели «будет записано»."""
     lines: list[DiffLine] = []

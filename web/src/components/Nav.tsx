@@ -58,12 +58,14 @@ function dayLabel(session: SessionSummary, now: number = Date.now()): string {
   return "Ранее";
 }
 
-export type Section = "chat" | "runs" | "skills" | "memory" | "settings";
+export type Section =
+  "chat" | "runs" | "skills" | "memory" | "mcp" | "settings";
 
 const SECTIONS: { key: Section; title: string }[] = [
   { key: "runs", title: "Запуски" },
   { key: "skills", title: "Скиллы" },
   { key: "memory", title: "Память" },
+  { key: "mcp", title: "MCP" },
   { key: "settings", title: "Настройки" },
 ];
 

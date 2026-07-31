@@ -48,6 +48,8 @@ from svarog_harness.gateway.hub import (
     WorkspaceHub,
 )
 from svarog_harness.gateway.models import (
+    AddMcpRequest,
+    AddProviderRequest,
     AnswerRequest,
     ApprovalDecisionRequest,
     ApprovalView,
@@ -57,10 +59,14 @@ from svarog_harness.gateway.models import (
     CreateSessionRequest,
     CreateWorkspaceRequest,
     DirListing,
+    ExecutorDefaultsRequest,
     ExecutorOptionView,
     FileEntry,
     FileSuggestionView,
     FsListingView,
+    McpServerView,
+    McpTestRequest,
+    McpTestView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
@@ -700,6 +706,50 @@ def create_app(
             return await service.write_config(req.values)
         except (ConfigError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/models/providers", response_model=ConfigDiffView)
+    async def add_provider(req: AddProviderRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.add_provider(
+                req.name, req.base_url, req.model, api_key=req.api_key
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/executors/defaults", response_model=ConfigDiffView)
+    async def set_executor_defaults(
+        req: ExecutorDefaultsRequest, service: ServiceDep
+    ) -> ConfigDiffView:
+        try:
+            return await service.set_executor_defaults(
+                req.executor, provider=req.provider, model=req.model
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    # --- MCP-серверы (вкладка MCP, 31.07.2026) -----------------------------
+
+    @app.get("/mcp", response_model=list[McpServerView])
+    async def list_mcp(service: ServiceDep) -> list[McpServerView]:
+        return service.list_mcp()
+
+    @app.post("/mcp/test", response_model=McpTestView)
+    async def test_mcp(req: McpTestRequest, service: ServiceDep) -> McpTestView:
+        return await service.test_mcp(req.command, req.args, req.env_refs)
+
+    @app.post("/mcp", response_model=ConfigDiffView)
+    async def add_mcp(req: AddMcpRequest, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.add_mcp(req.name, req.command, req.args, req.env_refs, req.risk)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.delete("/mcp/{name}", response_model=ConfigDiffView)
+    async def remove_mcp(name: str, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.remove_mcp(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
 
     @app.get("/secrets", response_model=list[SecretView])
     async def list_secrets(service: ServiceDep) -> list[SecretView]:

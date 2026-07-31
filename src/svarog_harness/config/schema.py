@@ -403,10 +403,11 @@ class ExternalExecutorConfig(StrictModel):
     # Upstream-endpoint провайдера агента; LLM-трафик идёт агент → bridge →
     # сюда (§3). Для локальных моделей — свой OpenAI-совместимый URL.
     base_url: str = "https://api.anthropic.com"
-    # Модель для агентов с конфигурируемым провайдером (opencode): Svarog
-    # пишет её в managed-конфиг агента вместе с openai-совместимым провайдером
-    # (chat-completions — Responses API у произвольных upstream'ов ломается на
-    # resume). None — агент выбирает модель сам. claude-code/codex игнорируют.
+    # Модель по умолчанию этого executor'а. opencode: пишется в managed-конфиг
+    # агента вместе с openai-совместимым провайдером (chat-completions —
+    # Responses API у произвольных upstream'ов ломается на resume);
+    # claude-code: уходит в `claude --model`; codex: в `codex -m`.
+    # None — агент выбирает модель сам.
     model: str | None = None
     # Монтировать документацию Svarog (README, AGENTS.md, ADR) в sandbox
     # read-only (/opt/svarog-docs) и дать агенту указатель в контексте, чтобы

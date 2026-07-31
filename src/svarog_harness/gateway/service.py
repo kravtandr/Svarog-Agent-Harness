@@ -10,6 +10,7 @@ run в фоне. Источник истины по trace — SQLite; событ
 import asyncio
 import contextlib
 import os
+import re
 import tarfile
 import tempfile
 import time
@@ -28,7 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from svarog_harness.cli.chat_completion import Suggestion, at_suggestions
 from svarog_harness.config.loader import PROJECT_CONFIG_NAME, ConfigError, load_config
 from svarog_harness.config.paths import memory_dir, skills_dirs
-from svarog_harness.config.schema import AutonomyMode, SvarogConfig, TenantRole
+from svarog_harness.config.schema import (
+    AutonomyMode,
+    MCPConfig,
+    MCPServerConfig,
+    SvarogConfig,
+    TenantRole,
+)
 from svarog_harness.gateway.attachments import (
     ATTACHMENTS_DIR,
     StoredAttachment,
@@ -46,6 +53,8 @@ from svarog_harness.gateway.executors import (
 from svarog_harness.gateway.models import (
     ApprovalView,
     CancelView,
+    McpServerView,
+    McpTestView,
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
@@ -77,6 +86,8 @@ from svarog_harness.gateway.settings import (
     describe_config,
     diff_lines,
     patch_yaml_text,
+    remove_deep_key,
+    set_deep_values,
 )
 from svarog_harness.gitflow.provision import (
     DEFAULT_GIT_CREDENTIALS_REF,
@@ -94,10 +105,13 @@ from svarog_harness.gitflow.provision import (
 from svarog_harness.gitflow.repo import GitRepo
 from svarog_harness.llm.openai_compatible import ApiKeyError, resolve_api_key
 from svarog_harness.llm.provider import ChatMessage
+from svarog_harness.mcp import MCPBackend, connect_mcp_servers
 from svarog_harness.memory.index import search as memory_search
+from svarog_harness.runtime.agents import EXTERNAL_ADAPTERS
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
 from svarog_harness.runtime.summaries import short_arg, short_result
+from svarog_harness.secrets.store import FileSecretStore
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
 from svarog_harness.storage.models import Run, RunState, Session, ToolCall, ToolCallStatus
@@ -1351,12 +1365,196 @@ class GatewayService:
         self._catalog_failures.clear()
         return view
 
+    async def _write_deep(
+        self, values: dict[str, Any], removes: Sequence[str] = ()
+    ) -> ConfigDiffView:
+        """Записать вложенные правки svarog.yaml (провайдеры/MCP/executor-дефолты).
+
+        Тот же контракт, что write_config: результат валидируется полной
+        схемой ДО записи (кривая правка — ValueError → 422, файл не тронут),
+        конфиг перечитывается только без живых runs.
+        """
+        before = self.config_path.read_text(encoding="utf-8") if self.config_path.exists() else ""
+        after = set_deep_values(before, values)
+        for path in removes:
+            after = remove_deep_key(after, path)
+        parsed = yaml.safe_load(after) or {}
+        try:
+            SvarogConfig.model_validate(parsed)
+        except ValidationError as exc:
+            first = exc.errors()[0].get("msg", str(exc)) if exc.errors() else str(exc)
+            raise ValueError(f"правка делает конфиг невалидным: {first}") from exc
+        lines = diff_lines(before, after)
+        view = ConfigDiffView(
+            path=str(self.config_path),
+            lines=lines,
+            changes=sum(1 for line in lines if line.kind != "same"),
+        )
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(after, encoding="utf-8")
+        if await self._any_run_live():
+            return view.model_copy(update={"restart_required": True})
+        self.cfg = load_config(project_dir=self.workspace)
+        self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
+        await self.close_warm_sessions()
+        self._catalog.clear()
+        self._catalog_failures.clear()
+        return view
+
     async def _any_run_live(self) -> bool:
         async def action(db: AsyncSession) -> bool:
             found = await db.execute(select(Run).where(Run.state.in_(_LIVE_STATES)).limit(1))
             return found.scalar_one_or_none() is not None
 
         return await self._read(action)
+
+    async def add_provider(
+        self,
+        name: str,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+    ) -> ConfigDiffView:
+        """Добавить/обновить провайдера в models.providers (настройки, 31.07.2026).
+
+        Ключ не пишется в yaml никогда (ADR-0006): значение уходит в
+        SecretStore под ref `<NAME>_API_KEY`, конфиг получает только ссылку.
+        """
+        if not re.fullmatch(r"[A-Za-z][\w-]{0,63}", name):
+            raise ValueError(
+                "имя провайдера — латиница/цифры/дефис/подчёркивание, начинается с буквы"
+            )
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError("base_url должен начинаться с http(s)://")
+        if not model.strip():
+            raise ValueError("укажите модель провайдера")
+        values: dict[str, Any] = {
+            f"models.providers.{name}.base_url": base_url.strip(),
+            f"models.providers.{name}.model": model.strip(),
+        }
+        if api_key:
+            ref = re.sub(r"\W", "_", name.upper()) + "_API_KEY"
+            secrets_path = Path(
+                self.cfg.secrets.path or Path.home() / ".svarog" / "secrets.json"
+            ).expanduser()
+            FileSecretStore(secrets_path).set(ref, api_key)
+            values[f"models.providers.{name}.api_key_ref"] = ref
+        return await self._write_deep(values)
+
+    async def set_executor_defaults(
+        self, executor: str, provider: str | None = None, model: str | None = None
+    ) -> ConfigDiffView:
+        """Дефолты модели/провайдера per-executor (настройки, 31.07.2026).
+
+        native: провайдер → models.default, модель → модель этого провайдера.
+        opencode/codex: провайдер → base_url/api_key_ref секции external (без
+        /v1 — адаптер добавит сам), модель → executor.external.model.
+        claude-code: только модель (провайдер — его подписка).
+        """
+        values: dict[str, Any] = {}
+        if executor == "native":
+            target = provider or self.cfg.models.default
+            if target not in self.cfg.models.providers:
+                raise ValueError(f"провайдер '{target}' не найден в models.providers")
+            if provider is not None:
+                values["models.default"] = provider
+            if model is not None:
+                values[f"models.providers.{target}.model"] = model
+        elif executor in EXTERNAL_ADAPTERS:
+            if self.cfg.executor.external is None:
+                raise ValueError(
+                    "секции executor.external нет в svarog.yaml — добавьте её "
+                    "(svarog init пишет заготовку)"
+                )
+            if provider is not None:
+                if executor == "claude-code":
+                    raise ValueError("у claude-code свой провайдер (подписка)")
+                card = self.cfg.models.providers.get(provider)
+                if card is None:
+                    raise ValueError(f"провайдер '{provider}' не найден в models.providers")
+                base = card.base_url.rstrip("/").removesuffix("/v1")
+                values["executor.external.base_url"] = base
+                values["executor.external.auth"] = "api-key"
+                if card.api_key_ref:
+                    values["executor.external.api_key_ref"] = card.api_key_ref
+            if model is not None:
+                values["executor.external.model"] = model
+        else:
+            raise ValueError(f"неизвестный executor '{executor}'")
+        if not values:
+            raise ValueError("нечего менять: укажите provider и/или model")
+        return await self._write_deep(values)
+
+    def list_mcp(self) -> list[McpServerView]:
+        """Подключённые MCP-серверы из конфига (вкладка MCP)."""
+        return [
+            McpServerView(
+                name=name,
+                command=server.command,
+                args=list(server.args),
+                env_refs=list(server.env_refs),
+                risk=server.risk,
+            )
+            for name, server in self.cfg.mcp.servers.items()
+        ]
+
+    async def test_mcp(
+        self, command: str, args: Sequence[str], env_refs: Sequence[str]
+    ) -> McpTestView:
+        """Реально подключиться к MCP-серверу и сделать discovery (проверка)."""
+        server = MCPServerConfig(command=command, args=list(args), env_refs=list(env_refs))
+        probe = MCPConfig(servers={"probe": server})
+        backends: list[MCPBackend] = []
+        try:
+            async with asyncio.timeout(20):
+                backends = await connect_mcp_servers(probe, self._runner._host_store)
+                tools = [spec.name for backend in backends for spec in backend.specs()]
+            return McpTestView(ok=True, tools=tools)
+        except Exception as exc:
+            return McpTestView(ok=False, error=str(exc) or type(exc).__name__)
+        finally:
+            for backend in backends:
+                with contextlib.suppress(Exception):
+                    await backend.close()
+
+    async def add_mcp(
+        self,
+        name: str,
+        command: str,
+        args: Sequence[str],
+        env_refs: Sequence[str],
+        risk: str,
+    ) -> ConfigDiffView:
+        if not re.fullmatch(r"[A-Za-z][\w-]{0,63}", name):
+            raise ValueError("имя сервера — латиница/цифры/дефис/подчёркивание, начинается с буквы")
+        if not command.strip():
+            raise ValueError("укажите команду запуска MCP-сервера")
+        values: dict[str, Any] = {
+            f"mcp.servers.{name}.command": command.strip(),
+            f"mcp.servers.{name}.args": list(args),
+            f"mcp.servers.{name}.risk": risk,
+        }
+        if env_refs:
+            values[f"mcp.servers.{name}.env_refs"] = list(env_refs)
+        return await self._write_deep(values)
+
+    async def remove_mcp(self, name: str) -> ConfigDiffView:
+        if name not in self.cfg.mcp.servers:
+            raise ValueError(f"MCP-сервер '{name}' не найден в конфиге")
+        # Пустая обёртка (`servers:` без ключей) парсится в None и валит
+        # валидацию — удаляя последний сервер, снимаем и обёртку.
+        raw = (
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+            if self.config_path.exists()
+            else {}
+        )
+        mcp_raw = raw.get("mcp") or {}
+        servers = mcp_raw.get("servers") or {}
+        if len(servers) <= 1:
+            target = "mcp" if set(mcp_raw.keys()) <= {"servers"} else "mcp.servers"
+        else:
+            target = f"mcp.servers.{name}"
+        return await self._write_deep({}, removes=[target])
 
     def list_secrets(self) -> list[SecretView]:
         """Имена секретов и найдено ли значение. Значения не возвращаются никогда."""

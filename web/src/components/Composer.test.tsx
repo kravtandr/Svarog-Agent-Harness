@@ -248,7 +248,7 @@ describe("поле ввода", () => {
     expect(onProviderChange).toHaveBeenCalledWith("backup");
   });
 
-  it("гасит выбор модели у внешнего агента", () => {
+  it("гасит выбор модели только у claude-code (его модель — подписка)", () => {
     render(
       <Composer
         {...base}
@@ -269,8 +269,27 @@ describe("поле ввода", () => {
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute(
       "title",
-      expect.stringContaining("своему провайдеру"),
+      expect.stringContaining("подпиской"),
     );
+  });
+
+  it("opencode переключает модель из композера (openai-провайдер)", () => {
+    render(
+      <Composer
+        {...base}
+        onSend={() => {}}
+        executors={[
+          {
+            value: "opencode",
+            kind: "external",
+            adapter: "opencode",
+            available: true,
+            is_active: true,
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByLabelText("Выбрать модель")).toBeEnabled();
   });
 
   it("показывает модель из конфига, а не выдуманную", () => {

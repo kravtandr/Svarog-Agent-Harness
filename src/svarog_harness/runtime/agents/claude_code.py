@@ -39,12 +39,20 @@ _MANAGED_SETTINGS = PurePosixPath("/etc/claude-code/managed-settings.json")
 
 
 class ClaudeCodeAdapter:
-    def __init__(self, binary: str = "claude", hook_timeout_sec: int | None = None) -> None:
+    def __init__(
+        self,
+        binary: str = "claude",
+        hook_timeout_sec: int | None = None,
+        model: str | None = None,
+    ) -> None:
         self._binary = binary
         # Клиентский лимит PreToolUse-хука. Дефолт Claude Code — 60с: короче
         # grace-ожидания approval (§7), хук умирает раньше suspend. None —
         # оставить дефолт CLI (containment-режим без человеческих гейтов).
         self._hook_timeout_sec = hook_timeout_sec
+        # executor.external.model → `claude --model`: дефолт модели executor'а
+        # из настроек/override; None — модель выбирает сам CLI (подписка).
+        self._model = model
 
     @property
     def name(self) -> str:
@@ -71,6 +79,8 @@ class ClaudeCodeAdapter:
             "--permission-mode",
             "bypassPermissions",
         ]
+        if self._model is not None:
+            argv += ["--model", self._model]
         if launch.mcp_config is not None:
             # strict: только MCP-серверы Svarog, чужие конфиги workspace
             # игнорируются (агент не может подсунуть свой сервер).

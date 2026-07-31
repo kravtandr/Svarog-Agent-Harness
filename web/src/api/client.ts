@@ -16,6 +16,8 @@ import type {
   RunDetail,
   RunDiff,
   RunOverride,
+  McpServer,
+  McpTest,
   RunRef,
   RunSummary,
   SandboxOption,
@@ -70,6 +72,31 @@ export interface Api {
   config(): Promise<ConfigView>;
   previewConfig(values: ConfigValues): Promise<ConfigDiff>;
   saveConfig(values: ConfigValues): Promise<ConfigDiff>;
+  addProvider(body: {
+    name: string;
+    base_url: string;
+    model: string;
+    api_key?: string;
+  }): Promise<ConfigDiff>;
+  executorDefaults(body: {
+    executor: string;
+    provider?: string;
+    model?: string;
+  }): Promise<ConfigDiff>;
+  mcpList(): Promise<McpServer[]>;
+  mcpTest(body: {
+    command: string;
+    args: string[];
+    env_refs: string[];
+  }): Promise<McpTest>;
+  mcpAdd(body: {
+    name: string;
+    command: string;
+    args: string[];
+    env_refs: string[];
+    risk: string;
+  }): Promise<ConfigDiff>;
+  mcpRemove(name: string): Promise<ConfigDiff>;
   secrets(): Promise<SecretView[]>;
   memoryTree(): Promise<MemoryPage[]>;
   memoryFile(path: string): Promise<MemoryFile>;
@@ -180,6 +207,31 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
       request<ConfigDiff>("/config", {
         method: "POST",
         body: JSON.stringify({ values }),
+      }),
+    addProvider: (body) =>
+      request<ConfigDiff>("/models/providers", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    executorDefaults: (body) =>
+      request<ConfigDiff>("/executors/defaults", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    mcpList: () => request<McpServer[]>("/mcp"),
+    mcpTest: (body) =>
+      request<McpTest>("/mcp/test", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    mcpAdd: (body) =>
+      request<ConfigDiff>("/mcp", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    mcpRemove: (name) =>
+      request<ConfigDiff>(`/mcp/${encodeURIComponent(name)}`, {
+        method: "DELETE",
       }),
     secrets: () => request<SecretView[]>("/secrets"),
     memoryTree: () => request<MemoryPage[]>("/memory/tree"),

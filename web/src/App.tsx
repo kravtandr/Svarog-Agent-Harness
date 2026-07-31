@@ -6,6 +6,7 @@ import { busyLabel, Nav, rootBase, type Section } from "./components/Nav";
 import { Shell } from "./components/Shell";
 import { WorkspacePicker } from "./components/WorkspacePicker";
 import { ChatScreen } from "./screens/ChatScreen";
+import { McpScreen } from "./screens/McpScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { RunsScreen } from "./screens/RunsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -38,6 +39,7 @@ const TITLES: Record<Section, string> = {
   runs: "Запуски",
   skills: "Скиллы",
   memory: "Память",
+  mcp: "MCP",
   settings: "Настройки",
 };
 
@@ -185,6 +187,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
       {section === "settings" && <SettingsScreen api={scopedApi} />}
       {section === "memory" && <MemoryScreen api={scopedApi} />}
       {section === "skills" && <SkillsScreen api={scopedApi} />}
+      {section === "mcp" && <McpScreen api={scopedApi} />}
       {section === "runs" && <RunsScreen api={api} />}
       {section === "chat" && (
         <ChatScreen

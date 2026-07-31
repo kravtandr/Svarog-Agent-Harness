@@ -47,10 +47,11 @@ def adapter_for(cfg: ExternalExecutorConfig) -> AgentAdapter:
     match cfg.adapter:
         case "claude-code":
             return ClaudeCodeAdapter(
-                hook_timeout_sec=cfg.approval_grace_sec + CLIENT_GATE_TIMEOUT_MARGIN_SEC
+                hook_timeout_sec=cfg.approval_grace_sec + CLIENT_GATE_TIMEOUT_MARGIN_SEC,
+                model=cfg.model,
             )
         case "codex":
-            return CodexAdapter()
+            return CodexAdapter(model=cfg.model)
         case "opencode":
             # Тот же контракт, что hook_timeout_sec у claude-code: MCP-клиент
             # opencode обязан ждать дольше, чем человеческий гейт держит вызов

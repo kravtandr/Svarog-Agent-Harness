@@ -229,3 +229,13 @@
     min-height: 44px;
   }
 }
+
+.settings__executor-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.settings__executor-row .field__control {
+  flex: 1;
+  min-width: 0;
+}

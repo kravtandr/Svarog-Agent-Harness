@@ -112,7 +112,12 @@ export function Composer({
   const fileRequest = useRef(0);
 
   const activeExecutor = executors.find((option) => option.is_active);
-  const external = activeExecutor?.kind === "external";
+  // claude-code — единственный исполнитель со «своим» провайдером (подписка,
+  // anthropic-endpoint): выбор провайдера/модели из нашего каталога для него
+  // не имеет смысла. native/opencode/codex ходят к OpenAI-совместимому
+  // провайдеру из карточки — им и провайдер, и модель переключаются отсюда
+  // (модель доезжает: opencode — managed-конфиг, codex — `-m`).
+  const providerLocked = activeExecutor?.adapter === "claude-code";
 
   // «@»-подсказки — сетевой запрос на каждый токен: список файлов рабочей
   // копии не тащим на клиент целиком (см. комментарий к решению в §3
@@ -402,7 +407,12 @@ export function Composer({
                   className="composer__select"
                   aria-label="Провайдер"
                   value={provider}
-                  disabled={external}
+                  disabled={providerLocked}
+                  title={
+                    providerLocked
+                      ? "claude-code ходит к своему провайдеру (подписка)"
+                      : undefined
+                  }
                   onChange={(event) => onProviderChange(event.target.value)}
                 >
                   {providers.map((card) => (
@@ -416,12 +426,10 @@ export function Composer({
                 type="button"
                 className="composer__model"
                 aria-label="Выбрать модель"
-                disabled={external}
-                // Внешний агент ходит к своему провайдеру
-                // (executor.external.base_url) — модель отсюда на него не влияет.
+                disabled={providerLocked}
                 title={
-                  external
-                    ? "Внешний агент ходит к своему провайдеру"
+                  providerLocked
+                    ? "Модель claude-code определяется его подпиской"
                     : "Выбрать модель"
                 }
                 onClick={() => setPicking(true)}

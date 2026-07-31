@@ -160,6 +160,22 @@ export interface RunOverride {
 
 export type SandboxKind = "docker" | "local-trusted";
 
+/** MCP-сервер из svarog.yaml (вкладка MCP). */
+export interface McpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env_refs: string[];
+  risk: string;
+}
+
+/** Результат пробного подключения к MCP-серверу. */
+export interface McpTest {
+  ok: boolean;
+  tools: string[];
+  error: string | null;
+}
+
 /** Одна запись из GET /sandboxes: значение выбора sandbox в композере. */
 export interface SandboxOption {
   value: SandboxKind;

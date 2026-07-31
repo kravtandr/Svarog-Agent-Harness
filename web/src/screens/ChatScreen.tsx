@@ -507,8 +507,12 @@ export function ChatScreen({
             // Sandbox — тот же принцип: не пришёл список или выбора нет —
             // поле опускаем, сервер берёт конфиг.
             ...(sandboxValue === null ? {} : { sandbox: sandboxValue }),
-            provider,
-            model,
+            // claude-code ходит к своему провайдеру (подписка): каталожные
+            // provider/model для него не отправляем — иначе `--model
+            // deepseek/…` уехал бы в чужой CLI.
+            ...(selectedExecutor?.adapter === "claude-code"
+              ? {}
+              : { provider, model }),
           },
           attachmentPaths,
         );

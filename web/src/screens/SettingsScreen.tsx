@@ -6,11 +6,16 @@ import type {
   ConfigField,
   ConfigView,
   DiffLine,
+  ProviderCard,
   SecretView,
 } from "../api/types";
 import "./SettingsScreen.css";
 
-type Pane = { kind: "section"; key: string } | { kind: "secrets" };
+type Pane =
+  | { kind: "section"; key: string }
+  | { kind: "secrets" }
+  | { kind: "providers" }
+  | { kind: "executors" };
 
 function Field({
   field,
@@ -133,6 +138,222 @@ function DiffPane({
   );
 }
 
+function ProvidersPane({ api }: { api: Api }) {
+  const [providers, setProviders] = useState<ProviderCard[]>([]);
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    api
+      .providers()
+      .then(setProviders)
+      .catch(() => {});
+  }, [api]);
+  useEffect(reload, [reload]);
+
+  const submit = async () => {
+    setStatus(null);
+    try {
+      await api.addProvider({
+        name: name.trim(),
+        base_url: baseUrl.trim(),
+        model: model.trim(),
+        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+      });
+      setStatus(`Провайдер «${name.trim()}» сохранён.`);
+      setName("");
+      setBaseUrl("");
+      setModel("");
+      setApiKey("");
+      reload();
+    } catch (exc: unknown) {
+      setStatus(
+        exc instanceof ApiError
+          ? exc.message
+          : "Не удалось сохранить провайдера.",
+      );
+    }
+  };
+
+  return (
+    <>
+      <h2 className="settings__title">Провайдеры</h2>
+      <p className="field__help">
+        OpenAI-совместимые endpoints для native/opencode/codex. Ключ уходит в
+        хранилище секретов, в svarog.yaml пишется только ссылка на него.
+      </p>
+      {providers.map((card) => (
+        <div key={card.name} className="secret">
+          <span>
+            {card.name}
+            {card.is_default ? " · по умолчанию" : ""}
+          </span>
+          <span className="secret__state">
+            {card.model} · {card.base_url}
+          </span>
+        </div>
+      ))}
+      <h3 className="settings__title">Добавить / обновить</h3>
+      <div className="field">
+        <label className="field__label" htmlFor="prov-name">
+          Имя
+        </label>
+        <input
+          id="prov-name"
+          className="field__control"
+          value={name}
+          placeholder="groq"
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="prov-url">
+          Base URL (с /v1)
+        </label>
+        <input
+          id="prov-url"
+          className="field__control"
+          value={baseUrl}
+          placeholder="https://api.groq.com/openai/v1"
+          onChange={(e) => setBaseUrl(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="prov-model">
+          Модель
+        </label>
+        <input
+          id="prov-model"
+          className="field__control"
+          value={model}
+          placeholder="llama-3.3-70b-versatile"
+          onChange={(e) => setModel(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label className="field__label" htmlFor="prov-key">
+          API-ключ (опционально)
+        </label>
+        <input
+          id="prov-key"
+          className="field__control"
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+      <button
+        type="button"
+        className="btn"
+        disabled={!name.trim() || !baseUrl.trim() || !model.trim()}
+        onClick={() => void submit()}
+      >
+        Сохранить провайдера
+      </button>
+      {status !== null && <p className="field__help">{status}</p>}
+    </>
+  );
+}
+
+const EXECUTORS: { id: string; title: string; provider: boolean }[] = [
+  { id: "native", title: "native", provider: true },
+  { id: "opencode", title: "opencode", provider: true },
+  { id: "codex", title: "codex", provider: true },
+  { id: "claude-code", title: "claude-code", provider: false },
+];
+
+function ExecutorsPane({ api }: { api: Api }) {
+  const [providers, setProviders] = useState<ProviderCard[]>([]);
+  const [drafts, setDrafts] = useState<
+    Record<string, { provider: string; model: string }>
+  >({});
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .providers()
+      .then(setProviders)
+      .catch(() => {});
+  }, [api]);
+
+  const save = async (id: string) => {
+    const draft = drafts[id] ?? { provider: "", model: "" };
+    setStatus(null);
+    try {
+      await api.executorDefaults({
+        executor: id,
+        ...(draft.provider ? { provider: draft.provider } : {}),
+        ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
+      });
+      setStatus(`Дефолты «${id}» сохранены.`);
+    } catch (exc: unknown) {
+      setStatus(
+        exc instanceof ApiError ? exc.message : "Не удалось сохранить дефолты.",
+      );
+    }
+  };
+
+  return (
+    <>
+      <h2 className="settings__title">Исполнители</h2>
+      <p className="field__help">
+        Модель по умолчанию для каждого исполнителя; для native и opencode — ещё
+        и провайдер (claude-code ходит по своей подписке). Пустые поля не
+        меняются.
+      </p>
+      {EXECUTORS.map((executor) => {
+        const draft = drafts[executor.id] ?? { provider: "", model: "" };
+        const patch = (part: Partial<{ provider: string; model: string }>) =>
+          setDrafts((current) => ({
+            ...current,
+            [executor.id]: { ...draft, ...part },
+          }));
+        return (
+          <div key={executor.id} className="field">
+            <label className="field__label">{executor.title}</label>
+            <div className="settings__executor-row">
+              {executor.provider && (
+                <select
+                  className="field__control"
+                  aria-label={`Провайдер ${executor.title}`}
+                  value={draft.provider}
+                  onChange={(e) => patch({ provider: e.target.value })}
+                >
+                  <option value="">провайдер…</option>
+                  {providers.map((card) => (
+                    <option key={card.name} value={card.name}>
+                      {card.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                className="field__control"
+                aria-label={`Модель ${executor.title}`}
+                placeholder="модель по умолчанию"
+                value={draft.model}
+                onChange={(e) => patch({ model: e.target.value })}
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={!draft.provider && !draft.model.trim()}
+                onClick={() => void save(executor.id)}
+              >
+                Сохранить
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {status !== null && <p className="field__help">{status}</p>}
+    </>
+  );
+}
+
 export function SettingsScreen({ api }: { api: Api }) {
   const [config, setConfig] = useState<ConfigView | null>(null);
   const [pane, setPane] = useState<Pane>({ kind: "section", key: "" });
@@ -224,6 +445,24 @@ export function SettingsScreen({ api }: { api: Api }) {
         <button
           type="button"
           className={`settings__nav-item${
+            pane.kind === "providers" ? " settings__nav-item--active" : ""
+          }`}
+          onClick={() => setPane({ kind: "providers" })}
+        >
+          Провайдеры
+        </button>
+        <button
+          type="button"
+          className={`settings__nav-item${
+            pane.kind === "executors" ? " settings__nav-item--active" : ""
+          }`}
+          onClick={() => setPane({ kind: "executors" })}
+        >
+          Исполнители
+        </button>
+        <button
+          type="button"
+          className={`settings__nav-item${
             pane.kind === "secrets" ? " settings__nav-item--active" : ""
           }`}
           onClick={() => setPane({ kind: "secrets" })}
@@ -233,7 +472,11 @@ export function SettingsScreen({ api }: { api: Api }) {
       </nav>
 
       <div className="settings__body">
-        {pane.kind === "secrets" ? (
+        {pane.kind === "providers" ? (
+          <ProvidersPane api={api} />
+        ) : pane.kind === "executors" ? (
+          <ExecutorsPane api={api} />
+        ) : pane.kind === "secrets" ? (
           <>
             <h2 className="settings__title">Секреты</h2>
             <p className="field__help">

@@ -33,6 +33,32 @@ export function fakeApi(over: Partial<Api> = {}): Api {
       changes: 0,
       restart_required: false,
     }),
+    addProvider: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
+    executorDefaults: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
+    mcpList: vi.fn().mockResolvedValue([]),
+    mcpTest: vi.fn().mockResolvedValue({ ok: true, tools: [], error: null }),
+    mcpAdd: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
+    mcpRemove: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
     secrets: vi.fn().mockResolvedValue([]),
     memoryTree: vi.fn().mockResolvedValue([]),
     memoryFile: vi.fn().mockResolvedValue({

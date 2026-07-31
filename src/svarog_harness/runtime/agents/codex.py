@@ -30,8 +30,10 @@ _STATE_DIR = PurePosixPath("/tmp/home/.codex")
 
 
 class CodexAdapter:
-    def __init__(self, binary: str = "codex") -> None:
+    def __init__(self, binary: str = "codex", model: str | None = None) -> None:
         self._binary = binary
+        # executor.external.model → `codex -m`: дефолт модели executor'а.
+        self._model = model
 
     @property
     def name(self) -> str:
@@ -51,6 +53,8 @@ class CodexAdapter:
         argv = [self._binary, "exec"]
         if launch.session is not None:
             argv += ["resume", launch.session]
+        if self._model is not None:
+            argv += ["-m", self._model]
         argv += [
             "--json",
             "--skip-git-repo-check",

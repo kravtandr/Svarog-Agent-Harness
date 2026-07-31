@@ -228,10 +228,10 @@ def apply_override(
                         "model": ov.model if ov.model is not None else provider.model,
                     }
                 )
-            elif ov.model is not None:
-                # Секция уже openai-совместимая — модель из композера просто
-                # доезжает до managed-конфига агента.
-                update_external["model"] = ov.model
+        if ov.model is not None and "model" not in update_external:
+            # Модель из композера доезжает до executor'а любым адаптером:
+            # opencode — managed-конфиг, claude-code — --model, codex — -m.
+            update_external["model"] = ov.model
         external = cfg.executor.external.model_copy(update=update_external)
         try:
             # model_copy(update=...) обходит валидаторы секции: несовместимая
