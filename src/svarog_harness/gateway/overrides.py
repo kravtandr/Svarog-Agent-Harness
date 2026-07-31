@@ -11,9 +11,15 @@
 from dataclasses import dataclass
 from typing import Literal, Self
 
-from svarog_harness.config.schema import SvarogConfig
+from pydantic import ValidationError
+
+from svarog_harness.config.schema import ExternalExecutorConfig, SvarogConfig
 from svarog_harness.runtime.agents import EXTERNAL_ADAPTERS
 from svarog_harness.scaffold import DEFAULT_CLAUDE_IMAGE, DEFAULT_OPENCODE_IMAGE
+
+# Адаптеры с openai-совместимым LLM-трафиком: им нужен base_url/model/api-key,
+# а не anthropic-дефолты секции, заточенной под claude-code.
+_OPENAI_WIRE_ADAPTERS = frozenset({"opencode", "codex"})
 
 # Ключ поддерева override в Run.meta.
 OVERRIDE_META_KEY = "override"
@@ -190,7 +196,53 @@ def apply_override(
                     f"иначе запуск пойдёт в контейнер другого агента"
                 )
             update_external["image"] = wanted
+        if ov.adapter in _OPENAI_WIRE_ADAPTERS:
+            # Секция, заточенная под claude-code (subscription/anthropic-URL),
+            # для openai-адаптера непригодна: раньше model_copy молча
+            # пропускал её мимо валидатора, opencode получал пустой ключ и
+            # падал «Unauthorized: bridge» (31.07.2026). Провайдера собираем
+            # из выбранной в композере карточки моделей — ровно того, что
+            # человек и выбрал рядом с адаптером.
+            current = cfg.executor.external
+            unusable = (
+                current.auth != "api-key" or current.base_url == "https://api.anthropic.com"
+            )
+            if unusable:
+                provider_name = ov.provider if ov.provider is not None else cfg.models.default
+                provider = cfg.models.providers.get(provider_name)
+                if provider is None:
+                    raise OverrideError(
+                        f"адаптер '{ov.adapter}' требует OpenAI-совместимого "
+                        f"провайдера, а секция executor.external настроена под "
+                        f"claude-code и провайдер '{provider_name}' в "
+                        f"models.providers не найден"
+                    )
+                base = provider.base_url.rstrip("/")
+                base = base.removesuffix("/v1")
+                update_external.update(
+                    {
+                        "auth": "api-key",
+                        "api_key_ref": provider.api_key_ref,
+                        "oauth_token_ref": None,
+                        "base_url": base,
+                        "model": ov.model if ov.model is not None else provider.model,
+                    }
+                )
+            elif ov.model is not None:
+                # Секция уже openai-совместимая — модель из композера просто
+                # доезжает до managed-конфига агента.
+                update_external["model"] = ov.model
         external = cfg.executor.external.model_copy(update=update_external)
+        try:
+            # model_copy(update=...) обходит валидаторы секции: несовместимая
+            # комбинация обязана стать понятным 422 здесь, а не упавшим
+            # контейнером в рантайме.
+            external = ExternalExecutorConfig.model_validate(external.model_dump())
+        except ValidationError as exc:
+            first = exc.errors()[0].get("msg", str(exc)) if exc.errors() else str(exc)
+            raise OverrideError(
+                f"адаптер '{ov.adapter}' несовместим с executor.external: {first}"
+            ) from exc
         update["executor"] = cfg.executor.model_copy(
             update={"type": "external", "external": external}
         )

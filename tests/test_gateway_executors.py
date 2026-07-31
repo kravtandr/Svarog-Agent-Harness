@@ -222,6 +222,83 @@ def test_sandboxes_endpoint(service: GatewayService) -> None:
     assert all("available" in o and "is_active" in o for o in body)
 
 
+def _subscription_config(tmp_path: Path) -> object:
+    """Секция external под claude-code/subscription — как agent-home svarog init."""
+    ws = tmp_path / "ws-sub"
+    ws.mkdir(exist_ok=True)
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: https://openrouter.ai/api/v1\n"
+        "      model: deepseek/deepseek-v4-flash\n"
+        "      api_key_ref: PROVIDER_API_KEY\n"
+        "sandbox:\n  type: docker\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: claude-code\n"
+        f"    image: {DEFAULT_CLAUDE_IMAGE}\n"
+        "    auth: subscription\n"
+        "    oauth_token_ref: CLAUDE_CODE_OAUTH_TOKEN\n",
+        encoding="utf-8",
+    )
+    return load_config(project_dir=ws, user_config_path=tmp_path / "нет")
+
+
+def test_opencode_over_subscription_section_derives_provider(tmp_path: Path) -> None:
+    """31.07.2026: выбор opencode при claude-code/subscription секции давал
+    контейнеру пустой OPENAI_API_KEY → «Unauthorized: bridge» → exit 1.
+    Теперь провайдер собирается из выбранной карточки моделей."""
+    cfg = _subscription_config(tmp_path)
+    derived = apply_override(
+        cfg,
+        RunOverride(
+            executor="external",
+            adapter="opencode",
+            provider="local",
+            model="deepseek/deepseek-v4-flash",
+        ),
+    )
+    ext = derived.executor.external
+    assert ext.adapter == "opencode"
+    assert ext.image == DEFAULT_OPENCODE_IMAGE
+    assert ext.auth == "api-key"
+    assert ext.api_key_ref == "PROVIDER_API_KEY"
+    assert ext.oauth_token_ref is None
+    assert ext.base_url == "https://openrouter.ai/api"  # /v1 срезан: адаптер добавит сам
+    assert ext.model == "deepseek/deepseek-v4-flash"
+    # Исходный конфиг не мутирован.
+    assert cfg.executor.external.auth == "subscription"
+
+
+def test_opencode_over_openai_section_pushes_model_only(tmp_path: Path) -> None:
+    """Секция уже openai-совместимая — auth/base_url не трогаем, модель доезжает."""
+    cfg = _config(tmp_path)
+    ext = cfg.executor.external.model_copy(
+        update={"adapter": "opencode", "base_url": "https://openrouter.ai/api"}
+    )
+    cfg = cfg.model_copy(update={"executor": cfg.executor.model_copy(update={"external": ext})})
+    derived = apply_override(cfg, RunOverride(adapter="opencode", model="z-ai/glm-5.2"))
+    assert derived.executor.external.model == "z-ai/glm-5.2"
+    assert derived.executor.external.base_url == "https://openrouter.ai/api"
+
+
+def test_derived_external_is_revalidated(tmp_path: Path) -> None:
+    """Несовместимая комбинация — понятный OverrideError (422), а не упавший
+    контейнер: model_copy валидаторы обходит, ревалидация обязательна."""
+    cfg = _subscription_config(tmp_path)
+    broken = cfg.models.providers["local"].model_copy(
+        update={"base_url": "https://api.anthropic.com"}
+    )
+    cfg = cfg.model_copy(
+        update={"models": cfg.models.model_copy(update={"providers": {"local": broken}})}
+    )
+    with pytest.raises(OverrideError, match=r"несовместим|openai"):
+        apply_override(cfg, RunOverride(adapter="opencode"))
+
+
 def test_sandbox_override_switches_type_and_round_trips(tmp_path: Path) -> None:
     """sandbox — свойство сообщения: docker-конфиг + override local-trusted
     (native) даёт производный конфиг с local-trusted, meta восстанавливается."""
