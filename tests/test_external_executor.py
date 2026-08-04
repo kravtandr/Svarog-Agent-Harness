@@ -612,6 +612,142 @@ async def test_budget_exceeded_suspends_run(db: AsyncSession, tmp_path: Path) ->
     assert run.finished_at is None
 
 
+async def test_progress_ticker_emits_on_usage_change(db: AsyncSession, tmp_path: Path) -> None:
+    """Ticker транслирует usage с bridge по ходу стрима — но только при изменении."""
+    from svarog_harness.runtime.bridge import BridgeBudget, BridgeUsage, RunBridge, UpstreamConfig
+
+    bridge = RunBridge(
+        upstream=UpstreamConfig(base_url="http://unused", api_key=None),
+        budget=BridgeBudget(max_tokens=1_000_000, max_cost_usd=100.0),
+        loop=asyncio.get_running_loop(),
+    )
+    # Usage «уже накоплен» к первому тику: одна эмиссия (переход 0 → 120),
+    # дальше счётчики не меняются — повторных эмиссий быть не должно.
+    bridge.usage = BridgeUsage(input_tokens=90, output_tokens=30, requests=1)
+    progress_calls: list[tuple[int, int, float, float, int]] = []
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    argv = _agent_script(tmp_path, [_INIT, _RESULT], sleep_before=0.5)
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter(argv),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+        bridge=bridge,
+        on_progress=lambda *args: progress_calls.append(args),
+        progress_interval_sec=0.05,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    # За ~0.5 с sleep_before ticker тикнул ~10 раз, но usage менялся один раз.
+    # Последняя запись — существующий вызов on_progress из case "result".
+    ticker_calls = [c for c in progress_calls if c[1] == 120]
+    assert len(ticker_calls) == 1
+    assert ticker_calls[0] == (0, 120, 0.0, 0.0, 0)
+
+
+async def test_progress_ticker_silent_without_usage(db: AsyncSession, tmp_path: Path) -> None:
+    """Пустой usage на bridge — ticker молчит (нет ложного «0 токенов»)."""
+    from svarog_harness.runtime.bridge import BridgeBudget, RunBridge, UpstreamConfig
+
+    bridge = RunBridge(
+        upstream=UpstreamConfig(base_url="http://unused", api_key=None),
+        budget=BridgeBudget(max_tokens=1_000_000, max_cost_usd=100.0),
+        loop=asyncio.get_running_loop(),
+    )
+    progress_calls: list[tuple[int, int, float, float, int]] = []
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    argv = _agent_script(tmp_path, [_INIT, _RESULT], sleep_before=0.3)
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter(argv),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+        bridge=bridge,
+        on_progress=lambda *args: progress_calls.append(args),
+        progress_interval_sec=0.05,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    # Единственный вызов — из case "result" (tokens из result-события агента),
+    # тикерных эмиссий с нулевым usage нет.
+    assert all(c[1] != 0 for c in progress_calls)
+
+
+async def test_progress_ticker_cancelled_after_run_finished(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Прогресс после run_finished невозможен: ticker отменяется в finally _execute.
+
+    Изменение usage на bridge ПОСЛЕ завершения run не должно порождать новых
+    вызовов on_progress — иначе клиент получал бы обновления прогресса для
+    run'а, который уже отрапортован как завершённый.
+    """
+    from svarog_harness.runtime.bridge import BridgeBudget, BridgeUsage, RunBridge, UpstreamConfig
+
+    bridge = RunBridge(
+        upstream=UpstreamConfig(base_url="http://unused", api_key=None),
+        budget=BridgeBudget(max_tokens=1_000_000, max_cost_usd=100.0),
+        loop=asyncio.get_running_loop(),
+    )
+    bridge.usage = BridgeUsage(input_tokens=90, output_tokens=30, requests=1)
+    progress_calls: list[tuple[int, int, float, float, int]] = []
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    argv = _agent_script(tmp_path, [_INIT, _RESULT])
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter(argv),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+        bridge=bridge,
+        on_progress=lambda *args: progress_calls.append(args),
+        progress_interval_sec=0.01,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+    assert outcome.state is RunState.COMPLETED
+    calls_after_finish = len(progress_calls)
+
+    # Usage меняется уже после того, как run завершён и ticker должен быть
+    # отменён (cancel в finally _execute) — тик по этому изменению недопустим.
+    bridge.usage.input_tokens += 1000
+    await asyncio.sleep(0.05)
+
+    assert len(progress_calls) == calls_after_finish
+
+
+async def test_progress_ticker_not_started_without_bridge(db: AsyncSession, tmp_path: Path) -> None:
+    """Без bridge ticker не поднимается — даже если on_progress задан.
+
+    _execute стартует ticker только при bridge И on_progress вместе; без
+    bridge транслировать usage неоткуда, тикер не должен создаваться вовсе.
+    """
+    progress_calls: list[tuple[int, int, float, float, int]] = []
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    argv = _agent_script(tmp_path, [_INIT, _RESULT], sleep_before=0.3)
+    executor = ExternalAgentExecutor(
+        _ScriptAdapter(argv),
+        LocalEnvironment(ws),
+        TraceRecorder(db),
+        workspace=ws,
+        timeout_sec=30.0,
+        on_progress=lambda *args: progress_calls.append(args),
+        progress_interval_sec=0.01,
+    )
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    # Единственный вызов on_progress — финальный, из case "result".
+    assert len(progress_calls) == 1
+
+
 async def test_resume_continues_agent_session(db: AsyncSession, tmp_path: Path) -> None:
     """resume поднимает сессию агента --resume и дописывает тот же run."""
     ws = tmp_path / "ws"

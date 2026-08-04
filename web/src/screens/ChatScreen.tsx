@@ -19,6 +19,7 @@ import { Gate } from "../components/Gate";
 import { Markdown } from "../components/Markdown";
 import { ToolCalls } from "../components/ToolCalls";
 import { parseCommand, type ParsedCommand } from "../model/completion";
+import { progressDetail, type RunProgress } from "../model/progress";
 import { applyEvent, fromHistory, type ThreadItem } from "../model/thread";
 import "./ChatScreen.css";
 
@@ -174,10 +175,12 @@ export function ChatScreen({
   const [pendingUploads, setPendingUploads] = useState(0);
   const [, setRunId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
-  // «Сварог работает…» — от отправки до ПЕРВОГО события стрима: у внешнего
-  // агента между стартом (boot контейнера) и первым tool call проходят
-  // десятки секунд, и без индикатора лента выглядит зависшей (31.07.2026).
-  const [thinking, setThinking] = useState(false);
+  // Живой прогресс run'а: elapsed тикает локально (тикающее время — чисто
+  // презентационное состояние, WS-события для него — шум), токены/стоимость
+  // приходят событиями progress с bridge-прокси.
+  const [progress, setProgress] = useState<RunProgress | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   // Живой run этой сессии (от отправки/переподключения до run_finished):
   // пока он идёт, отправка заблокирована — сервер всё равно ответит 409
   // «workspace занят», честнее не давать нажать (параллельные чаты).
@@ -290,9 +293,15 @@ export function ChatScreen({
     (runId: string) => {
       unsubscribe.current?.();
       unsubscribe.current = subscribeRun(baseUrl, runId, token, (event) => {
-        // Первое же событие стрима гасит индикатор «работает»: дальше
-        // прогресс виден по самим событиям (чипы, дельты текста).
-        setThinking(false);
+        if (event.type === "progress") {
+          // Прогресс — отдельное состояние строки статуса, в ленту не идёт.
+          const { tokens, cost_usd } = event as {
+            tokens: number;
+            cost_usd: number;
+          };
+          setProgress({ tokens, costUsd: cost_usd });
+          return;
+        }
         if (event.type === "run_finished") setRunning(false);
         setItems((current) => applyEvent(current, event));
       });
@@ -309,7 +318,8 @@ export function ChatScreen({
     setItems([]);
     setThreadError(null);
     setSendError(null);
-    setThinking(false);
+    setProgress(null);
+    setStartedAt(null);
     stickToBottom.current = true; // новая сессия открывается свежим низом
     // Эта сессия теперь известна родителю — общему резолверу больше не за
     // что держаться. Следующий раз, когда sessionId снова станет null
@@ -349,7 +359,8 @@ export function ChatScreen({
               attachments: [],
             },
           ]);
-          setThinking(true);
+          setProgress(null);
+          setStartedAt(Date.now());
           setRunning(true);
           watch(thread.live_run_id);
         } else {
@@ -367,6 +378,18 @@ export function ChatScreen({
     const el = threadRef.current;
     if (el !== null && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [items]);
+
+  useEffect(() => {
+    if (!running || startedAt === null) {
+      setElapsed(0);
+      return;
+    }
+    const tick = () =>
+      setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [running, startedAt]);
 
   const pushStatus = useCallback((text: string, failed: boolean) => {
     const id = `cmd-${commandSeq.current++}`;
@@ -472,7 +495,8 @@ export function ChatScreen({
         { kind: "user", id: optimisticId, text, attachments: attachmentPaths },
       ]);
       setSendError(null);
-      setThinking(true);
+      setProgress(null);
+      setStartedAt(Date.now());
       setRunning(true);
       try {
         // Тот же резолвер, что у attach(): сессия, которую уже завела (или
@@ -526,7 +550,6 @@ export function ChatScreen({
       } catch (exc: unknown) {
         // Молчаливый провал — худший исход: реплика висит в ленте, а агент
         // не запущен. Например, автономия, которую исполнитель не умеет.
-        setThinking(false);
         setRunning(false);
         setSendError(
           exc instanceof ApiError
@@ -726,9 +749,13 @@ export function ChatScreen({
               );
             return null;
           })}
-          {thinking && (
-            <p className="chat__hint chat__thinking" role="status">
-              Сварог работает…
+          {running && (
+            <p className="chat__hint chat__thinking">
+              <span role="status">Сварог работает…</span>
+              <span aria-hidden="true">
+                {" "}
+                {progressDetail(elapsed, progress)}
+              </span>
             </p>
           )}
         </div>

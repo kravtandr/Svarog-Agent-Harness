@@ -348,6 +348,77 @@ describe("подписка на поток", () => {
     expect(client.decideApproval).toHaveBeenCalledWith("ap-1", true);
     vi.unstubAllGlobals();
   });
+
+  it("строка статуса живёт весь run и показывает прогресс", async () => {
+    class FakeSocket {
+      static last: FakeSocket | null = null;
+      onmessage: ((e: MessageEvent<string>) => void) | null = null;
+      constructor(public url: string | URL) {
+        FakeSocket.last = this;
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+
+    const client = api();
+    render(
+      <ChatScreen
+        api={client}
+        ensureSession={async () => "s1"}
+        sessionId="s1"
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Добавь FTS-поиск")).toBeInTheDocument(),
+    );
+    await userEvent.type(
+      screen.getByRole("combobox", { name: /написать/i }),
+      "долгая задача",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
+
+    // Тикающий секундомер живёт вне aria-live-региона (a11y): статус
+    // объявляется один раз, хвост с секундами/токенами скринридеру не
+    // читается на каждый тик (aria-hidden). Матчим по контейнеру, а не по
+    // тексту напрямую — он теперь разбит на несколько элементов.
+    const statusLine = () =>
+      document.querySelector(".chat__thinking")?.textContent ?? "";
+
+    // До каких-либо событий — секундомер уже виден.
+    expect(statusLine()).toMatch(/Сварог работает… \d+:\d\d/);
+
+    // Первое текстовое событие строку НЕ гасит (раньше гасило).
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({ type: "text", delta: "смотрю код" }),
+      } as MessageEvent<string>),
+    );
+    expect(statusLine()).toMatch(/Сварог работает…/);
+
+    // progress подмешивает токены и стоимость, ленту не трогает.
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({
+          type: "progress",
+          iterations: 3,
+          tokens: 12400,
+          cost_usd: 0.04,
+        }),
+      } as MessageEvent<string>),
+    );
+    expect(statusLine()).toMatch(/Сварог работает… \d+:\d\d/);
+    expect(statusLine()).toMatch(/· 12 400 токенов · \$0\.04/);
+
+    // Финал гасит строку.
+    act(() =>
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({ type: "run_finished", state: "completed" }),
+      } as MessageEvent<string>),
+    );
+    expect(document.querySelector(".chat__thinking")).toBeNull();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("ошибки отправки", () => {
