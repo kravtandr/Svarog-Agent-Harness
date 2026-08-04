@@ -91,41 +91,59 @@
   font-size: 12.5px;
   color: var(--muted);
 }
+/* Вариант C (04.08.2026): скрепка и микрофон — призрачные, без коробок,
+   проявляются ховером; единственный залитый элемент — «Отправить». */
 .composer__icon {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 10px;
-  background: var(--raised);
-  color: var(--muted);
+  border-radius: 8px;
+  background: none;
+  color: var(--faint);
   cursor: pointer;
   transition:
     background 0.15s ease,
-    color 0.15s ease,
-    transform 0.15s ease;
+    color 0.15s ease;
 }
 .composer__icon:hover:not(:disabled) {
-  background: #322f2b;
+  background: var(--raised);
   color: var(--text);
 }
 .composer__icon:disabled {
   cursor: default;
   opacity: 0.55;
 }
-.composer__icon--send {
+.composer__send {
+  height: 30px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 15px;
   background: var(--ember);
   color: #1a1210;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
 }
-.composer__icon--send:hover:not(:disabled) {
+.composer__send:hover:not(:disabled) {
   background: #de7238;
-  color: #1a1210;
   transform: translateY(-1px);
 }
-.composer__icon--send:active:not(:disabled) {
+.composer__send:active:not(:disabled) {
   background: #bd5626;
   transform: none;
+}
+.composer__send:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 .composer__modes {
   display: flex;
@@ -215,7 +233,8 @@
    что и остальной акцент, не синим системным. */
 .composer__select:focus-visible,
 .composer__model:focus-visible,
-.composer__icon:focus-visible {
+.composer__icon:focus-visible,
+.composer__send:focus-visible {
   outline: 2px solid rgba(210 98 44 / 65%);
   outline-offset: 1px;
 }
@@ -230,11 +249,12 @@
   .composer__box,
   .composer__box::after,
   .composer__icon,
+  .composer__send,
   .composer__select,
   .composer__model {
     transition: none;
   }
-  .composer__icon--send:hover:not(:disabled) {
+  .composer__send:hover:not(:disabled) {
     transform: none;
   }
 }
@@ -244,8 +264,12 @@
     padding: 10px 12px 14px;
   }
   .composer__icon {
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
+  }
+  .composer__send {
+    height: 40px;
+    border-radius: 20px;
   }
   .composer__foot {
     gap: 8px;

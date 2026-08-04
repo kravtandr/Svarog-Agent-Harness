@@ -34,6 +34,62 @@ const UNAVAILABLE_HINT =
   "Ни CLI агента в PATH, ни собранного docker-образа не найдено";
 const SANDBOX_UNAVAILABLE_HINT = "docker/podman не найден на хосте";
 
+/* Иконки — рукописные SVG по сетке 18px (выбор «вариант C», 04.08.2026):
+   эмодзи в кнопках зависели от платформенного шрифта и выглядели чужими. */
+function ClipIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M14.5 6.5l-6 6a3.2 3.2 0 01-4.5-4.5l6.5-6.5a2.1 2.1 0 013 3l-6.5 6.5a1 1 0 01-1.5-1.5l6-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+      <rect
+        x="6.5"
+        y="2"
+        width="5"
+        height="9"
+        rx="2.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M3.5 9a5.5 5.5 0 0011 0M9 14.5V16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function UpIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        d="M9 14V4M4.5 8.5L9 4l4.5 4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function Composer({
   onSend,
   uploading = false,
@@ -466,7 +522,7 @@ export function Composer({
                 aria-label="Прикрепить файл"
                 onClick={() => fileInput.current?.click()}
               >
-                📎
+                <ClipIcon />
               </button>
               {/* Место под голос занято сразу: включение не потребует переверстки. */}
               <button
@@ -476,15 +532,14 @@ export function Composer({
                 aria-describedby="mic-hint"
                 disabled
               >
-                ●
+                <MicIcon />
               </button>
               <span id="mic-hint" className="composer__hidden">
                 Голосовой ввод появится позже
               </span>
               <button
                 type="button"
-                className="composer__icon composer__icon--send"
-                aria-label="Отправить"
+                className="composer__send"
                 disabled={uploading || busy}
                 title={
                   busy
@@ -495,7 +550,7 @@ export function Composer({
                 }
                 onClick={send}
               >
-                ↑
+                Отправить <UpIcon />
               </button>
             </span>
           </div>
