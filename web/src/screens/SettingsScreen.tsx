@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, type Api, type ConfigValues } from "../api/client";
 import { counted } from "../model/plural";
 import type {
+  ConfigDiff,
   ConfigField,
   ConfigView,
   DiffLine,
@@ -213,6 +214,12 @@ function ProvidersPane({ api }: { api: Api }) {
   >({});
   const [scan, setScan] = useState<ModelCard[] | string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [checks, setChecks] = useState<Record<string, string>>({});
+  const [renaming, setRenaming] = useState<{
+    name: string;
+    value: string;
+  } | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     api
@@ -222,16 +229,98 @@ function ProvidersPane({ api }: { api: Api }) {
   }, [api]);
   useEffect(reload, [reload]);
 
+  // Один текст на все записи конфига: при живом запуске правка легла в файл,
+  // но снимок не перечитан (ADR-0015) — молчать об этом значит показывать
+  // список «без» только что сохранённого провайдера.
+  const applied = (diff: ConfigDiff, message: string) =>
+    setStatus(
+      diff.restart_required
+        ? "Правка записана, вступит в силу после завершения текущих запусков."
+        : message,
+    );
+
+  const runCheck = async (provider: string) => {
+    setChecks((current) => ({ ...current, [provider]: "проверяем…" }));
+    try {
+      const result = await api.providerCheck(provider);
+      setChecks((current) => ({
+        ...current,
+        [provider]: result.ok
+          ? `доступен · ${counted(result.models_count ?? 0, "модель", "модели", "моделей")}`
+          : (result.error ?? "недоступен"),
+      }));
+    } catch (exc: unknown) {
+      setChecks((current) => ({
+        ...current,
+        [provider]:
+          exc instanceof ApiError ? exc.message : "не удалось проверить",
+      }));
+    }
+  };
+
+  const startEdit = (card: ProviderCard) => {
+    setName(card.name);
+    setBaseUrl(card.base_url);
+    setModel(card.model);
+    setApiKey("");
+    setStatus(
+      `Правьте форму ниже — «Сохранить провайдера» обновит «${card.name}». Пустой ключ не меняется.`,
+    );
+  };
+
+  const submitRename = async () => {
+    if (renaming === null) return;
+    setStatus(null);
+    try {
+      const diff = await api.providerRename(
+        renaming.name,
+        renaming.value.trim(),
+      );
+      applied(
+        diff,
+        `«${renaming.name}» теперь называется «${renaming.value.trim()}».`,
+      );
+      setRenaming(null);
+      setOpenCatalog(null);
+      setCatalogs({});
+      reload();
+    } catch (exc: unknown) {
+      setStatus(
+        exc instanceof ApiError ? exc.message : "Не удалось переименовать.",
+      );
+    }
+  };
+
+  const remove = async (provider: string) => {
+    // Двухкликовое подтверждение вместо window.confirm: тестируемо и не
+    // блокирует вкладку нативным диалогом.
+    if (confirming !== provider) {
+      setConfirming(provider);
+      return;
+    }
+    setConfirming(null);
+    setStatus(null);
+    try {
+      const diff = await api.providerRemove(provider);
+      applied(diff, `Провайдер «${provider}» удалён.`);
+      setOpenCatalog(null);
+      setCatalogs({});
+      reload();
+    } catch (exc: unknown) {
+      setStatus(exc instanceof ApiError ? exc.message : "Не удалось удалить.");
+    }
+  };
+
   const submit = async () => {
     setStatus(null);
     try {
-      await api.addProvider({
+      const diff = await api.addProvider({
         name: name.trim(),
         base_url: baseUrl.trim(),
         model: model.trim(),
         ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
       });
-      setStatus(`Провайдер «${name.trim()}» сохранён.`);
+      applied(diff, `Провайдер «${name.trim()}» сохранён.`);
       setName("");
       setBaseUrl("");
       setModel("");
@@ -254,8 +343,8 @@ function ProvidersPane({ api }: { api: Api }) {
   const makeDefault = async (provider: string) => {
     setStatus(null);
     try {
-      await api.executorDefaults({ executor: "native", provider });
-      setStatus(`Теперь по умолчанию — «${provider}».`);
+      const diff = await api.executorDefaults({ executor: "native", provider });
+      applied(diff, `Теперь по умолчанию — «${provider}».`);
       reload();
     } catch (exc: unknown) {
       setStatus(
@@ -320,10 +409,41 @@ function ProvidersPane({ api }: { api: Api }) {
         return (
           <div key={card.name} className="provider">
             <div className="secret">
-              <span>
-                {card.name}
-                {card.is_default ? " · по умолчанию" : ""}
-              </span>
+              {renaming !== null && renaming.name === card.name ? (
+                <span className="provider__rename">
+                  <input
+                    className="field__control"
+                    aria-label={`Новое имя ${card.name}`}
+                    value={renaming.value}
+                    onChange={(event) =>
+                      setRenaming({
+                        name: card.name,
+                        value: event.target.value,
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    disabled={!renaming.value.trim()}
+                    onClick={() => void submitRename()}
+                  >
+                    OK
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    onClick={() => setRenaming(null)}
+                  >
+                    Отмена
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  {card.name}
+                  {card.is_default ? " · по умолчанию" : ""}
+                </span>
+              )}
               <span className="secret__state">
                 {card.model} · {card.base_url}
               </span>
@@ -340,12 +460,47 @@ function ProvidersPane({ api }: { api: Api }) {
                 <button
                   type="button"
                   className="btn btn--small"
+                  onClick={() => void runCheck(card.name)}
+                >
+                  Проверить
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--small"
+                  onClick={() => startEdit(card)}
+                >
+                  Изменить
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--small"
+                  onClick={() =>
+                    setRenaming({ name: card.name, value: card.name })
+                  }
+                >
+                  Переименовать
+                </button>
+                {!card.is_default && (
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    onClick={() => void remove(card.name)}
+                  >
+                    {confirming === card.name ? "Точно удалить?" : "Удалить"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--small"
                   onClick={() => toggleCatalog(card.name)}
                 >
                   {openCatalog === card.name ? "Скрыть модели" : "Модели"}
                 </button>
               </span>
             </div>
+            {checks[card.name] !== undefined && (
+              <p className="field__help">{checks[card.name]}</p>
+            )}
             {openCatalog === card.name &&
               (catalog === undefined ? (
                 <p className="field__help">Загружаем каталог…</p>

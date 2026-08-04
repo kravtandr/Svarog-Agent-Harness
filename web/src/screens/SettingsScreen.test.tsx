@@ -316,6 +316,141 @@ describe("экран настроек", () => {
     expect(screen.getByRole("button", { name: "Модели" })).toBeInTheDocument();
   });
 
+  const twoProviders = () =>
+    vi.fn().mockResolvedValue([
+      {
+        name: "local",
+        base_url: "https://openrouter.ai/api/v1",
+        model: "deepseek/x",
+        is_default: true,
+      },
+      {
+        name: "groq",
+        base_url: "https://api.groq.com/openai/v1",
+        model: "ll",
+        is_default: false,
+      },
+    ]);
+
+  it("проверяет доступность провайдера из строки", async () => {
+    const api = fakeApi({
+      providers: twoProviders(),
+      providerCheck: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, models_count: 317, error: null })
+        .mockResolvedValueOnce({
+          ok: false,
+          models_count: null,
+          error: "провайдер ответил 401",
+        }),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    const buttons = await screen.findAllByRole("button", { name: "Проверить" });
+    await userEvent.click(buttons[0]);
+    expect(
+      await screen.findByText(/доступен · 317 моделей/),
+    ).toBeInTheDocument();
+    expect(api.providerCheck).toHaveBeenCalledWith("local");
+
+    await userEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(/провайдер ответил 401/),
+    ).toBeInTheDocument();
+  });
+
+  it("переименовывает провайдера через инлайн-поле", async () => {
+    const api = fakeApi({ providers: twoProviders() });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    const renames = await screen.findAllByRole("button", {
+      name: "Переименовать",
+    });
+    await userEvent.click(renames[0]);
+    const field = screen.getByRole("textbox", { name: "Новое имя local" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "openrouter");
+    await userEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() =>
+      expect(api.providerRename).toHaveBeenCalledWith("local", "openrouter"),
+    );
+    // Список перечитан после успеха.
+    expect(api.providers).toHaveBeenCalledTimes(2);
+  });
+
+  it("удаляет провайдера после повторного клика, дефолтный — без кнопки", async () => {
+    const api = fakeApi({ providers: twoProviders() });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    // «Удалить» есть только у не-дефолтного.
+    const remove = await screen.findByRole("button", { name: "Удалить" });
+    await userEvent.click(remove);
+    expect(api.providerRemove).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    );
+    await waitFor(() =>
+      expect(api.providerRemove).toHaveBeenCalledWith("groq"),
+    );
+  });
+
+  it("«Изменить» заполняет форму значениями провайдера", async () => {
+    const api = fakeApi({ providers: twoProviders() });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    const edits = await screen.findAllByRole("button", { name: "Изменить" });
+    await userEvent.click(edits[1]);
+    expect(screen.getByLabelText("Имя")).toHaveValue("groq");
+    expect(screen.getByLabelText("Base URL (с /v1)")).toHaveValue(
+      "https://api.groq.com/openai/v1",
+    );
+    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue("ll");
+    // Ключ не подставляется: пустое поле = не менять.
+    expect(screen.getByLabelText("API-ключ (опционально)")).toHaveValue("");
+  });
+
+  it("сообщает про restart_required при сохранении провайдера", async () => {
+    const api = fakeApi({
+      addProvider: vi.fn().mockResolvedValue({
+        path: "",
+        lines: [],
+        changes: 1,
+        restart_required: true,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    await userEvent.type(screen.getByLabelText("Имя"), "groq");
+    await userEvent.type(
+      screen.getByLabelText("Base URL (с /v1)"),
+      "https://api.groq.com/openai/v1",
+    );
+    await userEvent.type(screen.getByLabelText("Модель по умолчанию"), "ll");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить провайдера" }),
+    );
+
+    expect(
+      await screen.findByText(/вступит в силу.*текущ.*запуск/i),
+    ).toBeInTheDocument();
+  });
+
   it("сканирует /models по данным формы и честно показывает ошибку", async () => {
     const { ApiError } = await import("../api/client");
     const api = fakeApi({
