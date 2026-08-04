@@ -745,6 +745,15 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+    @app.delete("/models/providers/{name}", response_model=ConfigDiffView)
+    async def remove_provider(name: str, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.remove_provider(name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @app.post("/executors/defaults", response_model=ConfigDiffView)
     async def set_executor_defaults(
         req: ExecutorDefaultsRequest, service: ServiceDep

@@ -396,5 +396,57 @@ def test_provider_rename_updates_auxiliary(
     assert "local" not in data["models"]["providers"]
 
 
+def test_provider_remove_guards_default_and_collapses_wrapper(
+    client: TestClient, service: GatewayService
+) -> None:
+    client.post(
+        "/models/providers",
+        json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "ll"},
+    )
+    # Дефолтного удалять нельзя — сначала переключить.
+    assert client.delete("/models/providers/local").status_code == 422
+    client.post("/executors/defaults", json={"executor": "native", "provider": "groq"})
+    assert client.delete("/models/providers/local").status_code == 200
+    names = [p["name"] for p in client.get("/models").json()]
+    assert names == ["groq"]
+    data = yaml.safe_load(service.config_path.read_text(encoding="utf-8"))
+    assert "local" not in data["models"]["providers"]
+    assert client.delete("/models/providers/local").status_code == 404
+
+
+def test_provider_remove_guards_auxiliary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove отказывает, если удаляемый провайдер — auxiliary."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  auxiliary: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: opencode\n"
+        "    image: svarog/agent-opencode:latest\n"
+        "    base_url: http://localhost:9\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # Удалять auxiliary нельзя.
+    resp = app_client.delete("/models/providers/local")
+    assert resp.status_code == 422
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield

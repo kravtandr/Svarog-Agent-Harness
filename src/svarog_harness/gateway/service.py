@@ -1530,6 +1530,38 @@ class GatewayService:
             values["models.auxiliary"] = new_name
         return await self._write_deep(values, removes=[f"models.providers.{name}"])
 
+    async def remove_provider(self, name: str) -> ConfigDiffView:
+        """Удалить запись models.providers; дефолтного и вспомогательного — отказ.
+
+        Удаляя последний ключ из models.providers, удаляют и саму обёртку,
+        чтобы валидация не упала на None.
+        """
+        if name not in self.cfg.models.providers:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        if name == self.cfg.models.default:
+            raise ValueError(
+                "нельзя удалить провайдера по умолчанию — сначала переключите «по умолчанию»"
+            )
+        if name == self.cfg.models.auxiliary:
+            raise ValueError(
+                "нельзя удалить провайдера, назначенного вспомогательным "
+                "(models.auxiliary) — сначала переназначьте его"
+            )
+        raw = (
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+            if self.config_path.exists()
+            else {}
+        )
+        models_raw = raw.get("models") or {}
+        providers = models_raw.get("providers") or {}
+        # Пустая обёртка (`providers:` без ключей) парсится в None и валит
+        # валидацию — удаляя последний ключ проектного файла, снимаем и её.
+        if name in providers and len(providers) <= 1:
+            target = "models" if set(models_raw.keys()) <= {"providers"} else "models.providers"
+        else:
+            target = f"models.providers.{name}"
+        return await self._write_deep({}, removes=[target])
+
     async def set_executor_defaults(
         self, executor: str, provider: str | None = None, model: str | None = None
     ) -> ConfigDiffView:
