@@ -3,7 +3,7 @@
 }
 .composer__inner {
   position: relative;
-  max-width: 700px;
+  max-width: var(--chat-col);
   margin: 0 auto;
 }
 /* Позиционирование панели — забота обёртки (см. комментарий в ModelPicker.css). */

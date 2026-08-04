@@ -16,7 +16,7 @@
 
 .chat__col {
   width: 100%;
-  max-width: 700px;
+  max-width: var(--chat-col);
   /* margin-top: auto прижимает короткую ленту к низу БЕЗ justify-content:
      flex-end — тот в связке с overflow выталкивает верх контента за начало
      скролл-области, и история недоступна прокрутке (баг 2026-07-30). */
@@ -82,7 +82,7 @@
 }
 
 .chat__upload-error {
-  max-width: 700px;
+  max-width: var(--chat-col);
   margin: 0 auto 12px;
   padding: 0 24px;
 }
@@ -91,7 +91,7 @@
    прямо над композером, а не в потоке .chat__thread с его 26px-отступами
    для реплик) — приглушённый цвет вместо тревожного, это не ошибка. */
 .chat__upload-pending {
-  max-width: 700px;
+  max-width: var(--chat-col);
   margin: 0 auto 12px;
   padding: 0 24px;
   color: var(--muted);
