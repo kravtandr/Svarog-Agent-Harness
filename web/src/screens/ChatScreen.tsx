@@ -19,7 +19,7 @@ import { Gate } from "../components/Gate";
 import { Markdown } from "../components/Markdown";
 import { ToolCalls } from "../components/ToolCalls";
 import { parseCommand, type ParsedCommand } from "../model/completion";
-import { progressLabel, type RunProgress } from "../model/progress";
+import { progressDetail, type RunProgress } from "../model/progress";
 import { applyEvent, fromHistory, type ThreadItem } from "../model/thread";
 import "./ChatScreen.css";
 
@@ -750,8 +750,12 @@ export function ChatScreen({
             return null;
           })}
           {running && (
-            <p className="chat__hint chat__thinking" role="status">
-              {progressLabel(elapsed, progress)}
+            <p className="chat__hint chat__thinking">
+              <span role="status">Сварог работает…</span>
+              <span aria-hidden="true">
+                {" "}
+                {progressDetail(elapsed, progress)}
+              </span>
             </p>
           )}
         </div>

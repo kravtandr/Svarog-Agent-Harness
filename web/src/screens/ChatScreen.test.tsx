@@ -378,8 +378,15 @@ describe("подписка на поток", () => {
     await userEvent.click(screen.getByRole("button", { name: "Отправить" }));
     await waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
 
+    // Тикающий секундомер живёт вне aria-live-региона (a11y): статус
+    // объявляется один раз, хвост с секундами/токенами скринридеру не
+    // читается на каждый тик (aria-hidden). Матчим по контейнеру, а не по
+    // тексту напрямую — он теперь разбит на несколько элементов.
+    const statusLine = () =>
+      document.querySelector(".chat__thinking")?.textContent ?? "";
+
     // До каких-либо событий — секундомер уже виден.
-    expect(screen.getByText(/Сварог работает… \d+:\d\d/)).toBeInTheDocument();
+    expect(statusLine()).toMatch(/Сварог работает… \d+:\d\d/);
 
     // Первое текстовое событие строку НЕ гасит (раньше гасило).
     act(() =>
@@ -387,7 +394,7 @@ describe("подписка на поток", () => {
         data: JSON.stringify({ type: "text", delta: "смотрю код" }),
       } as MessageEvent<string>),
     );
-    expect(screen.getByText(/Сварог работает…/)).toBeInTheDocument();
+    expect(statusLine()).toMatch(/Сварог работает…/);
 
     // progress подмешивает токены и стоимость, ленту не трогает.
     act(() =>
@@ -400,9 +407,8 @@ describe("подписка на поток", () => {
         }),
       } as MessageEvent<string>),
     );
-    expect(
-      screen.getByText(/Сварог работает… \d+:\d\d · 12 400 токенов · \$0\.04/),
-    ).toBeInTheDocument();
+    expect(statusLine()).toMatch(/Сварог работает… \d+:\d\d/);
+    expect(statusLine()).toMatch(/· 12 400 токенов · \$0\.04/);
 
     // Финал гасит строку.
     act(() =>
@@ -410,7 +416,7 @@ describe("подписка на поток", () => {
         data: JSON.stringify({ type: "run_finished", state: "completed" }),
       } as MessageEvent<string>),
     );
-    expect(screen.queryByText(/Сварог работает…/)).not.toBeInTheDocument();
+    expect(document.querySelector(".chat__thinking")).toBeNull();
     vi.unstubAllGlobals();
   });
 });
