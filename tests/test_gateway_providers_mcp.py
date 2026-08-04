@@ -136,9 +136,7 @@ def test_add_provider_in_workspace_without_own_config(
     assert sorted(names) == ["LiteLLM", "local"]
 
 
-def test_broken_user_config_gives_422_not_500(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_broken_user_config_gives_422_not_500(client: TestClient, tmp_path: Path) -> None:
     """~/.svarog/svarog.yaml сломали после старта serve — правка отвечает 422.
 
     _validate_effective читает user-файл на каждую правку; кривой YAML в нём

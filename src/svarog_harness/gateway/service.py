@@ -9,6 +9,7 @@ run в фоне. Источник истины по trace — SQLite; событ
 
 import asyncio
 import contextlib
+import logging
 import os
 import re
 import tarfile
@@ -50,6 +51,7 @@ from svarog_harness.gateway.attachments import (
     store_attachment,
     verify_attachment,
 )
+from svarog_harness.gateway.autotitle import fallback_title, needs_autotitle, title_for
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.executors import (
     ExecutorOption,
@@ -111,7 +113,7 @@ from svarog_harness.gitflow.provision import (
     task_workspace_dir,
 )
 from svarog_harness.gitflow.repo import GitRepo
-from svarog_harness.llm.openai_compatible import ApiKeyError, resolve_api_key
+from svarog_harness.llm.openai_compatible import ApiKeyError, auxiliary_provider, resolve_api_key
 from svarog_harness.llm.provider import ChatMessage
 from svarog_harness.mcp import MCPBackend, connect_mcp_servers
 from svarog_harness.memory.index import search as memory_search
@@ -119,6 +121,7 @@ from svarog_harness.runtime.agents import EXTERNAL_ADAPTERS
 from svarog_harness.runtime.loop import RunOutcome
 from svarog_harness.runtime.orchestrator import RunHooks, SessionResources, TaskRunner
 from svarog_harness.runtime.summaries import short_arg, short_result
+from svarog_harness.secrets import default_secret_store
 from svarog_harness.secrets.store import FileSecretStore
 from svarog_harness.skills import scan_skills
 from svarog_harness.storage.events import EventStream, InProcessEventStream
@@ -133,6 +136,8 @@ from svarog_harness.trace.lookup import (
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import fetch_run, fetch_runs, run_usage_totals
 from svarog_harness.verifier import CheckOutcome
+
+logger = logging.getLogger(__name__)
 
 # Диф от корня истории, когда первый коммит run'а — root commit.
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -631,6 +636,7 @@ class GatewayService:
                 resources=warm.resources if warm is not None else None,
             )
             self._publish_finished(outcome)
+            self._spawn(self._autotitle_bg(outcome.run_id, outcome.final_answer))
         except Exception as exc:
             if warm is not None and session_id is not None:
                 # Нога упала — sandbox может быть в неизвестном состоянии
@@ -656,6 +662,7 @@ class GatewayService:
             runner = await self._runner_for_run(run_id)
             outcome = await runner.resume(run_id, hooks=hooks)
             self._publish_finished(outcome)
+            self._spawn(self._autotitle_bg(outcome.run_id, outcome.final_answer))
         except Exception as exc:
             self._publish_error(holder, started, exc)
 
@@ -759,6 +766,71 @@ class GatewayService:
                 "error": outcome.error,
             },
         )
+
+    async def _autotitle_bg(self, run_id: str, answer: str) -> None:
+        """Автоназвание чата по первому обмену (спека 2026-08-04): best-effort.
+
+        Отдельная фоновая задача после run_finished: сбой модели или БД не
+        влияет на run. Флаг meta["autotitle"] делает попытку одноразовой;
+        CLI-runs (title = task) отсекаются проверкой дефолтного названия.
+        """
+        try:
+
+            async def read(db: AsyncSession) -> tuple[str, str] | None:
+                run = await db.get(Run, run_id)
+                if run is None:
+                    return None
+                session = await db.get(Session, run.session_id)
+                if session is None or not needs_autotitle(session.title, session.meta):
+                    return None
+                first = (
+                    await db.execute(
+                        select(Run.task)
+                        .where(Run.session_id == session.id)
+                        .order_by(Run.created_at, Run.id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                return session.id, first or ""
+
+            found = await self._read(read)
+            if found is None:
+                return
+            session_id, first_task = found
+            if not first_task.strip():
+                return
+            title = await title_for(
+                lambda: auxiliary_provider(
+                    self.cfg.models, default_secret_store(self.cfg.secrets.path)
+                ),
+                first_task,
+                answer,
+            )
+            flag = "done" if title else "fallback"
+            picked = title or fallback_title(first_task)
+            if picked is None:
+                return
+            # mypy не сужает Optional для переменных, захваченных замыканием, —
+            # поэтому в write уходит уже str-копия.
+            final_title: str = picked
+
+            async def write(db: AsyncSession) -> None:
+                session = await db.get(Session, session_id)
+                if session is None or not needs_autotitle(session.title, session.meta):
+                    return  # гонка: параллельный run уже назвал
+                session.title = final_title
+                # JSON-колонка без MutableDict: изменение фиксируется только
+                # присваиванием нового dict, не мутацией на месте.
+                session.meta = {**(session.meta or {}), "autotitle": flag}
+                await db.commit()
+
+            # _read — обёртка with_db и годится и для записи (историческое
+            # имя); отдельного _write нет.
+            await self._read(write)
+        except Exception:
+            # Автоназвание никогда не роняет фоновую задачу (best-effort, спека).
+            logger.warning("автоназвание: фоновая задача не удалась", exc_info=True)
+            return
 
     def _publish_error(
         self, holder: _RunHolder, started: asyncio.Future[str], exc: Exception

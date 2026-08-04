@@ -27,7 +27,7 @@
 
 1. Run завершается. Сервис проверяет: название сессии дефолтное **и** `meta["autotitle"]` не установлен.
 2. Если да — фоновая задача читает первый вопрос сессии (`runs[0].task`) и финальный ответ (`last_assistant_text`, `trace/recorder.py:310`), зовёт aux-модель (`auxiliary_provider(cfg.models, secret_store)`, `llm/openai_compatible.py:67`).
-3. Результат чистится и пишется через готовый `TraceRecorder.rename_session` (`trace/recorder.py:360`); в `meta` ставится `autotitle: "done"` (LLM) или `"fallback"` (эвристика).
+3. Результат чистится и пишется напрямую в сервисе (`GatewayService._autotitle_bg`, `gateway/service.py`), а не через `TraceRecorder.rename_session`: в одной транзакции повторно проверяется условие срабатывания (гонка с параллельным run'ом) и одновременно ставится `session.title` и `meta["autotitle"]` — `"done"` (LLM) или `"fallback"` (эвристика).
 4. Поллинг UI приносит название в сайдбар и топ-бар.
 
 ### Условие срабатывания
