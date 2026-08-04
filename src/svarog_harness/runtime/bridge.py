@@ -26,10 +26,12 @@ loop процесса через run_coroutine_threadsafe.
 import asyncio
 import contextlib
 import json
+import logging
 import secrets
 import socketserver
 import sys
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -37,6 +39,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -272,6 +276,7 @@ class RunBridge:
         # pass-through (subscription): auth агента уже в headers (не срезан) —
         # Claude Code аутентифицируется своим OAuth-токеном сам.
         url = self.upstream.base_url.rstrip("/") + req.path
+        started = time.monotonic()
         try:
             upstream_req = self._client.build_request(
                 req.command, url, headers=headers, content=body
@@ -280,10 +285,26 @@ class RunBridge:
         except httpx.HTTPError as exc:
             _respond_json(req, 502, {"error": f"upstream недоступен: {exc}"})
             return
+        # Диагностика «что так долго»: у локальных моделей (LM Studio, vLLM)
+        # время до первого байта — это prompt processing, и оно легко
+        # доминирует в run'е. Логируем каждый LLM-запрос, их единицы за run.
+        logger.info(
+            "LLM-прокси: %s %s → %s, первый байт за %.1fс",
+            req.command,
+            req.path,
+            upstream.status_code,
+            time.monotonic() - started,
+        )
         try:
             self._relay_response(req, upstream)
         finally:
             upstream.close()
+            logger.info(
+                "LLM-прокси: %s %s завершён за %.1fс",
+                req.command,
+                req.path,
+                time.monotonic() - started,
+            )
 
     def _relay_response(self, req: BaseHTTPRequestHandler, upstream: httpx.Response) -> None:
         # Инвариант: usage коммитится ДО байтов, завершающих ответ клиенту

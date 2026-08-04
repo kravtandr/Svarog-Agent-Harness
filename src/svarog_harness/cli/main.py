@@ -8,6 +8,7 @@ skills list/check, memory show/flush, secrets list/set.
 import asyncio
 import contextlib
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -1496,6 +1497,12 @@ def serve(
         f"[green]Svarog gateway[/green] http://{host}:{port} | {mode}\n"
         f"[dim]POST /runs · GET /runs/{{id}} · WS /runs/{{id}}/events · "
         f"GET /approvals · POST /approvals/{{id}}[/dim]"
+    )
+    # INFO-логи svarog_harness.* (тайминги старта sandbox и LLM-прокси) —
+    # в тот же терминал, что и uvicorn: без basicConfig stdlib печатает
+    # только WARNING+, и диагностика «что так долго» молчит.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     uvicorn.run(api, host=host, port=port, log_level="info")
 

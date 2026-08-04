@@ -8,6 +8,8 @@ CLI, gateway (REST/WS) и Telegram гоняют один и тот же end-to-e
 """
 
 import contextlib
+import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -94,6 +96,8 @@ from svarog_harness.tools.schedule_tools import (
 from svarog_harness.trace.lookup import RunNotResumableError, find_run_by_prefix
 from svarog_harness.trace.recorder import TraceRecorder
 from svarog_harness.verifier import Verifier, skill_checks
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigDriftError(Exception):
@@ -547,17 +551,34 @@ class TaskRunner:
         """
         self.assert_sandbox_available()  # fail-closed (ADR-0013)
         external = self._cfg.executor.type == "external"
+        # Тайминги фаз — в лог: холодный старт сессии по опыту съедает больше
+        # минуты, и без раскладки «инфра / launch / контейнер» его не поймать.
+        t0 = time.monotonic()
         backends = [] if external else await connect_mcp_servers(self._cfg.mcp, self._host_store)
+        t_mcp = time.monotonic()
         infra: ExternalAgentInfra | None = None
         environment: ExecutionEnvironment | None = None
         try:
+            t_infra = t_launch = t_mcp
             if external:
                 self.assert_external_autonomy_supported(autonomy)  # fail-closed (§6)
                 infra = self.build_agent_infra()
                 await infra.start()
+                t_infra = time.monotonic()
                 self.prepare_agent_launch(infra)
+                t_launch = time.monotonic()
             environment = self.build_environment(infra)
             await environment.start()
+            done = time.monotonic()
+            logger.info(
+                "тёплый sandbox поднят за %.1fс: mcp %.1fс, инфра (bridge+сеть+relay) "
+                "%.1fс, launch-файлы %.1fс, контейнер %.1fс",
+                done - t0,
+                t_mcp - t0,
+                t_infra - t_mcp,
+                t_launch - t_infra,
+                done - t_launch,
+            )
             return SessionResources(environment=environment, infra=infra, backends=backends)
         except BaseException:
             # Частично поднятое не осиротает: закрываем всё, что успели.

@@ -160,6 +160,28 @@ async def test_proxy_injects_key_and_meters_json(upstream: _Upstream) -> None:
         bridge.stop()
 
 
+async def test_proxy_logs_upstream_timing(
+    upstream: _Upstream, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Диагностика «что так долго»: каждый LLM-запрос логирует время до
+    первого байта upstream (у локальных моделей это prompt processing)."""
+    bridge = _bridge(upstream.url, loop=asyncio.get_running_loop())
+    bridge.start()
+    try:
+        with caplog.at_level("INFO", logger="svarog_harness.runtime.bridge"):
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{bridge.local_url()}/v1/messages",
+                    headers={"x-api-key": bridge.token},
+                    json={"model": "m", "messages": []},
+                )
+        timing = [r.message for r in caplog.records if "первый байт" in r.message]
+        assert len(timing) == 1
+        assert "/v1/messages" in timing[0]
+    finally:
+        bridge.stop()
+
+
 async def test_proxy_meters_sse_stream(upstream: _Upstream) -> None:
     bridge = _bridge(upstream.url, loop=asyncio.get_running_loop())
     bridge.start()

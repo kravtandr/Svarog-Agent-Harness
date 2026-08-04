@@ -15,6 +15,7 @@ import contextlib
 import logging
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -195,9 +196,23 @@ class ExternalAgentExecutor:
 
     async def _execute(self, run: Run, task: str, agent_session: str | None) -> RunOutcome:
         state = _StreamState()
+        # Диагностика «что так долго»: между exec агента и его первым событием
+        # живут boot CLI, подключение MCP и первый LLM-запрос — этот лог
+        # вместе с таймингами bridge раскладывает паузу на части.
+        started = time.monotonic()
+        first_event_logged = False
 
         async def on_line(line: str) -> None:
-            for event in self._adapter.parse_event(line):
+            nonlocal first_event_logged
+            events = self._adapter.parse_event(line)
+            if events and not first_event_logged:
+                first_event_logged = True
+                logger.info(
+                    "%s: первое событие агента через %.1fс после exec",
+                    self._adapter.name,
+                    time.monotonic() - started,
+                )
+            for event in events:
                 await self._handle_event(run, state, event)
 
         # Преамбула только при наличии MCP-канала: без него упоминание
