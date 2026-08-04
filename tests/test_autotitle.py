@@ -43,6 +43,18 @@ def test_clean_title_strips_quotes_period_and_newlines() -> None:
     assert clean_title("Один\nдва   три") == "Один два три"
 
 
+def test_clean_title_strips_unicode_curly_quotes() -> None:
+    # U+201C and U+201D (left and right curly double quotes)
+    curly_dbl = chr(0x201C) + "Умный заголовок" + chr(0x201D)
+    assert clean_title(curly_dbl) == "Умный заголовок"
+    # U+2018 and U+2019 (left and right curly single quotes)
+    curly_sgl = chr(0x2018) + "Ещё один заголовок" + chr(0x2019)
+    assert clean_title(curly_sgl) == "Ещё один заголовок"
+    # Mixed curly and straight quotes
+    mixed = chr(0x201C) + "Mixed «quotes» here" + chr(0x201D)
+    assert clean_title(mixed) == "Mixed «quotes» here"
+
+
 def test_clean_title_garbage_is_none() -> None:
     assert clean_title("  \n") is None
     assert clean_title("«».") is None

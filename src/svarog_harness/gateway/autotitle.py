@@ -21,7 +21,7 @@ _TITLE_MAX = 200  # лимит recorder'а: create_session/rename режут tit
 _FALLBACK_MAX = 60
 _TASK_LIMIT = 2000
 _ANSWER_LIMIT = 1000
-_QUOTES = "\"'«»''`"
+_QUOTES = "\"'«»“”‘’`"
 
 _SYSTEM = (
     "Придумай короткое название диалогу: 3-6 слов, на языке диалога, "
