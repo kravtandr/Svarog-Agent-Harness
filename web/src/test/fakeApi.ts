@@ -78,6 +78,21 @@ export function fakeApi(over: Partial<Api> = {}): Api {
     }),
     providers: vi.fn().mockResolvedValue([]),
     providerModels: vi.fn().mockResolvedValue([]),
+    providerCheck: vi
+      .fn()
+      .mockResolvedValue({ ok: true, models_count: 1, error: null }),
+    providerRename: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
+    providerRemove: vi.fn().mockResolvedValue({
+      path: "",
+      lines: [],
+      changes: 0,
+      restart_required: false,
+    }),
     scanModels: vi.fn().mockResolvedValue([]),
     executors: vi.fn().mockResolvedValue([]),
     sandboxes: vi.fn().mockResolvedValue([]),

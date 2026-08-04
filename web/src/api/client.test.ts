@@ -249,6 +249,31 @@ describe("клиент API", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body).toEqual({ text: "смотри", autonomy: "yolo" });
   });
+
+  it("экранирует имя провайдера в check/rename/delete", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createClient({ baseUrl: "" });
+
+    await api.providerCheck("a/b");
+    await api.providerRename("a/b", "openrouter");
+    await api.providerRemove("a/b");
+
+    const urls = fetchMock.mock.calls.map((call) => call[0] as string);
+    expect(urls).toEqual([
+      "/models/providers/a%2Fb/check",
+      "/models/providers/a%2Fb/rename",
+      "/models/providers/a%2Fb",
+    ]);
+    const [, renameInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(renameInit.body as string)).toEqual({
+      new_name: "openrouter",
+    });
+    const [, deleteInit] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(deleteInit.method).toBe("DELETE");
+  });
 });
 
 describe("пикер рабочей папки", () => {
