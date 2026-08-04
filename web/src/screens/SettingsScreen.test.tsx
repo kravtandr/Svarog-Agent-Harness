@@ -385,6 +385,26 @@ describe("экран настроек", () => {
     expect(api.providers).toHaveBeenCalledTimes(2);
   });
 
+  it("отправляет инлайн-переименование провайдера по Enter", async () => {
+    const api = fakeApi({ providers: twoProviders() });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    const renames = await screen.findAllByRole("button", {
+      name: "Переименовать",
+    });
+    await userEvent.click(renames[0]);
+    const field = screen.getByRole("textbox", { name: "Новое имя local" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "openrouter{Enter}");
+
+    await waitFor(() =>
+      expect(api.providerRename).toHaveBeenCalledWith("local", "openrouter"),
+    );
+  });
+
   it("удаляет провайдера после повторного клика, дефолтный — без кнопки", async () => {
     const api = fakeApi({ providers: twoProviders() });
     render(<SettingsScreen api={api} />);

@@ -421,6 +421,11 @@ function ProvidersPane({ api }: { api: Api }) {
                         value: event.target.value,
                       })
                     }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && renaming.value.trim())
+                        void submitRename();
+                      if (event.key === "Escape") setRenaming(null);
+                    }}
                   />
                   <button
                     type="button"
