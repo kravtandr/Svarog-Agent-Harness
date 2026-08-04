@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # дефолт (GatewayService.create_session). Только такие чаты переименовываем.
 DEFAULT_TITLES = frozenset({"", "Новый чат", "gateway-сессия"})
 
-_TITLE_MAX = 200  # лимит recorder'а: create_session/rename режут title[:200]
+_TITLE_MAX = 200  # лимит колонки sessions.title; rename_session не режет, поэтому режем здесь
 _FALLBACK_MAX = 60
 _TASK_LIMIT = 2000
 _ANSWER_LIMIT = 1000

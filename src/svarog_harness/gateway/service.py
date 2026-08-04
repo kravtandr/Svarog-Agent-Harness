@@ -9,6 +9,7 @@ run в фоне. Источник истины по trace — SQLite; событ
 
 import asyncio
 import contextlib
+import logging
 import os
 import re
 import tarfile
@@ -134,6 +135,8 @@ from svarog_harness.trace.lookup import (
 from svarog_harness.trace.recorder import TraceRecorder, WorkspaceBusyError
 from svarog_harness.trace.viewer import fetch_run, fetch_runs, run_usage_totals
 from svarog_harness.verifier import CheckOutcome
+
+logger = logging.getLogger(__name__)
 
 # Диф от корня истории, когда первый коммит run'а — root commit.
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -766,7 +769,7 @@ class GatewayService:
                     await db.execute(
                         select(Run.task)
                         .where(Run.session_id == session.id)
-                        .order_by(Run.created_at)
+                        .order_by(Run.created_at, Run.id)
                         .limit(1)
                     )
                 ).scalar_one_or_none()
@@ -803,9 +806,12 @@ class GatewayService:
                 session.meta = {**(session.meta or {}), "autotitle": flag}
                 await db.commit()
 
+            # _read — обёртка with_db и годится и для записи (историческое
+            # имя); отдельного _write нет.
             await self._read(write)
         except Exception:
             # Автоназвание никогда не роняет фоновую задачу (best-effort, спека).
+            logger.warning("автоназвание: фоновая задача не удалась", exc_info=True)
             return
 
     def _publish_error(
