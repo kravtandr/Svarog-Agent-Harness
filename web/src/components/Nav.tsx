@@ -50,12 +50,36 @@ export function heatLevel(
   return 4;
 }
 
-function dayLabel(session: SessionSummary, now: number = Date.now()): string {
-  const age = now - parseUtc(session.updated_at);
-  if (age < DAY) return "Сегодня";
-  if (age < 2 * DAY) return "Вчера";
-  if (age < 7 * DAY) return "Прошлая неделя";
-  return "Ранее";
+/** Секции списка — папки, в которых начаты чаты (решение 04.08.2026,
+    вместо дат): ключ — полный путь (одноимённые папки из разных мест не
+    склеиваются), порядок — по свежести первого чата (сервер отдаёт список
+    по убыванию updated_at), внутри — тот же хронологический порядок. */
+type WorkspaceGroup = {
+  key: string;
+  label: string;
+  full: string | null;
+  sessions: SessionSummary[];
+};
+
+export function groupByWorkspace(sessions: SessionSummary[]): WorkspaceGroup[] {
+  const groups: WorkspaceGroup[] = [];
+  const byKey = new Map<string, WorkspaceGroup>();
+  for (const session of sessions) {
+    const key = session.workspace ?? "";
+    let group = byKey.get(key);
+    if (group === undefined) {
+      group = {
+        key,
+        label: rootBase(session.workspace) ?? "Без папки",
+        full: session.workspace,
+        sessions: [],
+      };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.sessions.push(session);
+  }
+  return groups;
 }
 
 export type Section =
@@ -86,7 +110,6 @@ export function Nav({
   section: Section;
   onSection: (section: Section) => void;
 }) {
-  let lastLabel = "";
   // Какой чат раскрыл меню «⋯». Удаление — сразу, без подтверждения
   // (решение 2026-07-30): бейдж корня прижимал крестик, и промахи по нему
   // раздражали сильнее, чем риск лишнего клика; меню разводит цели кликов.
@@ -99,81 +122,80 @@ export function Nav({
         ＋ Новый чат
       </button>
 
-      <div className="nav__list">
-        {sessions.map((session) => {
-          const label = dayLabel(session);
-          const header =
-            label === lastLabel ? null : (
-              <div className="nav__day">{label}</div>
-            );
-          lastLabel = label;
-          const busy = busyLabel(session);
-          return (
-            <div key={session.session_id}>
-              {header}
-              <div
-                className={`nav__row${session.session_id === activeId ? " nav__row--active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="nav__item"
-                  onClick={() => {
-                    setMenuFor(null); // выбор чата закрывает раскрытое меню
-                    onPick(session.session_id);
-                  }}
-                >
-                  <span
-                    className="heat"
-                    data-testid={`heat-${session.session_id}`}
-                    data-heat={heatLevel(session)}
-                  />
-                  <span className="nav__title">{session.title}</span>
-                  {rootBase(session.workspace) !== null && (
-                    <span className="nav__root" title={session.workspace ?? ""}>
-                      {rootBase(session.workspace)}
-                    </span>
-                  )}
-                  {busy !== null && (
-                    <span className="nav__busy" title={`Запуск ${busy}`}>
-                      {busy}
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className="nav__more"
-                  aria-label={`Меню чата «${session.title}»`}
-                  aria-haspopup="menu"
-                  aria-expanded={menuFor === session.session_id}
-                  onClick={() =>
-                    setMenuFor((current) =>
-                      current === session.session_id
-                        ? null
-                        : session.session_id,
-                    )
-                  }
-                >
-                  ⋯
-                </button>
-                {menuFor === session.session_id && (
-                  <div className="nav__menu" role="menu">
+      <div className="nav__list" data-testid="nav-list">
+        {groupByWorkspace(sessions).map((group) => (
+          <div key={group.key}>
+            <div
+              className="nav__day"
+              data-testid="nav-group"
+              title={group.full ?? undefined}
+            >
+              {group.label}
+            </div>
+            {group.sessions.map((session) => {
+              const busy = busyLabel(session);
+              return (
+                <div key={session.session_id}>
+                  <div
+                    className={`nav__row${session.session_id === activeId ? " nav__row--active" : ""}`}
+                  >
                     <button
                       type="button"
-                      role="menuitem"
-                      className="nav__menu-item nav__menu-item--danger"
+                      className="nav__item"
                       onClick={() => {
-                        setMenuFor(null);
-                        onDelete(session.session_id);
+                        setMenuFor(null); // выбор чата закрывает раскрытое меню
+                        onPick(session.session_id);
                       }}
                     >
-                      Удалить
+                      <span
+                        className="heat"
+                        data-testid={`heat-${session.session_id}`}
+                        data-heat={heatLevel(session)}
+                      />
+                      <span className="nav__title">{session.title}</span>
+                      {busy !== null && (
+                        <span className="nav__busy" title={`Запуск ${busy}`}>
+                          {busy}
+                        </span>
+                      )}
                     </button>
+                    <button
+                      type="button"
+                      className="nav__more"
+                      aria-label={`Меню чата «${session.title}»`}
+                      aria-haspopup="menu"
+                      aria-expanded={menuFor === session.session_id}
+                      onClick={() =>
+                        setMenuFor((current) =>
+                          current === session.session_id
+                            ? null
+                            : session.session_id,
+                        )
+                      }
+                    >
+                      ⋯
+                    </button>
+                    {menuFor === session.session_id && (
+                      <div className="nav__menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="nav__menu-item nav__menu-item--danger"
+                          onClick={() => {
+                            setMenuFor(null);
+                            onDelete(session.session_id);
+                          }}
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
 
       <div className="nav__foot">
