@@ -1563,6 +1563,142 @@ describe("миниатюры вложений в ленте", () => {
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 
+  it("восстанавливает выбор композера из localStorage", async () => {
+    window.localStorage.setItem(
+      "svarog.composer",
+      JSON.stringify({
+        autonomy: "supervised",
+        executor: "opencode",
+        sandbox: "local-trusted",
+        provider: "LMStudio",
+        model: "qwen/qwen3.6-35b-a3b",
+      }),
+    );
+    const client = api({
+      executors: vi.fn().mockResolvedValue([
+        {
+          value: "native",
+          kind: "native",
+          adapter: null,
+          available: true,
+          is_active: true,
+        },
+        {
+          value: "opencode",
+          kind: "external",
+          adapter: "opencode",
+          available: true,
+          is_active: false,
+        },
+      ]),
+      sandboxes: vi.fn().mockResolvedValue([
+        { value: "docker", available: true, is_active: true },
+        { value: "local-trusted", available: true, is_active: false },
+      ]),
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+        {
+          name: "LMStudio",
+          base_url: "http://lm:1234/v1",
+          model: "q",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<ChatScreen {...base} api={client} sessionId="s1" />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Исполнитель" })).toHaveValue(
+        "opencode",
+      ),
+    );
+    expect(screen.getByRole("combobox", { name: "Sandbox" })).toHaveValue(
+      "local-trusted",
+    );
+    expect(screen.getByRole("combobox", { name: "Провайдер" })).toHaveValue(
+      "LMStudio",
+    );
+    expect(screen.getByRole("combobox", { name: /автономия/i })).toHaveValue(
+      "supervised",
+    );
+    expect(
+      screen.getByRole("button", { name: "Выбрать модель" }),
+    ).toHaveTextContent("qwen/qwen3.6-35b-a3b");
+    window.localStorage.clear();
+  });
+
+  it("исчезнувший из конфига сохранённый провайдер откатывается на дефолт", async () => {
+    window.localStorage.setItem(
+      "svarog.composer",
+      JSON.stringify({ provider: "ghost", model: "ghost-model" }),
+    );
+    const client = api({
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+        {
+          name: "LMStudio",
+          base_url: "http://lm:1234/v1",
+          model: "q",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<ChatScreen {...base} api={client} sessionId="s1" />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Провайдер" })).toHaveValue(
+        "local",
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Выбрать модель" }),
+    ).toHaveTextContent("m");
+    window.localStorage.clear();
+  });
+
+  it("сохраняет смену провайдера и модели в localStorage", async () => {
+    window.localStorage.clear();
+    const client = api({
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+        {
+          name: "LMStudio",
+          base_url: "http://lm:1234/v1",
+          model: "q",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<ChatScreen {...base} api={client} sessionId="s1" />);
+
+    await userEvent.selectOptions(
+      await screen.findByRole("combobox", { name: "Провайдер" }),
+      "LMStudio",
+    );
+
+    const saved = JSON.parse(
+      window.localStorage.getItem("svarog.composer") ?? "{}",
+    );
+    expect(saved.provider).toBe("LMStudio");
+    expect(saved.model).toBe("q");
+    window.localStorage.clear();
+  });
+
   it("провайдеры и исполнители читаются через configApi воркспейса сессии, а не корня serve", async () => {
     // Провайдер, добавленный в настройках проекта (scoped на root сессии),
     // обязан появиться в композере: раньше чат читал конфиг корня serve и

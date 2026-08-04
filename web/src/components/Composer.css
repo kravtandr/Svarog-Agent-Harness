@@ -91,19 +91,29 @@
 .composer__select {
   border: 0;
   border-radius: 6px;
-  padding: 2px 4px;
+  padding: 2px 6px;
+  /* Одна высота у всех контролов строки: у нативного select и у кнопки
+     модели она иначе расходится на пару пикселей, и ряд выглядит рваным. */
+  height: 24px;
   background: var(--raised);
   color: #c6bfb4;
   font-family: var(--sans);
   font-size: inherit;
   cursor: pointer;
 }
+/* claude-code запирает провайдера и модель — неактивность должна быть
+   видна, а не выясняться кликом (та же подача, что у кнопки модели). */
+.composer__select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 /* Кнопка выбора модели: тот же приглушённый цвет, что был у статичного
    текста — модель по-прежнему второстепенная деталь подвала, а не акцент. */
 .composer__model {
   border: 0;
   border-radius: 6px;
-  padding: 2px 4px;
+  padding: 2px 6px;
+  height: 24px;
   background: none;
   color: var(--faint);
   font-family: var(--sans);

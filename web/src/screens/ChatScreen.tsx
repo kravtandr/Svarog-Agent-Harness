@@ -19,6 +19,7 @@ import { Gate } from "../components/Gate";
 import { Markdown } from "../components/Markdown";
 import { ToolCalls } from "../components/ToolCalls";
 import { parseCommand, type ParsedCommand } from "../model/completion";
+import { loadPrefs, savePref } from "../model/composerPrefs";
 import { progressDetail, type RunProgress } from "../model/progress";
 import { applyEvent, fromHistory, type ThreadItem } from "../model/thread";
 import "./ChatScreen.css";
@@ -156,7 +157,13 @@ export function ChatScreen({
   const [threadError, setThreadError] = useState<string | null>(null);
   // yolo — дефолт конфига (ADR-0010, runtime.autonomy): селектор стартует с
   // него же, иначе явно отправляемое supervised перекрывало бы конфиг.
-  const [autonomy, setAutonomy] = useState<Autonomy>("yolo");
+  // Сохранённый в браузере выбор — поверх, но только из известных значений.
+  const [autonomy, setAutonomy] = useState<Autonomy>(() => {
+    const saved = loadPrefs().autonomy;
+    return saved === "supervised" || saved === "auto" || saved === "yolo"
+      ? saved
+      : "yolo";
+  });
   // Список исполнителей — с GET /executors; value конкретного варианта
   // ("native", "codex", …), а не ExecutorKind: одному kind соответствует
   // не один адаптер, кастовать value к ExecutorKind было бы молчаливо неверно.
@@ -225,7 +232,12 @@ export function ChatScreen({
       .executors()
       .then((list) => {
         setExecutorOptions(list);
-        const active = list.find((option) => option.is_active);
+        // Сохранённый в браузере выбор — поверх дефолта конфига, но только
+        // если он всё ещё существует и доступен: иначе молча дефолт.
+        const saved = list.find(
+          (option) => option.value === loadPrefs().executor && option.available,
+        );
+        const active = saved ?? list.find((option) => option.is_active);
         // Нет активного варианта — не гадаем: селект останется без выбора,
         // override уйдёт без executor (сервер возьмёт свой конфиг).
         if (active !== undefined) setExecutorValue(active.value);
@@ -240,7 +252,10 @@ export function ChatScreen({
       .sandboxes()
       .then((list) => {
         setSandboxOptions(list);
-        const active = list.find((option) => option.is_active);
+        const saved = list.find(
+          (option) => option.value === loadPrefs().sandbox && option.available,
+        );
+        const active = saved ?? list.find((option) => option.is_active);
         if (active !== undefined) setSandboxValue(active.value);
       })
       .catch(() => {
@@ -260,12 +275,18 @@ export function ChatScreen({
       .providers()
       .then((cards) => {
         setProviders(cards);
-        const active = cards.find((card) => card.is_default) ?? cards[0];
+        const prefs = loadPrefs();
+        const saved = cards.find((card) => card.name === prefs.provider);
+        const active =
+          saved ?? cards.find((card) => card.is_default) ?? cards[0];
         if (active === undefined) return;
         setProvider(active.name);
         // Модель из конфига, а не литерал: подвал не должен врать про то,
-        // какая модель на самом деле отвечает.
-        setModel(active.model);
+        // какая модель на самом деле отвечает. Сохранённая модель применяется
+        // только вместе со своим провайдером: чужому она не принадлежит.
+        setModel(
+          saved !== undefined && prefs.model ? prefs.model : active.model,
+        );
       })
       .catch(() => setProviders([]));
   }, [configApi]);
@@ -291,8 +312,11 @@ export function ChatScreen({
   // моделью чужого провайдера.
   const pickProvider = useCallback(
     (name: string) => {
+      const fallback =
+        providers.find((card) => card.name === name)?.model ?? "";
       setProvider(name);
-      setModel(providers.find((card) => card.name === name)?.model ?? "");
+      setModel(fallback);
+      savePref({ provider: name, model: fallback });
     },
     [providers],
   );
@@ -786,18 +810,30 @@ export function ChatScreen({
         uploading={pendingUploads > 0}
         busy={running}
         autonomy={autonomy}
-        onAutonomyChange={setAutonomy}
+        onAutonomyChange={(value) => {
+          setAutonomy(value);
+          savePref({ autonomy: value });
+        }}
         executors={executors}
-        onExecutorChange={setExecutorValue}
+        onExecutorChange={(value) => {
+          setExecutorValue(value);
+          savePref({ executor: value });
+        }}
         sandboxes={sandboxes}
-        onSandboxChange={setSandboxValue}
+        onSandboxChange={(value) => {
+          setSandboxValue(value);
+          savePref({ sandbox: value });
+        }}
         providers={providers}
         provider={provider}
         onProviderChange={pickProvider}
         model={model}
         models={models}
         modelsError={modelsError}
-        onModelChange={setModel}
+        onModelChange={(id) => {
+          setModel(id);
+          savePref({ model: id });
+        }}
         commands={commands}
         onFileQuery={onFileQuery}
         attachments={attachments}
