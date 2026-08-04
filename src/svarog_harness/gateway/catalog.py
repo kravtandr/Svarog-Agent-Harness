@@ -110,6 +110,11 @@ async def fetch_models(
     if not base.endswith("/v1"):
         urls.append(f"{base}/v1/models")
     last_error = ""
+    # LM Studio отвечает 200 валидным JSON на любой путь («Unexpected
+    # endpoint... Returning 200 anyway»), поэтому 200 без списка моделей —
+    # повод попробовать следующий кандидат, а не успех. Пустоту запоминаем:
+    # если /v1 тоже ничего не дал, честно пустой каталог лучше ошибки.
+    empty: list[ModelCard] | None = None
     async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
         for url in urls:
             try:
@@ -125,5 +130,10 @@ async def fetch_models(
             except ValueError:
                 last_error = f"{url}: ответ не JSON (base_url без /v1?)"
                 continue
-            return parse_models(payload if isinstance(payload, dict) else {})
+            cards = parse_models(payload if isinstance(payload, dict) else {})
+            if cards:
+                return cards
+            empty = cards
+    if empty is not None:
+        return empty
     raise CatalogError(last_error or f"{base}: список моделей недоступен")

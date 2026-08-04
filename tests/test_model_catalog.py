@@ -162,6 +162,45 @@ async def test_fetch_error_mentions_v1_hint_when_both_fail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_retries_with_v1_when_models_answers_200_without_catalog() -> None:
+    """04.08.2026: LM Studio отвечает 200 валидным JSON на любой путь
+    («Unexpected endpoint... Returning 200 anyway»), а настоящий каталог живёт
+    на /v1/models. 200 без списка data — повод попробовать /v1, а не успех."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if str(request.url).endswith("/v1/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen/qwen3.6-35b-a3b"}]})
+        return httpx.Response(200, json={"error": "Unexpected endpoint or method."})
+
+    cards = await fetch_models(
+        _provider("http://localhost:1234"), None, transport=httpx.MockTransport(handler)
+    )
+    assert seen == [
+        "http://localhost:1234/models",
+        "http://localhost:1234/v1/models",
+    ]
+    assert [c.id for c in cards] == ["qwen/qwen3.6-35b-a3b"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_empty_catalog_stays_empty_when_v1_fallback_fails() -> None:
+    """Честно пустой каталог — это [] без ошибки, даже если запасной
+    {base}/v1/models недоступен: пустота была валидным ответом."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/v1/models"):
+            return httpx.Response(404)
+        return httpx.Response(200, json={"data": []})
+
+    cards = await fetch_models(
+        _provider("http://localhost:1234"), None, transport=httpx.MockTransport(handler)
+    )
+    assert cards == []
+
+
+@pytest.mark.asyncio
 async def test_fetch_without_key_sends_no_auth_header() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") is None
