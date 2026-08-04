@@ -12,6 +12,7 @@ usage/cost берутся с bridge-прокси (источник истины,
 
 import asyncio
 import contextlib
+import logging
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
 
     from svarog_harness.llm.provider import ChatMessage
     from svarog_harness.sandbox.base import ExecutionEnvironment
+
+logger = logging.getLogger(__name__)
 
 
 class SuspendSignal(Protocol):
@@ -118,6 +121,7 @@ class ExternalAgentExecutor:
         settings_file: str | None = None,
         suspend_signal: SuspendSignal | None = None,
         extra_run_meta: dict[str, object] | None = None,
+        progress_interval_sec: float = 2.0,
     ) -> None:
         self._adapter = adapter
         self._environment = environment
@@ -146,6 +150,8 @@ class ExternalAgentExecutor:
         # Довесок вызывающей стороны (override сообщения чата) — прозрачно
         # пробрасывается в Run.meta, executor его содержимое не читает.
         self._extra_run_meta = extra_run_meta
+        # Период трансляции usage с bridge в on_progress (UX «не зависло»).
+        self._progress_interval_sec = progress_interval_sec
 
     async def run(
         self,
@@ -204,33 +210,42 @@ class ExternalAgentExecutor:
             settings_file=self._settings_file,
         )
         command = shlex.join(self._adapter.command(launch))
-        result, gate_suspended = await self._stream_with_suspend(command, on_line)
-
-        recovery_attempts = 0
-        while (
-            not gate_suspended
-            and not state.saw_result
-            and result.exit_code == 0
-            and not result.timed_out
-            and state.agent_session is not None
-            and self._adapter.capabilities().resume
-            and recovery_attempts < _MAX_RECOVERY_ATTEMPTS
-        ):
-            # Обрыв стрима без result при живой сессии (см. _STREAM_RECOVERY_PROMPT).
-            # До двух продолжений: агент в продолжении может снова упереться в
-            # tool-fail (S17: read → bash cat того же пути) и оборвать стрим
-            # повторно. Синтетический prompt пишется в trace user-сообщением —
-            # продолжение видно в истории, а не выглядит телепатией агента.
-            recovery_attempts += 1
-            await self._recorder.add_message(run, "user", {"content": _STREAM_RECOVERY_PROMPT})
-            relaunch = AgentLaunch(
-                task=_STREAM_RECOVERY_PROMPT,
-                session=state.agent_session,
-                mcp_config=self._mcp_config,
-                settings_file=self._settings_file,
-            )
-            command = shlex.join(self._adapter.command(relaunch))
+        ticker: asyncio.Task[None] | None = None
+        if self._bridge is not None and self._on_progress is not None:
+            ticker = asyncio.create_task(self._progress_ticker(state))
+        try:
             result, gate_suspended = await self._stream_with_suspend(command, on_line)
+
+            recovery_attempts = 0
+            while (
+                not gate_suspended
+                and not state.saw_result
+                and result.exit_code == 0
+                and not result.timed_out
+                and state.agent_session is not None
+                and self._adapter.capabilities().resume
+                and recovery_attempts < _MAX_RECOVERY_ATTEMPTS
+            ):
+                # Обрыв стрима без result при живой сессии (см. _STREAM_RECOVERY_PROMPT).
+                # До двух продолжений: агент в продолжении может снова упереться в
+                # tool-fail (S17: read → bash cat того же пути) и оборвать стрим
+                # повторно. Синтетический prompt пишется в trace user-сообщением —
+                # продолжение видно в истории, а не выглядит телепатией агента.
+                recovery_attempts += 1
+                await self._recorder.add_message(run, "user", {"content": _STREAM_RECOVERY_PROMPT})
+                relaunch = AgentLaunch(
+                    task=_STREAM_RECOVERY_PROMPT,
+                    session=state.agent_session,
+                    mcp_config=self._mcp_config,
+                    settings_file=self._settings_file,
+                )
+                command = shlex.join(self._adapter.command(relaunch))
+                result, gate_suspended = await self._stream_with_suspend(command, on_line)
+        finally:
+            if ticker is not None:
+                ticker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ticker
 
         # Агент завершился, не отчитавшись по начатым tool calls — фиксируем.
         for record in state.pending.values():
@@ -309,6 +324,26 @@ class ExternalAgentExecutor:
         with contextlib.suppress(asyncio.CancelledError):
             await stream_task
         return ExecResult(exit_code=0, stdout="", stderr=""), True
+
+    async def _progress_ticker(self, state: _StreamState) -> None:
+        """Транслирует usage с bridge в on_progress, пока идёт стрим агента.
+
+        Эмиссия только при изменении счётчиков: история событий для
+        WS-реплея конечна, а безусловный тик за долгий run вытеснил бы из
+        неё настоящие события. Число эмиссий ограничено числом LLM-запросов.
+        """
+        assert self._bridge is not None and self._on_progress is not None
+        last = (0, 0.0)
+        while True:
+            await asyncio.sleep(self._progress_interval_sec)
+            try:
+                current = (self._bridge.usage.total_tokens, self._bridge.cost_usd())
+                if current == last:
+                    continue
+                last = current
+                self._on_progress(state.tool_calls, current[0], current[1], 0.0, 0)
+            except Exception as exc:  # прогресс не роняет run
+                logger.warning("progress-ticker: %s", exc)
 
     async def _handle_event(self, run: Run, state: _StreamState, event: AgentEvent) -> None:
         if event.session_id is not None and state.agent_session is None:
