@@ -262,5 +262,53 @@ def test_mcp_test_reports_failure_honestly(client: TestClient) -> None:
     assert body["error"]
 
 
+def test_provider_check_reports_state_honestly(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Проверка доступности: ок и недоступность — данные ответа, не исключение."""
+    from svarog_harness.gateway.catalog import CatalogError, ModelCard
+
+    async def fake_fetch(provider, api_key, **kw):
+        return [ModelCard(id="a"), ModelCard(id="b")]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "models_count": 2, "error": None}
+
+    async def broken_fetch(provider, api_key, **kw):
+        raise CatalogError("провайдер ответил 401")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", broken_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "401" in body["error"]
+
+    assert client.post("/models/providers/нет-такого/check").status_code == 404
+
+
+def test_provider_check_bypasses_negative_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Проверить» обязан отражать состояние сейчас, а не отрицательный кэш."""
+    from svarog_harness.gateway.catalog import CatalogError, ModelCard
+
+    async def broken_fetch(provider, api_key, **kw):
+        raise CatalogError("connect timeout")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", broken_fetch)
+    # Проваленный обычный запрос каталога кладёт неудачу в кэш.
+    assert client.get("/models/local").status_code == 502
+
+    async def fake_fetch(provider, api_key, **kw):
+        return [ModelCard(id="a")]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.json() == {"ok": True, "models_count": 1, "error": None}
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield

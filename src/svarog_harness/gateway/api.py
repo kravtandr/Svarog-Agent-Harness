@@ -71,6 +71,7 @@ from svarog_harness.gateway.models import (
     MemoryHitView,
     MemoryPageView,
     ModelCardView,
+    ProviderCheckView,
     ProviderView,
     RecentRootView,
     RootInspectView,
@@ -724,6 +725,13 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/models/providers/{name}/check", response_model=ProviderCheckView)
+    async def check_provider(name: str, service: ServiceDep) -> ProviderCheckView:
+        try:
+            return await service.check_provider(name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
 
     @app.post("/executors/defaults", response_model=ConfigDiffView)
     async def set_executor_defaults(

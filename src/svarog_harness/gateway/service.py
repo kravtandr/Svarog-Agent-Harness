@@ -65,6 +65,7 @@ from svarog_harness.gateway.models import (
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
+    ProviderCheckView,
     ProviderView,
     RepoSpec,
     RunDetail,
@@ -511,6 +512,23 @@ class GatewayService:
         self._catalog[name] = (now, cards)
         self._catalog_failures.pop(name, None)
         return cards
+
+    async def check_provider(self, name: str) -> ProviderCheckView:
+        """Живая проверка `/models` — мимо кэша каталога.
+
+        Кэш хранит и отрицательные результаты (CATALOG_NEGATIVE_TTL_SEC), а
+        «Проверить» обязан отражать состояние сейчас — поэтому fetch_models
+        зовётся напрямую, без чтения и записи кэша.
+        """
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        try:
+            api_key = resolve_api_key(provider, self._runner.host_store)
+            cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        except (CatalogError, ApiKeyError) as exc:
+            return ProviderCheckView(ok=False, error=str(exc))
+        return ProviderCheckView(ok=True, models_count=len(cards))
 
     async def scan_models(self, base_url: str, api_key: str | None = None) -> list[ModelCard]:
         """Каталог `/models` ещё не сохранённого провайдера (форма настроек).
