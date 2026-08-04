@@ -512,4 +512,101 @@ describe("экран настроек", () => {
     expect(screen.getByText("задан")).toBeInTheDocument();
     expect(screen.getByText("не задан")).toBeInTheDocument();
   });
+
+  it("исполнители: выбор провайдера открывает каталог, клик подставляет модель", async () => {
+    const api = fakeApi({
+      providers: twoProviders(),
+      providerModels: vi.fn().mockResolvedValue([
+        {
+          id: "llama-3.3-70b-versatile",
+          name: "Llama 3.3 70B",
+          context_length: 131072,
+          input_usd_per_mtok: null,
+          output_usd_per_mtok: null,
+        },
+      ]),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Исполнители" }),
+    );
+
+    await userEvent.selectOptions(
+      await screen.findByRole("combobox", { name: "Провайдер native" }),
+      "groq",
+    );
+    await userEvent.click(await screen.findByText("Llama 3.3 70B"));
+
+    expect(api.providerModels).toHaveBeenCalledWith("groq");
+    expect(screen.getByRole("textbox", { name: "Модель native" })).toHaveValue(
+      "llama-3.3-70b-versatile",
+    );
+    // Поле остаётся редактируемым руками: каталог бывает неполным.
+    await userEvent.clear(
+      screen.getByRole("textbox", { name: "Модель native" }),
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Модель native" }),
+      "своя-модель",
+    );
+    expect(screen.getByRole("textbox", { name: "Модель native" })).toHaveValue(
+      "своя-модель",
+    );
+  });
+
+  it("исполнители: недоступный каталог — текст ошибки, поле работает", async () => {
+    const { ApiError } = await import("../api/client");
+    const api = fakeApi({
+      providers: twoProviders(),
+      providerModels: vi
+        .fn()
+        .mockRejectedValue(new ApiError(502, "провайдер ответил 401")),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Исполнители" }),
+    );
+
+    await userEvent.selectOptions(
+      await screen.findByRole("combobox", { name: "Провайдер opencode" }),
+      "groq",
+    );
+    expect(
+      await screen.findByText("провайдер ответил 401"),
+    ).toBeInTheDocument();
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Модель opencode" }),
+      "вручную",
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Модель opencode" }),
+    ).toHaveValue("вручную");
+  });
+
+  it("исполнители: сообщает про restart_required при сохранении дефолтов", async () => {
+    const api = fakeApi({
+      providers: twoProviders(),
+      executorDefaults: vi.fn().mockResolvedValue({
+        path: "",
+        lines: [],
+        changes: 1,
+        restart_required: true,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Исполнители" }),
+    );
+
+    await userEvent.type(
+      await screen.findByRole("textbox", { name: "Модель claude-code" }),
+      "opus",
+    );
+    const saves = screen.getAllByRole("button", { name: "Сохранить" });
+    await userEvent.click(saves[saves.length - 1]);
+
+    expect(
+      await screen.findByText(/вступит в силу.*текущ.*запуск/i),
+    ).toBeInTheDocument();
+  });
 });

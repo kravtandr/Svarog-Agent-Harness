@@ -619,6 +619,9 @@ function ExecutorsPane({ api }: { api: Api }) {
     Record<string, { provider: string; model: string }>
   >({});
   const [status, setStatus] = useState<string | null>(null);
+  const [catalogs, setCatalogs] = useState<
+    Record<string, ModelCard[] | string>
+  >({});
 
   useEffect(() => {
     api
@@ -627,16 +630,36 @@ function ExecutorsPane({ api }: { api: Api }) {
       .catch(() => {});
   }, [api]);
 
+  const loadCatalog = (provider: string) => {
+    if (provider === "" || catalogs[provider] !== undefined) return;
+    api
+      .providerModels(provider)
+      .then((cards) =>
+        setCatalogs((current) => ({ ...current, [provider]: cards })),
+      )
+      .catch((exc: unknown) =>
+        setCatalogs((current) => ({
+          ...current,
+          [provider]:
+            exc instanceof ApiError ? exc.message : "каталог недоступен",
+        })),
+      );
+  };
+
   const save = async (id: string) => {
     const draft = drafts[id] ?? { provider: "", model: "" };
     setStatus(null);
     try {
-      await api.executorDefaults({
+      const diff = await api.executorDefaults({
         executor: id,
         ...(draft.provider ? { provider: draft.provider } : {}),
         ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
       });
-      setStatus(`Дефолты «${id}» сохранены.`);
+      setStatus(
+        diff.restart_required
+          ? "Правка записана, вступит в силу после завершения текущих запусков."
+          : `Дефолты «${id}» сохранены.`,
+      );
     } catch (exc: unknown) {
       setStatus(
         exc instanceof ApiError ? exc.message : "Не удалось сохранить дефолты.",
@@ -668,7 +691,10 @@ function ExecutorsPane({ api }: { api: Api }) {
                   className="field__control"
                   aria-label={`Провайдер ${executor.title}`}
                   value={draft.provider}
-                  onChange={(e) => patch({ provider: e.target.value })}
+                  onChange={(e) => {
+                    patch({ provider: e.target.value });
+                    loadCatalog(e.target.value);
+                  }}
                 >
                   <option value="">провайдер…</option>
                   {providers.map((card) => (
@@ -694,6 +720,21 @@ function ExecutorsPane({ api }: { api: Api }) {
                 Сохранить
               </button>
             </div>
+            {executor.provider &&
+              draft.provider !== "" &&
+              (() => {
+                const catalog = catalogs[draft.provider];
+                if (catalog === undefined)
+                  return <p className="field__help">Загружаем каталог…</p>;
+                if (typeof catalog === "string")
+                  return <p className="field__error">{catalog}</p>;
+                return (
+                  <CatalogList
+                    cards={catalog}
+                    onPick={(id) => patch({ model: id })}
+                  />
+                );
+              })()}
           </div>
         );
       })}
