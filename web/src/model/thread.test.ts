@@ -148,6 +148,16 @@ describe("нормализация ленты", () => {
     ]);
     expect(items).toEqual([]);
   });
+
+  it("progress-событие ленту не меняет", () => {
+    const items = applyEvent([], {
+      type: "progress",
+      iterations: 3,
+      tokens: 12400,
+      cost_usd: 0.04,
+    });
+    expect(items).toEqual([]);
+  });
 });
 
 describe("вложения в истории", () => {
