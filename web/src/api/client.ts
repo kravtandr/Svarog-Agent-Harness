@@ -11,6 +11,7 @@ import type {
   MemoryPage,
   ModelCard,
   ProviderCard,
+  ProviderCheck,
   RecentRoot,
   RootInspect,
   RunDetail,
@@ -107,6 +108,10 @@ export interface Api {
   runDiff(runId: string): Promise<RunDiff>;
   providers(): Promise<ProviderCard[]>;
   providerModels(name: string): Promise<ModelCard[]>;
+  /** Живая проверка /models провайдера — мимо кэша каталога. */
+  providerCheck(name: string): Promise<ProviderCheck>;
+  providerRename(name: string, newName: string): Promise<ConfigDiff>;
+  providerRemove(name: string): Promise<ConfigDiff>;
   /** Каталог /models по данным формы — до сохранения провайдера. */
   scanModels(body: {
     base_url: string;
@@ -252,6 +257,20 @@ export function createClient({ baseUrl, token, root }: ClientOptions): Api {
     providers: () => request<ProviderCard[]>("/models"),
     providerModels: (name) =>
       request<ModelCard[]>(`/models/${encodeURIComponent(name)}`),
+    providerCheck: (name) =>
+      request<ProviderCheck>(
+        `/models/providers/${encodeURIComponent(name)}/check`,
+        { method: "POST" },
+      ),
+    providerRename: (name, newName) =>
+      request<ConfigDiff>(
+        `/models/providers/${encodeURIComponent(name)}/rename`,
+        { method: "POST", body: JSON.stringify({ new_name: newName }) },
+      ),
+    providerRemove: (name) =>
+      request<ConfigDiff>(`/models/providers/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
     scanModels: (body) =>
       request<ModelCard[]>("/models/scan", {
         method: "POST",

@@ -71,8 +71,10 @@ from svarog_harness.gateway.models import (
     MemoryHitView,
     MemoryPageView,
     ModelCardView,
+    ProviderCheckView,
     ProviderView,
     RecentRootView,
+    RenameProviderRequest,
     RootInspectView,
     RunDetail,
     RunDiffView,
@@ -722,6 +724,33 @@ def create_app(
             return await service.add_provider(
                 req.name, req.base_url, req.model, api_key=req.api_key
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/models/providers/{name}/check", response_model=ProviderCheckView)
+    async def check_provider(name: str, service: ServiceDep) -> ProviderCheckView:
+        try:
+            return await service.check_provider(name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post("/models/providers/{name}/rename", response_model=ConfigDiffView)
+    async def rename_provider(
+        name: str, req: RenameProviderRequest, service: ServiceDep
+    ) -> ConfigDiffView:
+        try:
+            return await service.rename_provider(name, req.new_name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.delete("/models/providers/{name}", response_model=ConfigDiffView)
+    async def remove_provider(name: str, service: ServiceDep) -> ConfigDiffView:
+        try:
+            return await service.remove_provider(name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 

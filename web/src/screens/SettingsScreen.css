@@ -308,3 +308,9 @@
   flex: 1;
   min-width: 0;
 }
+
+.provider__rename {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

@@ -288,6 +288,24 @@ class AddProviderRequest(BaseModel):
     api_key: str | None = None
 
 
+class ProviderCheckView(BaseModel):
+    """Результат проверки доступности провайдера.
+
+    Недоступность — данные проверки, не исключение: ответ всегда 200,
+    человек видит причину в error.
+    """
+
+    ok: bool
+    models_count: int | None = None
+    error: str | None = None
+
+
+class RenameProviderRequest(BaseModel):
+    """Новое имя записи models.providers; секрет и его ref не трогаются."""
+
+    new_name: str = Field(min_length=1, max_length=64)
+
+
 class ScanModelsRequest(BaseModel):
     """Скан `/models` по данным формы — до сохранения провайдера.
 

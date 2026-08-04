@@ -262,5 +262,321 @@ def test_mcp_test_reports_failure_honestly(client: TestClient) -> None:
     assert body["error"]
 
 
+def test_provider_check_reports_state_honestly(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Проверка доступности: ок и недоступность — данные ответа, не исключение."""
+    from svarog_harness.gateway.catalog import CatalogError, ModelCard
+
+    async def fake_fetch(provider, api_key, **kw):
+        return [ModelCard(id="a"), ModelCard(id="b")]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "models_count": 2, "error": None}
+
+    async def broken_fetch(provider, api_key, **kw):
+        raise CatalogError("провайдер ответил 401")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", broken_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "401" in body["error"]
+
+    assert client.post("/models/providers/нет-такого/check").status_code == 404
+
+
+def test_provider_check_bypasses_negative_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Проверить» обязан отражать состояние сейчас, а не отрицательный кэш."""
+    from svarog_harness.gateway.catalog import CatalogError, ModelCard
+
+    async def broken_fetch(provider, api_key, **kw):
+        raise CatalogError("connect timeout")
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", broken_fetch)
+    # Проваленный обычный запрос каталога кладёт неудачу в кэш.
+    assert client.get("/models/local").status_code == 502
+
+    async def fake_fetch(provider, api_key, **kw):
+        return [ModelCard(id="a")]
+
+    monkeypatch.setattr("svarog_harness.gateway.service.fetch_models", fake_fetch)
+    resp = client.post("/models/providers/local/check")
+    assert resp.json() == {"ok": True, "models_count": 1, "error": None}
+
+
+def test_provider_rename_moves_fields_and_default(
+    client: TestClient, service: GatewayService
+) -> None:
+    """Rename переносит поля и default; api_key_ref остаётся валидным (ADR-0006)."""
+    client.post(
+        "/models/providers",
+        json={
+            "name": "local",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "deepseek/deepseek-v4-flash",
+            "api_key": "sk-or-секрет",
+        },
+    )
+    resp = client.post("/models/providers/local/rename", json={"new_name": "openrouter"})
+    assert resp.status_code == 200, resp.text
+    data = yaml.safe_load(service.config_path.read_text(encoding="utf-8"))
+    moved = data["models"]["providers"]["openrouter"]
+    assert moved["base_url"] == "https://openrouter.ai/api/v1"
+    assert moved["model"] == "deepseek/deepseek-v4-flash"
+    # Секрет не перевводится: ссылка переезжает как есть.
+    assert moved["api_key_ref"] == "LOCAL_API_KEY"
+    assert "local" not in data["models"]["providers"]
+    assert data["models"]["default"] == "openrouter"
+    names = [p["name"] for p in client.get("/models").json()]
+    assert names == ["openrouter"]
+
+
+def test_provider_rename_rejects_bad_targets(client: TestClient) -> None:
+    client.post(
+        "/models/providers",
+        json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "ll"},
+    )
+    # Занятое имя, кривое имя, неизвестный источник.
+    assert (
+        client.post("/models/providers/local/rename", json={"new_name": "groq"}).status_code
+        == 422
+    )
+    assert (
+        client.post("/models/providers/local/rename", json={"new_name": "плохое"}).status_code
+        == 422
+    )
+    assert (
+        client.post("/models/providers/нет/rename", json={"new_name": "ok"}).status_code
+        == 404
+    )
+
+
+def test_provider_rename_updates_auxiliary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename обновляет models.auxiliary, если он указывал на переименовываемый провайдер."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  auxiliary: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: opencode\n"
+        "    image: svarog/agent-opencode:latest\n"
+        "    base_url: http://localhost:9\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # Переименовать провайдер, который установлен как auxiliary.
+    resp = app_client.post("/models/providers/local/rename", json={"new_name": "cheap"})
+    assert resp.status_code == 200, resp.text
+    data = yaml.safe_load(svc.config_path.read_text(encoding="utf-8"))
+    # auxiliary должен указывать на новое имя.
+    assert data["models"]["auxiliary"] == "cheap"
+    assert data["models"]["default"] == "cheap"
+    assert "local" not in data["models"]["providers"]
+
+
+def test_provider_remove_guards_default(
+    client: TestClient, service: GatewayService
+) -> None:
+    """Remove отказывает, если удаляемый провайдер — default."""
+    client.post(
+        "/models/providers",
+        json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "ll"},
+    )
+    # Дефолтного удалять нельзя — сначала переключить.
+    assert client.delete("/models/providers/local").status_code == 422
+    client.post("/executors/defaults", json={"executor": "native", "provider": "groq"})
+    assert client.delete("/models/providers/local").status_code == 200
+    names = [p["name"] for p in client.get("/models").json()]
+    assert names == ["groq"]
+    assert client.delete("/models/providers/local").status_code == 404
+
+
+def test_provider_remove_guards_auxiliary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove отказывает, если удаляемый провайдер — auxiliary (не default)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: main\n"
+        "  auxiliary: cheap\n"
+        "  providers:\n"
+        "    main:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    cheap:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: cheap-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: opencode\n"
+        "    image: svarog/agent-opencode:latest\n"
+        "    base_url: http://localhost:9\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # Удалять auxiliary нельзя, даже если он не default.
+    resp = app_client.delete("/models/providers/cheap")
+    assert resp.status_code == 422
+    # Проверяем, что сообщение об ошибке специфично для auxiliary.
+    assert "auxiliary" in resp.json()["detail"]
+
+
+def test_provider_remove_collapses_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove удаляет последнего провайдера и сворачивает пустую обёртку models."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с дефолтным провайдером.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: user-provider\n"
+        "  providers:\n"
+        "    user-provider:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config с одним провайдером (не дефолтным, чтобы избежать guard).
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  providers:\n"
+        "    project-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: project-model\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # DELETE последнего провайдера проектного файла.
+    resp = app_client.delete("/models/providers/project-only")
+    assert resp.status_code == 200
+    # Проектный файл больше не содержит models (обёртка свёрнута).
+    proj_data = yaml.safe_load(svc.config_path.read_text(encoding="utf-8"))
+    assert "models" not in proj_data
+    # Эффективный конфиг всё ещё видит пользовательский провайдер.
+    names = [p["name"] for p in app_client.get("/models").json()]
+    assert names == ["user-provider"]
+
+
+def test_provider_remove_user_config_only_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove отказывает, если провайдер только в user config, не в project file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с несколькими провайдерами.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    user-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: user-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config без провайдеров.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # DELETE провайдера, который только в user config — должна быть ошибка.
+    resp = app_client.delete("/models/providers/user-only")
+    assert resp.status_code == 422
+    assert "~/.svarog" in resp.json()["detail"]
+
+
+def test_provider_rename_user_config_only_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename отказывает, если провайдер только в user config, не в project file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с несколькими провайдерами.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    user-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: user-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config без провайдеров.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # POST rename провайдера, который только в user config — должна быть ошибка.
+    resp = app_client.post(
+        "/models/providers/user-only/rename", json={"new_name": "user-renamed"}
+    )
+    assert resp.status_code == 422
+    assert "~/.svarog" in resp.json()["detail"]
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield

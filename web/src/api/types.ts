@@ -190,6 +190,12 @@ export interface ProviderCard {
   is_default: boolean;
 }
 
+export interface ProviderCheck {
+  ok: boolean;
+  models_count: number | null;
+  error: string | null;
+}
+
 export interface ModelCard {
   id: string;
   name: string | null;

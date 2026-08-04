@@ -65,6 +65,7 @@ from svarog_harness.gateway.models import (
     MemoryFileView,
     MemoryHitView,
     MemoryPageView,
+    ProviderCheckView,
     ProviderView,
     RepoSpec,
     RunDetail,
@@ -511,6 +512,23 @@ class GatewayService:
         self._catalog[name] = (now, cards)
         self._catalog_failures.pop(name, None)
         return cards
+
+    async def check_provider(self, name: str) -> ProviderCheckView:
+        """Живая проверка `/models` — мимо кэша каталога.
+
+        Кэш хранит и отрицательные результаты (CATALOG_NEGATIVE_TTL_SEC), а
+        «Проверить» обязан отражать состояние сейчас — поэтому fetch_models
+        зовётся напрямую, без чтения и записи кэша.
+        """
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        try:
+            api_key = resolve_api_key(provider, self._runner.host_store)
+            cards = await fetch_models(provider, None if api_key == "not-needed" else api_key)
+        except (CatalogError, ApiKeyError) as exc:
+            return ProviderCheckView(ok=False, error=str(exc))
+        return ProviderCheckView(ok=True, models_count=len(cards))
 
     async def scan_models(self, base_url: str, api_key: str | None = None) -> list[ModelCard]:
         """Каталог `/models` ещё не сохранённого провайдера (форма настроек).
@@ -1482,6 +1500,90 @@ class GatewayService:
             FileSecretStore(secrets_path).set(ref, api_key)
             values[f"models.providers.{name}.api_key_ref"] = ref
         return await self._write_deep(values)
+
+    async def rename_provider(self, name: str, new_name: str) -> ConfigDiffView:
+        """Перенести запись models.providers под новое имя.
+
+        api_key_ref переезжает как есть — секрет в SecretStore остаётся под
+        прежним ref, ключ перевводить не нужно. models.default и models.auxiliary
+        обновляются, если указывали на старое имя. exclude_defaults: в yaml
+        переезжает только то, что человек реально задал, без шума дефолтных полей.
+        """
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        if not re.fullmatch(r"[A-Za-z][\w-]{0,63}", new_name):
+            raise ValueError(
+                "имя провайдера — латиница/цифры/дефис/подчёркивание, начинается с буквы"
+            )
+        if new_name == name:
+            raise ValueError("новое имя совпадает со старым")
+        if new_name in self.cfg.models.providers:
+            raise ValueError(f"провайдер '{new_name}' уже существует")
+        raw = (
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+            if self.config_path.exists()
+            else {}
+        )
+        models_raw = raw.get("models") or {}
+        providers = models_raw.get("providers") or {}
+        # Провайдер может быть описан только в user-уровне конфиге,
+        # тогда запись под новым именем в проектный файл создаст дубликат
+        # (старая запись останется — она не в проектном файле, откуда её
+        # можно было бы удалить).
+        if name not in providers:
+            raise ValueError(
+                f"провайдер '{name}' описан не в проектном svarog.yaml "
+                "(вероятно, в ~/.svarog/svarog.yaml) — переименуйте его там"
+            )
+        dump = provider.model_dump(exclude_defaults=True)
+        values: dict[str, Any] = {
+            f"models.providers.{new_name}.{key}": value for key, value in dump.items()
+        }
+        if self.cfg.models.default == name:
+            values["models.default"] = new_name
+        if self.cfg.models.auxiliary == name:
+            values["models.auxiliary"] = new_name
+        return await self._write_deep(values, removes=[f"models.providers.{name}"])
+
+    async def remove_provider(self, name: str) -> ConfigDiffView:
+        """Удалить запись models.providers; дефолтного и вспомогательного — отказ.
+
+        Удаляя последний ключ из models.providers, удаляют и саму обёртку,
+        чтобы валидация не упала на None.
+        """
+        if name not in self.cfg.models.providers:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        if name == self.cfg.models.default:
+            raise ValueError(
+                "нельзя удалить провайдера по умолчанию — сначала переключите «по умолчанию»"
+            )
+        if name == self.cfg.models.auxiliary:
+            raise ValueError(
+                "нельзя удалить провайдера, назначенного вспомогательным "
+                "(models.auxiliary) — сначала переназначьте его"
+            )
+        raw = (
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+            if self.config_path.exists()
+            else {}
+        )
+        models_raw = raw.get("models") or {}
+        providers = models_raw.get("providers") or {}
+        # Провайдер может быть описан только в user-уровне конфиге,
+        # тогда удаление из проектного файла будет no-op.
+        if name not in providers:
+            raise ValueError(
+                f"провайдер '{name}' описан не в проектном svarog.yaml "
+                "(вероятно, в ~/.svarog/svarog.yaml) — удалите его там"
+            )
+        # Пустая обёртка (`providers:` без ключей) парсится в None и валит
+        # валидацию — удаляя последний ключ проектного файла, снимаем и её.
+        if len(providers) <= 1:
+            target = "models" if set(models_raw.keys()) <= {"providers"} else "models.providers"
+        else:
+            target = f"models.providers.{name}"
+        return await self._write_deep({}, removes=[target])
 
     async def set_executor_defaults(
         self, executor: str, provider: str | None = None, model: str | None = None
