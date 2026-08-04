@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type { SessionSummary } from "../api/types";
@@ -74,6 +75,67 @@ describe("группировка чатов по папкам", () => {
     ]);
     const list = screen.getByTestId("nav-list");
     expect(within(list).getByText("Чат b")).toBeInTheDocument();
+  });
+
+  it("клик по заголовку сворачивает и разворачивает папку", async () => {
+    const user = userEvent.setup();
+    render(
+      <Nav
+        sessions={[
+          session("a", "/home/u/proj/TaskTracker", "2026-08-04T12:00:00"),
+          session("b", "/home/u/proj/Svarog", "2026-08-04T11:00:00"),
+        ]}
+        activeId={null}
+        onPick={noop}
+        onNew={noop}
+        onDelete={noop}
+        section="chat"
+        onSection={noop}
+      />,
+    );
+
+    const header = screen.getAllByTestId("nav-group")[0];
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Чат a")).toBeInTheDocument();
+
+    await user.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Чат a")).not.toBeInTheDocument();
+    // Соседняя папка не пострадала.
+    expect(screen.getByText("Чат b")).toBeInTheDocument();
+
+    await user.click(header);
+    expect(screen.getByText("Чат a")).toBeInTheDocument();
+  });
+
+  it("свёрнутость папок переживает перерисовку через localStorage", async () => {
+    window.localStorage.setItem(
+      "svarog.navCollapsed",
+      JSON.stringify(["/home/u/proj/TaskTracker"]),
+    );
+    render(
+      <Nav
+        sessions={[
+          session("a", "/home/u/proj/TaskTracker", "2026-08-04T12:00:00"),
+          session("b", "/home/u/proj/Svarog", "2026-08-04T11:00:00"),
+        ]}
+        activeId={null}
+        onPick={noop}
+        onNew={noop}
+        onDelete={noop}
+        section="chat"
+        onSection={noop}
+      />,
+    );
+
+    expect(screen.queryByText("Чат a")).not.toBeInTheDocument();
+    expect(screen.getByText("Чат b")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTestId("nav-group")[0]);
+    expect(
+      JSON.parse(window.localStorage.getItem("svarog.navCollapsed") ?? "[]"),
+    ).toEqual([]);
   });
 
   it("одноимённые папки из разных путей — отдельные секции", () => {

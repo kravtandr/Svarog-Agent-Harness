@@ -141,6 +141,41 @@
   font-size: 11.5px;
   color: var(--faint);
 }
+/* Заголовок папки — кнопка сворачивания: вид тот же, что у nav__day,
+   плюс шеврон, который поворачивается в свёрнутом состоянии. */
+.nav__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 22px 5px;
+  border: 0;
+  background: none;
+  font-size: 11.5px;
+  font-family: var(--sans);
+  color: var(--faint);
+  text-align: left;
+  cursor: pointer;
+}
+.nav__group:hover {
+  color: var(--muted);
+}
+.nav__group:focus-visible {
+  outline: 2px solid rgba(210 98 44 / 65%);
+  outline-offset: -2px;
+}
+.nav__chevron {
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+}
+.nav__group[aria-expanded="false"] .nav__chevron {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav__chevron {
+    transition: none;
+  }
+}
 .nav__title {
   flex: 1;
   min-width: 0;
