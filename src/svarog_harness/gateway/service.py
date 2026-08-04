@@ -1520,6 +1520,22 @@ class GatewayService:
             raise ValueError("новое имя совпадает со старым")
         if new_name in self.cfg.models.providers:
             raise ValueError(f"провайдер '{new_name}' уже существует")
+        raw = (
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+            if self.config_path.exists()
+            else {}
+        )
+        models_raw = raw.get("models") or {}
+        providers = models_raw.get("providers") or {}
+        # Провайдер может быть описан только в user-уровне конфиге,
+        # тогда запись под новым именем в проектный файл создаст дубликат
+        # (старая запись останется — она не в проектном файле, откуда её
+        # можно было бы удалить).
+        if name not in providers:
+            raise ValueError(
+                f"провайдер '{name}' описан не в проектном svarog.yaml "
+                "(вероятно, в ~/.svarog/svarog.yaml) — переименуйте его там"
+            )
         dump = provider.model_dump(exclude_defaults=True)
         values: dict[str, Any] = {
             f"models.providers.{new_name}.{key}": value for key, value in dump.items()

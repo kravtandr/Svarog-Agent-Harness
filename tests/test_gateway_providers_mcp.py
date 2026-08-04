@@ -537,5 +537,46 @@ def test_provider_remove_user_config_only_rejects(
     assert "~/.svarog" in resp.json()["detail"]
 
 
+def test_provider_rename_user_config_only_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename отказывает, если провайдер только в user config, не в project file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с несколькими провайдерами.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    user-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: user-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config без провайдеров.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # POST rename провайдера, который только в user config — должна быть ошибка.
+    resp = app_client.post(
+        "/models/providers/user-only/rename", json={"new_name": "user-renamed"}
+    )
+    assert resp.status_code == 422
+    assert "~/.svarog" in resp.json()["detail"]
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield
