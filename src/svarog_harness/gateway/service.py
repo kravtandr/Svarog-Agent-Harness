@@ -1501,6 +1501,33 @@ class GatewayService:
             values[f"models.providers.{name}.api_key_ref"] = ref
         return await self._write_deep(values)
 
+    async def rename_provider(self, name: str, new_name: str) -> ConfigDiffView:
+        """Перенести запись models.providers под новое имя.
+
+        api_key_ref переезжает как есть — секрет в SecretStore остаётся под
+        прежним ref, ключ перевводить не нужно. models.default обновляется,
+        если указывал на старое имя. exclude_defaults: в yaml переезжает
+        только то, что человек реально задал, без шума дефолтных полей.
+        """
+        provider = self.cfg.models.providers.get(name)
+        if provider is None:
+            raise UnknownProviderError(f"провайдер '{name}' не описан в models.providers")
+        if not re.fullmatch(r"[A-Za-z][\w-]{0,63}", new_name):
+            raise ValueError(
+                "имя провайдера — латиница/цифры/дефис/подчёркивание, начинается с буквы"
+            )
+        if new_name == name:
+            raise ValueError("новое имя совпадает со старым")
+        if new_name in self.cfg.models.providers:
+            raise ValueError(f"провайдер '{new_name}' уже существует")
+        dump = provider.model_dump(exclude_defaults=True)
+        values: dict[str, Any] = {
+            f"models.providers.{new_name}.{key}": value for key, value in dump.items()
+        }
+        if self.cfg.models.default == name:
+            values["models.default"] = new_name
+        return await self._write_deep(values, removes=[f"models.providers.{name}"])
+
     async def set_executor_defaults(
         self, executor: str, provider: str | None = None, model: str | None = None
     ) -> ConfigDiffView:

@@ -72,6 +72,7 @@ from svarog_harness.gateway.models import (
     MemoryPageView,
     ModelCardView,
     ProviderCheckView,
+    RenameProviderRequest,
     ProviderView,
     RecentRootView,
     RootInspectView,
@@ -732,6 +733,17 @@ def create_app(
             return await service.check_provider(name)
         except UnknownProviderError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post("/models/providers/{name}/rename", response_model=ConfigDiffView)
+    async def rename_provider(
+        name: str, req: RenameProviderRequest, service: ServiceDep
+    ) -> ConfigDiffView:
+        try:
+            return await service.rename_provider(name, req.new_name)
+        except UnknownProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @app.post("/executors/defaults", response_model=ConfigDiffView)
     async def set_executor_defaults(

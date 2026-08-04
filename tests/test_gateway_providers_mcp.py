@@ -310,5 +310,52 @@ def test_provider_check_bypasses_negative_cache(
     assert resp.json() == {"ok": True, "models_count": 1, "error": None}
 
 
+def test_provider_rename_moves_fields_and_default(
+    client: TestClient, service: GatewayService
+) -> None:
+    """Rename переносит поля и default; api_key_ref остаётся валидным (ADR-0006)."""
+    client.post(
+        "/models/providers",
+        json={
+            "name": "local",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "deepseek/deepseek-v4-flash",
+            "api_key": "sk-or-секрет",
+        },
+    )
+    resp = client.post("/models/providers/local/rename", json={"new_name": "openrouter"})
+    assert resp.status_code == 200, resp.text
+    data = yaml.safe_load(service.config_path.read_text(encoding="utf-8"))
+    moved = data["models"]["providers"]["openrouter"]
+    assert moved["base_url"] == "https://openrouter.ai/api/v1"
+    assert moved["model"] == "deepseek/deepseek-v4-flash"
+    # Секрет не перевводится: ссылка переезжает как есть.
+    assert moved["api_key_ref"] == "LOCAL_API_KEY"
+    assert "local" not in data["models"]["providers"]
+    assert data["models"]["default"] == "openrouter"
+    names = [p["name"] for p in client.get("/models").json()]
+    assert names == ["openrouter"]
+
+
+def test_provider_rename_rejects_bad_targets(client: TestClient) -> None:
+    client.post(
+        "/models/providers",
+        json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "ll"},
+    )
+    # Занятое имя, кривое имя, неизвестный источник.
+    assert (
+        client.post("/models/providers/local/rename", json={"new_name": "groq"}).status_code
+        == 422
+    )
+    assert (
+        client.post("/models/providers/local/rename", json={"new_name": "плохое"}).status_code
+        == 422
+    )
+    assert (
+        client.post("/models/providers/нет/rename", json={"new_name": "ok"}).status_code
+        == 404
+    )
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield
