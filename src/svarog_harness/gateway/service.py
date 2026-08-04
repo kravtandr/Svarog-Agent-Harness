@@ -729,6 +729,16 @@ class GatewayService:
             on_tool_result=lambda name, status, summary: emit(
                 {"type": "tool_result", "tool": name, "status": status, "result": summary}
             ),
+            # Живой прогресс (токены/стоимость): у внешнего executor'а — с
+            # ticker'а bridge-прокси, у нативного loop — после каждой итерации.
+            on_progress=lambda iterations, tokens, cost, _ctx, _cached: emit(
+                {
+                    "type": "progress",
+                    "iterations": iterations,
+                    "tokens": tokens,
+                    "cost_usd": cost,
+                }
+            ),
             on_notify=lambda name, reason: emit({"type": "notify", "tool": name, "reason": reason}),
             on_check=on_check,
             on_commit=lambda sha, branch, push: emit(

@@ -119,6 +119,23 @@ async def test_tool_events_carry_arg_and_result(service: GatewayService) -> None
 
 
 @pytest.mark.asyncio
+async def test_progress_event_published(service: GatewayService) -> None:
+    """on_progress → WS-событие progress: живой счётчик токенов в чате."""
+    published: list[dict[str, object]] = []
+    service.events.publish = lambda run_id, event: published.append(event)  # type: ignore[method-assign]
+
+    started: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    holder = _RunHolder()
+    holder.run_id = "run-1"
+    hooks = service._event_hooks(holder, started)
+
+    assert hooks.on_progress is not None
+    hooks.on_progress(3, 12_400, 0.04, 0.0, 0)
+
+    assert published == [{"type": "progress", "iterations": 3, "tokens": 12_400, "cost_usd": 0.04}]
+
+
+@pytest.mark.asyncio
 async def test_session_thread_replays_user_calls_and_answer(service: GatewayService) -> None:
     from sqlalchemy.ext.asyncio import AsyncSession
 
