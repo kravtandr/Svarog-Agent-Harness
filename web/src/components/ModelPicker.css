@@ -107,14 +107,32 @@
   }
 }
 
+/* Селект провайдера — тот же язык, что чипы композера: без нативной
+   обводки ОС, свой шеврон, ховер проявляет границу. */
 .picker__provider {
+  appearance: none;
   width: 100%;
   margin-bottom: 8px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--raised);
-  color: inherit;
-  font: inherit;
+  padding: 8px 30px 8px 10px;
+  background:
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%238a8378" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+      right 11px center / 10px 6px no-repeat,
+    var(--raised);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
   cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+.picker__provider:hover {
+  border-color: var(--line);
+  background-color: #302d29;
+}
+.picker__provider:focus-visible {
+  outline: 2px solid rgba(210 98 44 / 65%);
+  outline-offset: 1px;
 }

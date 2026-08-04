@@ -161,11 +161,31 @@ export function Composer({
   const [files, setFiles] = useState<FileSuggestion[]>([]);
   const field = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Пикер модели закрывается кликом мимо: слушатель живёт только пока панель
+  // открыта. Кнопку-опенер исключаем отдельно — иначе mousedown закрыл бы
+  // панель, а следом click на кнопке открыл бы её заново («мигание»).
+  const pickerWrap = useRef<HTMLDivElement>(null);
+  const modelButton = useRef<HTMLButtonElement>(null);
   // Курсор, который нужно выставить после следующего рендера (setSelectionRange
   // на контролируемом textarea имеет смысл только после того, как React
   // применит новое value — раньше вызов просто не найдёт нужной позиции).
   const pendingCaret = useRef<number | null>(null);
   const fileRequest = useRef(0);
+
+  useEffect(() => {
+    if (!picking) return;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        pickerWrap.current?.contains(target) === true ||
+        modelButton.current?.contains(target) === true
+      )
+        return;
+      setPicking(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [picking]);
 
   const activeExecutor = executors.find((option) => option.is_active);
   // claude-code — единственный исполнитель со «своим» провайдером (подписка,
@@ -278,7 +298,7 @@ export function Composer({
     <div className="composer">
       <div className="composer__inner">
         {picking && (
-          <div className="composer__picker">
+          <div className="composer__picker" ref={pickerWrap}>
             <ModelPicker
               models={models}
               current={model}
@@ -483,6 +503,7 @@ export function Composer({
               )}
               <button
                 type="button"
+                ref={modelButton}
                 className="composer__model"
                 aria-label="Выбрать модель"
                 disabled={providerLocked}
@@ -491,7 +512,7 @@ export function Composer({
                     ? "Модель claude-code определяется его подпиской"
                     : "Выбрать модель"
                 }
-                onClick={() => setPicking(true)}
+                onClick={() => setPicking((value) => !value)}
               >
                 {model === "" ? "модель…" : model}
               </button>

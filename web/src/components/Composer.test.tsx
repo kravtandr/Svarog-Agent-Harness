@@ -248,6 +248,29 @@ describe("поле ввода", () => {
     expect(onProviderChange).toHaveBeenCalledWith("backup");
   });
 
+  it("пикер модели закрывается кликом вне его, но не кликом внутри", async () => {
+    render(<Composer {...base} providers={TWO_PROVIDERS} provider="router" />);
+
+    await userEvent.click(screen.getByLabelText("Выбрать модель"));
+    expect(screen.getByRole("dialog", { name: "Выбор модели" })).toBeVisible();
+
+    // Клик внутри панели (по полю поиска) — не закрывает.
+    await userEvent.click(screen.getByLabelText("Поиск модели"));
+    expect(
+      screen.getByRole("dialog", { name: "Выбор модели" }),
+    ).toBeInTheDocument();
+
+    // Клик мимо панели — закрывает.
+    fireEvent.mouseDown(document.body);
+    expect(
+      screen.queryByRole("dialog", { name: "Выбор модели" }),
+    ).not.toBeInTheDocument();
+
+    // Кнопка модели после закрытия открывает панель снова, а не «мигает».
+    await userEvent.click(screen.getByLabelText("Выбрать модель"));
+    expect(screen.getByRole("dialog", { name: "Выбор модели" })).toBeVisible();
+  });
+
   it("гасит выбор модели только у claude-code (его модель — подписка)", () => {
     render(
       <Composer
