@@ -69,6 +69,14 @@ class OpencodeAdapter:
         return {
             "OPENAI_BASE_URL": auth.base_url + "/v1",
             "OPENAI_API_KEY": auth.proxy_token,
+            # OpenCode на каждом старте фоново доустанавливает
+            # @opencode-ai/plugin из registry.npmjs.org — в internal-сети без
+            # egress это обречено, но npm с дефолтными ретраями (10с + 60с
+            # бэкофф) блокирует init на ~70с КАЖДОГО run'а (замер 04.08.2026:
+            # с retries=0 — 0.2с). Установка фоновая и необязательная: её
+            # мгновенный провал ни на что не влияет.
+            "npm_config_fetch_retries": "0",
+            "npm_config_fetch_retry_mintimeout": "1000",
         }
 
     def state_dir(self) -> PurePosixPath:

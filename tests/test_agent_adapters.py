@@ -191,6 +191,18 @@ def test_opencode_command_and_resume() -> None:
     assert resumed[-2:] == ["--session", "ses_2"]
 
 
+def test_opencode_env_disables_npm_retries() -> None:
+    """Фоновый npm install opencode в internal-сети обречён, но с дефолтными
+    ретраями (10с + 60с бэкофф) блокирует init на ~70с КАЖДОГО run'а — env
+    заставляет его падать мгновенно (замер 04.08.2026: 70с → 0.2с)."""
+    adapter = OpencodeAdapter()
+    env = adapter.base_url_env(
+        AgentAuth(base_url="http://bridge:8080", proxy_token="run-tok", mode="api-key")
+    )
+    assert env["npm_config_fetch_retries"] == "0"
+    assert env["npm_config_fetch_retry_mintimeout"] == "1000"
+
+
 # --- Матрица capabilities (§1/§6) ---------------------------------------------
 
 
