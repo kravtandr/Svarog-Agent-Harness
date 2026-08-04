@@ -1,5 +1,5 @@
 .composer {
-  padding: 12px 24px 16px;
+  padding: 12px 24px 18px;
 }
 .composer__inner {
   position: relative;
@@ -13,11 +13,54 @@
   bottom: calc(100% + 8px);
   z-index: 20;
 }
+/* Корпус — «горн»: слоистая поверхность чуть светлее сверху, приподнята
+   тенью от фона. Подпись всего композера — нагрев кромки при фокусе:
+   нижняя грань тлеет эмбером, как заготовка в горне (::after ниже). */
 .composer__box {
-  padding: 12px 14px 9px;
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--line);
+  position: relative;
+  padding: 14px 16px 11px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #252320 0%, var(--surface) 55%);
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    inset 0 1px 0 rgba(255 255 255 / 4%),
+    0 10px 28px rgba(0 0 0 / 30%);
+  transition:
+    box-shadow 0.35s ease,
+    background 0.35s ease;
+}
+.composer__box:focus-within {
+  /* Кольцо лишь чуть теплеет: подпись фокуса — тлеющая кромка снизу,
+     полный оранжевый контур спорил бы с ней (двойной акцент). */
+  box-shadow:
+    inset 0 0 0 1px rgba(210 98 44 / 16%),
+    inset 0 1px 0 rgba(255 255 255 / 4%),
+    0 10px 28px rgba(0 0 0 / 30%),
+    0 8px 26px -8px rgba(210 98 44 / 16%);
+}
+.composer__box::after {
+  content: "";
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(210 98 44 / 75%) 30%,
+    rgba(224 138 74 / 90%) 50%,
+    rgba(210 98 44 / 75%) 70%,
+    transparent
+  );
+  filter: blur(0.4px);
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+.composer__box:focus-within::after {
+  opacity: 1;
 }
 .composer__field {
   width: 100%;
@@ -26,7 +69,9 @@
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
+  line-height: 1.45;
   resize: none;
+  caret-color: var(--ember);
 }
 .composer__field::placeholder {
   color: var(--faint);
@@ -41,8 +86,8 @@
   /* gap-шорткат затирает предыдущий row-gap: обе оси заданы одним
      свойством, иначе перенос строк на узком экране схлопывается без
      вертикального зазора. */
-  gap: 4px 16px;
-  margin-top: 11px;
+  gap: 4px 12px;
+  margin-top: 12px;
   font-size: 12.5px;
   color: var(--muted);
 }
@@ -52,18 +97,35 @@
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--raised);
   color: var(--muted);
   cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+.composer__icon:hover:not(:disabled) {
+  background: #322f2b;
+  color: var(--text);
 }
 .composer__icon:disabled {
   cursor: default;
-  opacity: 0.75;
+  opacity: 0.55;
 }
 .composer__icon--send {
   background: var(--ember);
   color: #1a1210;
+}
+.composer__icon--send:hover:not(:disabled) {
+  background: #de7238;
+  color: #1a1210;
+  transform: translateY(-1px);
+}
+.composer__icon--send:active:not(:disabled) {
+  background: #bd5626;
+  transform: none;
 }
 .composer__modes {
   display: flex;
@@ -73,7 +135,7 @@
      кнопки действий на отдельную строку. */
   flex: 1 1 auto;
   flex-wrap: wrap;
-  gap: 4px 16px;
+  gap: 4px 8px;
   min-width: 0;
 }
 .composer__actions {
@@ -86,20 +148,31 @@
   display: none;
   color: var(--faint);
 }
-/* Автономия — единственный переключатель здесь, поэтому только она
-   выглядит нажимаемой. */
+/* Контролы подвала — тихие чипы: без нативной обводки select, свой шеврон,
+   ховер чуть подсвечивает. Кастомная стрелка требует appearance: none. */
 .composer__select {
-  border: 0;
-  border-radius: 6px;
-  padding: 2px 6px;
-  /* Одна высота у всех контролов строки: у нативного select и у кнопки
-     модели она иначе расходится на пару пикселей, и ряд выглядит рваным. */
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 2px 22px 2px 8px;
   height: 24px;
-  background: var(--raised);
+  background:
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5" viewBox="0 0 8 5"><path d="M1 1l3 3 3-3" fill="none" stroke="%238a8378" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+      right 8px center / 8px 5px no-repeat,
+    var(--raised);
   color: #c6bfb4;
   font-family: var(--sans);
   font-size: inherit;
   cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.composer__select:hover:not(:disabled) {
+  border-color: var(--line);
+  background-color: #302d29;
+  color: var(--text);
 }
 /* claude-code запирает провайдера и модель — неактивность должна быть
    видна, а не выясняться кликом (та же подача, что у кнопки модели). */
@@ -110,15 +183,19 @@
 /* Кнопка выбора модели: тот же приглушённый цвет, что был у статичного
    текста — модель по-прежнему второстепенная деталь подвала, а не акцент. */
 .composer__model {
-  border: 0;
-  border-radius: 6px;
-  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 2px 8px;
   height: 24px;
   background: none;
   color: var(--faint);
   font-family: var(--sans);
   font-size: inherit;
   cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
   /* Длинный id модели (deepseek/deepseek-v4-flash) не должен распирать
      подвал — обрезаем с многоточием, полное имя в title у пикера. */
   max-width: 24ch;
@@ -128,16 +205,38 @@
 }
 .composer__model:hover:not(:disabled) {
   background: var(--raised);
+  color: var(--muted);
 }
 .composer__model:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+/* Клавиатурный фокус видим на всех контролах подвала — тем же эмбером,
+   что и остальной акцент, не синим системным. */
+.composer__select:focus-visible,
+.composer__model:focus-visible,
+.composer__icon:focus-visible {
+  outline: 2px solid rgba(210 98 44 / 65%);
+  outline-offset: 1px;
 }
 .composer__spacer {
   flex: 1;
 }
 .composer__hidden {
   display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer__box,
+  .composer__box::after,
+  .composer__icon,
+  .composer__select,
+  .composer__model {
+    transition: none;
+  }
+  .composer__icon--send:hover:not(:disabled) {
+    transform: none;
+  }
 }
 
 @media (max-width: 899px) {
