@@ -1505,9 +1505,9 @@ class GatewayService:
         """Перенести запись models.providers под новое имя.
 
         api_key_ref переезжает как есть — секрет в SecretStore остаётся под
-        прежним ref, ключ перевводить не нужно. models.default обновляется,
-        если указывал на старое имя. exclude_defaults: в yaml переезжает
-        только то, что человек реально задал, без шума дефолтных полей.
+        прежним ref, ключ перевводить не нужно. models.default и models.auxiliary
+        обновляются, если указывали на старое имя. exclude_defaults: в yaml
+        переезжает только то, что человек реально задал, без шума дефолтных полей.
         """
         provider = self.cfg.models.providers.get(name)
         if provider is None:
@@ -1526,6 +1526,8 @@ class GatewayService:
         }
         if self.cfg.models.default == name:
             values["models.default"] = new_name
+        if self.cfg.models.auxiliary == name:
+            values["models.auxiliary"] = new_name
         return await self._write_deep(values, removes=[f"models.providers.{name}"])
 
     async def set_executor_defaults(

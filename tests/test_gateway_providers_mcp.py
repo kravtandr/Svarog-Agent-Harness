@@ -357,5 +357,44 @@ def test_provider_rename_rejects_bad_targets(client: TestClient) -> None:
     )
 
 
+def test_provider_rename_updates_auxiliary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename обновляет models.auxiliary, если он указывал на переименовываемый провайдер."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  default: local\n"
+        "  auxiliary: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        "executor:\n"
+        "  type: external\n"
+        "  external:\n"
+        "    adapter: opencode\n"
+        "    image: svarog/agent-opencode:latest\n"
+        "    base_url: http://localhost:9\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # Переименовать провайдер, который установлен как auxiliary.
+    resp = app_client.post("/models/providers/local/rename", json={"new_name": "cheap"})
+    assert resp.status_code == 200, resp.text
+    data = yaml.safe_load(svc.config_path.read_text(encoding="utf-8"))
+    # auxiliary должен указывать на новое имя.
+    assert data["models"]["auxiliary"] == "cheap"
+    assert data["models"]["default"] == "cheap"
+    assert "local" not in data["models"]["providers"]
+
+
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield
