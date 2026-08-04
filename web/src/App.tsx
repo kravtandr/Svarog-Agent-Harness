@@ -192,6 +192,10 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
       {section === "chat" && (
         <ChatScreen
           api={api}
+          // Провайдеры/модели/исполнители композера — из конфига проекта
+          // активной сессии, как и настройки: конфиг корня serve может не
+          // знать провайдера, добавленного для этого проекта.
+          configApi={scopedApi}
           sessionId={activeId}
           ensureSession={ensureSession}
           loading={loading}

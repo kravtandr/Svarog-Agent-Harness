@@ -121,6 +121,7 @@ function groupItems(items: ThreadItem[]): Entry[] {
 
 export function ChatScreen({
   api,
+  configApi = api,
   sessionId,
   ensureSession,
   loading = false,
@@ -131,6 +132,13 @@ export function ChatScreen({
   onSessions = () => {},
 }: {
   api: Api;
+  /** Скоупленный на root активной сессии клиент (X-Svarog-Root) для
+      конфиго-зависимых списков: провайдеры, модели, исполнители, sandbox.
+      Провайдер, добавленный в настройках проекта, обязан появиться в
+      композере — конфиг корня serve может его вообще не знать. Сессионные
+      запросы (thread/messages/uploads) остаются на `api`: сессии живут в
+      сервисе корня. */
+  configApi?: Api;
   sessionId: string | null;
   /** Создаёт сессию, если её ещё нет, и возвращает её id. */
   ensureSession: () => Promise<string>;
@@ -213,7 +221,7 @@ export function ChatScreen({
   const sessionEpoch = useRef(0);
 
   useEffect(() => {
-    api
+    configApi
       .executors()
       .then((list) => {
         setExecutorOptions(list);
@@ -225,10 +233,10 @@ export function ChatScreen({
       .catch(() => {
         // Список не пришёл — тот же принцип: остаёмся пустыми, не гадаем.
       });
-  }, [api]);
+  }, [configApi]);
 
   useEffect(() => {
-    api
+    configApi
       .sandboxes()
       .then((list) => {
         setSandboxOptions(list);
@@ -238,7 +246,7 @@ export function ChatScreen({
       .catch(() => {
         // Как с /executors: нет списка — селект пуст, override без sandbox.
       });
-  }, [api]);
+  }, [configApi]);
 
   useEffect(() => {
     api
@@ -248,7 +256,7 @@ export function ChatScreen({
   }, [api]);
 
   useEffect(() => {
-    api
+    configApi
       .providers()
       .then((cards) => {
         setProviders(cards);
@@ -260,12 +268,12 @@ export function ChatScreen({
         setModel(active.model);
       })
       .catch(() => setProviders([]));
-  }, [api]);
+  }, [configApi]);
 
   useEffect(() => {
     if (provider === "") return;
     setModelsError(null);
-    api
+    configApi
       .providerModels(provider)
       .then(setModels)
       .catch((exc: unknown) => {
@@ -276,7 +284,7 @@ export function ChatScreen({
             : "Не удалось получить список моделей у провайдера.",
         );
       });
-  }, [api, provider]);
+  }, [configApi, provider]);
 
   // Смена провайдера подставляет его модель из конфига: список моделей
   // подгрузится следующим эффектом, но текущее значение не должно повиснуть

@@ -1562,4 +1562,39 @@ describe("миниатюры вложений в ленте", () => {
     expect(chip).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
+
+  it("провайдеры и исполнители читаются через configApi воркспейса сессии, а не корня serve", async () => {
+    // Провайдер, добавленный в настройках проекта (scoped на root сессии),
+    // обязан появиться в композере: раньше чат читал конфиг корня serve и
+    // селектор провайдера не появлялся, хотя настройки видели обоих.
+    const unscoped = api();
+    const scoped = fakeApi({
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "local",
+          base_url: "https://x/v1",
+          model: "m",
+          is_default: true,
+        },
+        {
+          name: "LMStudio",
+          base_url: "http://lm:1234/v1",
+          model: "q",
+          is_default: false,
+        },
+      ]),
+    });
+    render(
+      <ChatScreen {...base} api={unscoped} configApi={scoped} sessionId="s1" />,
+    );
+
+    expect(
+      await screen.findByRole("combobox", { name: "Провайдер" }),
+    ).toBeInTheDocument();
+    expect(scoped.providers).toHaveBeenCalled();
+    expect(scoped.executors).toHaveBeenCalled();
+    expect(scoped.sandboxes).toHaveBeenCalled();
+    expect(scoped.providerModels).toHaveBeenCalledWith("local");
+    expect(unscoped.providers).not.toHaveBeenCalled();
+  });
 });
