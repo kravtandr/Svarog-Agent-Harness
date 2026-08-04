@@ -1554,9 +1554,16 @@ class GatewayService:
         )
         models_raw = raw.get("models") or {}
         providers = models_raw.get("providers") or {}
+        # Провайдер может быть описан только в user-уровне конфиге,
+        # тогда удаление из проектного файла будет no-op.
+        if name not in providers:
+            raise ValueError(
+                f"провайдер '{name}' описан не в проектном svarog.yaml "
+                "(вероятно, в ~/.svarog/svarog.yaml) — удалите его там"
+            )
         # Пустая обёртка (`providers:` без ключей) парсится в None и валит
         # валидацию — удаляя последний ключ проектного файла, снимаем и её.
-        if name in providers and len(providers) <= 1:
+        if len(providers) <= 1:
             target = "models" if set(models_raw.keys()) <= {"providers"} else "models.providers"
         else:
             target = f"models.providers.{name}"

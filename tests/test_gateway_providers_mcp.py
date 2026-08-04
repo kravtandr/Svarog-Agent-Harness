@@ -396,9 +396,10 @@ def test_provider_rename_updates_auxiliary(
     assert "local" not in data["models"]["providers"]
 
 
-def test_provider_remove_guards_default_and_collapses_wrapper(
+def test_provider_remove_guards_default(
     client: TestClient, service: GatewayService
 ) -> None:
+    """Remove отказывает, если удаляемый провайдер — default."""
     client.post(
         "/models/providers",
         json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "ll"},
@@ -409,26 +410,27 @@ def test_provider_remove_guards_default_and_collapses_wrapper(
     assert client.delete("/models/providers/local").status_code == 200
     names = [p["name"] for p in client.get("/models").json()]
     assert names == ["groq"]
-    data = yaml.safe_load(service.config_path.read_text(encoding="utf-8"))
-    assert "local" not in data["models"]["providers"]
     assert client.delete("/models/providers/local").status_code == 404
 
 
 def test_provider_remove_guards_auxiliary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Remove отказывает, если удаляемый провайдер — auxiliary."""
+    """Remove отказывает, если удаляемый провайдер — auxiliary (не default)."""
     monkeypatch.setenv("HOME", str(tmp_path))
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "svarog.yaml").write_text(
         "models:\n"
-        "  default: local\n"
-        "  auxiliary: local\n"
+        "  default: main\n"
+        "  auxiliary: cheap\n"
         "  providers:\n"
-        "    local:\n"
+        "    main:\n"
         "      base_url: http://localhost:9/v1\n"
         "      model: fake-model\n"
+        "    cheap:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: cheap-model\n"
         "sandbox:\n  type: docker\n"
         f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
         "executor:\n"
@@ -443,9 +445,96 @@ def test_provider_remove_guards_auxiliary(
     svc = GatewayService(load_config(project_dir=ws), ws)
     app_client = TestClient(create_app(svc))
 
-    # Удалять auxiliary нельзя.
-    resp = app_client.delete("/models/providers/local")
+    # Удалять auxiliary нельзя, даже если он не default.
+    resp = app_client.delete("/models/providers/cheap")
     assert resp.status_code == 422
+    # Проверяем, что сообщение об ошибке специфично для auxiliary.
+    assert "auxiliary" in resp.json()["detail"]
+
+
+def test_provider_remove_collapses_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove удаляет последнего провайдера и сворачивает пустую обёртку models."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с дефолтным провайдером.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: user-provider\n"
+        "  providers:\n"
+        "    user-provider:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config с одним провайдером (не дефолтным, чтобы избежать guard).
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        "models:\n"
+        "  providers:\n"
+        "    project-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: project-model\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # DELETE последнего провайдера проектного файла.
+    resp = app_client.delete("/models/providers/project-only")
+    assert resp.status_code == 200
+    # Проектный файл больше не содержит models (обёртка свёрнута).
+    proj_data = yaml.safe_load(svc.config_path.read_text(encoding="utf-8"))
+    assert "models" not in proj_data
+    # Эффективный конфиг всё ещё видит пользовательский провайдер.
+    names = [p["name"] for p in app_client.get("/models").json()]
+    assert names == ["user-provider"]
+
+
+def test_provider_remove_user_config_only_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove отказывает, если провайдер только в user config, не в project file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # User config с несколькими провайдерами.
+    user_cfg = tmp_path / ".svarog" / "svarog.yaml"
+    user_cfg.parent.mkdir(parents=True)
+    user_cfg.write_text(
+        "models:\n"
+        "  default: local\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: fake-model\n"
+        "    user-only:\n"
+        "      base_url: http://localhost:9/v1\n"
+        "      model: user-model\n"
+        "sandbox:\n  type: docker\n"
+        f"secrets:\n  path: {tmp_path / 'secrets.json'}\n"
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    # Project config без провайдеров.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "svarog.yaml").write_text(
+        f"storage:\n  db_path: {tmp_path / 'state' / 'svarog.db'}\n",
+        encoding="utf-8",
+    )
+    svc = GatewayService(load_config(project_dir=ws), ws)
+    app_client = TestClient(create_app(svc))
+
+    # DELETE провайдера, который только в user config — должна быть ошибка.
+    resp = app_client.delete("/models/providers/user-only")
+    assert resp.status_code == 422
+    assert "~/.svarog" in resp.json()["detail"]
 
 
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
