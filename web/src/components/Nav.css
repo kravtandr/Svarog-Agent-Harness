@@ -9,8 +9,9 @@
   align-items: center;
   gap: 10px;
   padding: 14px 14px 10px;
-  font-size: 15px;
-  font-weight: 650;
+}
+.nav__top svg {
+  display: block;
 }
 .nav__new,
 .nav__item,

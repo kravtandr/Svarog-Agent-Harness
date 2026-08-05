@@ -23,6 +23,23 @@ function session(
 
 const noop = () => {};
 
+describe("шапка навигатора", () => {
+  it("вместо текста — пиксельный логотип с доступным именем «Сварог»", () => {
+    render(
+      <Nav
+        sessions={[]}
+        activeId={null}
+        onPick={noop}
+        onNew={noop}
+        onDelete={noop}
+        section="chat"
+        onSection={noop}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "Сварог" })).toBeInTheDocument();
+  });
+});
+
 describe("группировка чатов по папкам", () => {
   it("секции — папки в порядке свежести, внутри — по времени", () => {
     render(

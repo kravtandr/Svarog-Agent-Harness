@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { SessionSummary } from "../api/types";
+import { SvarogLogo } from "./SvarogLogo";
 import "./Nav.css";
 
 const HOUR = 60 * 60 * 1000;
@@ -153,7 +154,9 @@ export function Nav({
 
   return (
     <nav className="nav">
-      <div className="nav__top">Сварог</div>
+      <div className="nav__top">
+        <SvarogLogo />
+      </div>
       <button type="button" className="nav__new" onClick={onNew}>
         ＋ Новый чат
       </button>
