@@ -573,6 +573,81 @@ describe("экран настроек", () => {
     ).toBeInTheDocument();
   });
 
+  it("удаление провайдера при открытой форме правки не переживает переиспользование имени", async () => {
+    const api = baseApi({
+      config: vi.fn().mockResolvedValue(config),
+      providers: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            name: "groq",
+            base_url: "https://old.example/v1",
+            model: "old-model",
+            is_default: false,
+          },
+        ])
+        // После удаления карточки нет вовсе.
+        .mockResolvedValueOnce([])
+        // Имя переиспользовано новым провайдером с другими значениями.
+        .mockResolvedValueOnce([
+          {
+            name: "groq",
+            base_url: "https://new.example/v1",
+            model: "new-model",
+            is_default: false,
+          },
+        ]),
+      providerRemove: vi.fn().mockResolvedValue({
+        path: "",
+        lines: [],
+        changes: 1,
+        restart_required: false,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+    await waitFor(() => expect(screen.getByText("groq")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    await userEvent.click(screen.getByRole("button", { name: "Изменить" }));
+    expect(screen.getByLabelText("Модель groq")).toHaveValue("old-model");
+
+    // Не закрывая форму правки, удаляем провайдера тем же раскрытым блоком.
+    await userEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    );
+    await waitFor(() =>
+      expect(api.providerRemove).toHaveBeenCalledWith("groq"),
+    );
+    await waitFor(() => expect(api.providers).toHaveBeenCalledTimes(2));
+    expect(screen.queryByLabelText("Модель groq")).not.toBeInTheDocument();
+
+    // Новый провайдер с тем же именем не должен унаследовать зависшую форму
+    // правки со значениями удалённого groq.
+    await userEvent.type(screen.getByLabelText("Имя"), "groq");
+    await userEvent.type(
+      screen.getByLabelText("Base URL (с /v1)"),
+      "https://new.example/v1",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Модель по умолчанию"),
+      "new-model",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить провайдера" }),
+    );
+    await waitFor(() => expect(api.providers).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByText("groq")).toBeInTheDocument());
+
+    expect(screen.queryByLabelText("Модель groq")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Сохранить groq" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("сообщает про restart_required при сохранении провайдера", async () => {
     const api = fakeApi({
       addProvider: vi.fn().mockResolvedValue({

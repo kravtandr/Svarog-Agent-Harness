@@ -273,6 +273,36 @@ function ProvidersPane({ api }: { api: Api }) {
     apiKey: string;
   } | null>(null);
 
+  // Список могли перезагрузить по причине, не связанной с этой карточкой:
+  // сохранили другого провайдера, переименовали другого. Раскрытое «Ещё»,
+  // незакрытая форма правки и результат «Проверить» привязаны к имени —
+  // а имя может быть переиспользовано (провайдер удалён и заведён заново
+  // под тем же именем). Без чистки по факту исчезновения имени из списка
+  // форма правки открылась бы сама на новой карточке, заполненная данными
+  // уже удалённого провайдера, и «Сохранить» молча перезаписал бы её этим
+  // старьём.
+  useEffect(() => {
+    const validNames = new Set(providers.map((p) => p.name));
+    setExpanded((current) =>
+      current !== null && !validNames.has(current) ? null : current,
+    );
+    setEditing((current) =>
+      current !== null && !validNames.has(current.name) ? null : current,
+    );
+    setChecks((current) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [key, value] of Object.entries(current)) {
+        if (validNames.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [providers]);
+
   // Правка существующего идёт тем же addProvider, что и добавление: бэкенд
   // различает их по имени, отдельного эндпоинта нет.
   const submitEdit = async () => {
@@ -287,6 +317,7 @@ function ProvidersPane({ api }: { api: Api }) {
       });
       applied(diff, `Провайдер «${editing.name}» обновлён.`);
       setEditing(null);
+      setExpanded(null);
       setOpenCatalog(null);
       setCatalogs({});
       reload();
