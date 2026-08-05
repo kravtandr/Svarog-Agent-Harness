@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { beforeEach } from "vitest";
+import { beforeEach, vi } from "vitest";
 
 // jsdom не реализует URL.createObjectURL/revokeObjectURL. ChatScreen рисует
 // миниатюры вложений через blob-URL (fetch с Authorization, а не голый
@@ -44,3 +44,13 @@ if (window.localStorage === undefined) {
 beforeEach(() => {
   window.localStorage.clear();
 });
+
+// App держит постоянный WS /sessions/events; в jsdom WebSocket нет.
+// No-op стаб — тесты, которым нужен живой сокет, ставят свой через
+// vi.stubGlobal (паттерн ChatScreen.test.tsx).
+class StubWebSocket {
+  onmessage: ((ev: MessageEvent<string>) => void) | null = null;
+  onclose: (() => void) | null = null;
+  close(): void {}
+}
+vi.stubGlobal("WebSocket", StubWebSocket);

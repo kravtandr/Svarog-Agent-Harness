@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { SessionSummary } from "../api/types";
+import { AnimatedTitle } from "./AnimatedTitle";
 import "./Nav.css";
 
 const HOUR = 60 * 60 * 1000;
@@ -208,7 +209,10 @@ export function Nav({
                           data-testid={`heat-${session.session_id}`}
                           data-heat={heatLevel(session)}
                         />
-                        <span className="nav__title">{session.title}</span>
+                        <AnimatedTitle
+                          className="nav__title"
+                          text={session.title}
+                        />
                         {busy !== null && (
                           <span className="nav__busy" title={`Запуск ${busy}`}>
                             {busy}

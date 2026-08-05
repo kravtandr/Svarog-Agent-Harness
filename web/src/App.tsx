@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createClient, type Api } from "./api/client";
+import { subscribeSessionEvents } from "./api/stream";
 import type { SessionSummary } from "./api/types";
+import { AnimatedTitle } from "./components/AnimatedTitle";
 import { busyLabel, Nav, rootBase, type Section } from "./components/Nav";
 import { Shell } from "./components/Shell";
 import { WorkspacePicker } from "./components/WorkspacePicker";
@@ -126,6 +128,39 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
     return () => window.clearInterval(timer);
   }, [api, sessions]);
 
+  // Живые названия чатов (спека 2026-08-05): постоянный WS-пуш; busy-поллинг
+  // выше остаётся fallback'ом на случай разрыва. Реконнект — через 5 секунд.
+  useEffect(() => {
+    let unsubscribe = () => {};
+    let timer: number | undefined;
+    let stopped = false;
+    const connect = () => {
+      unsubscribe = subscribeSessionEvents(
+        "",
+        token,
+        (event) => {
+          if (event.type !== "session_title") return;
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.session_id === event.session_id
+                ? { ...s, title: event.title }
+                : s,
+            ),
+          );
+        },
+        () => {
+          if (!stopped) timer = window.setTimeout(connect, 5000);
+        },
+      );
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
+
   /** Сессия для отправки: текущая, а если её нет — быстрая, в корне serve.
       Пикер тут не открываем: человек уже написал сообщение, не блокируем его. */
   const ensureSession = useCallback(async () => {
@@ -173,9 +208,16 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
       }
       bar={
         <span>
-          {section === "chat"
-            ? (active?.title ?? TITLES.chat)
-            : TITLES[section]}
+          {section === "chat" ? (
+            // key: переключение чатов перемонтирует компонент — печатается
+            // только пуш нового названия, а не каждый переход по списку.
+            <AnimatedTitle
+              key={activeId ?? "root"}
+              text={active?.title ?? TITLES.chat}
+            />
+          ) : (
+            TITLES[section]
+          )}
           {section === "chat" && active?.workspace && (
             <span className="bar__root" title={active.workspace}>
               {rootBase(active.workspace)}

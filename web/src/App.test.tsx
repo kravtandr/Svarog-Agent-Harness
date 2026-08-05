@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -234,5 +234,36 @@ describe("оболочка приложения", () => {
     );
 
     expect(screen.getByRole("button", { name: /Новый чат/ })).toHaveFocus();
+  });
+
+  it("session_title из WS обновляет название в списке", async () => {
+    class FakeSocket {
+      static last: FakeSocket | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        FakeSocket.last = this;
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+
+    render(<App api={api()} />);
+    await screen.findByRole("button", { name: "FTS-поиск по памяти" });
+
+    act(() => {
+      FakeSocket.last?.onmessage?.({
+        data: JSON.stringify({
+          type: "session_title",
+          session_id: "s1",
+          title: "Новое имя чата",
+          phase: "draft",
+        }),
+      });
+    });
+    expect(
+      await screen.findByRole("button", { name: /Новое имя чата/ }),
+    ).toBeInTheDocument();
+    vi.unstubAllGlobals();
   });
 });
