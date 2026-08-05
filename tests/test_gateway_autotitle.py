@@ -325,6 +325,33 @@ def test_session_events_ws_auth(service: GatewayService) -> None:
         ws.close()
 
 
+def test_session_events_ws_disconnect_unregisters(service: GatewayService) -> None:
+    """Разрыв клиента снимает подписчика с хаба сразу (финальное ревью,
+    2026-08-05), а не только на следующем publish: без параллельного
+    receive-цикла в обработчике WS подписчик тихо копился бы в хабе."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from svarog_harness.gateway.api import create_app
+
+    hub = service.session_events
+    client = TestClient(create_app(service, bearer_token="secret-token"))
+    with client.websocket_connect("/sessions/events?token=secret-token"):
+        for _ in range(50):
+            if len(hub._subscribers) == 1:
+                break
+            time.sleep(0.02)
+        assert len(hub._subscribers) == 1  # подписка успела зарегистрироваться
+    # `with` вышел — TestClient закрыл соединение со стороны клиента;
+    # серверному receive-циклу нужен один тик, чтобы это заметить.
+    for _ in range(50):
+        if len(hub._subscribers) == 0:
+            break
+        time.sleep(0.02)
+    assert len(hub._subscribers) == 0
+
+
 def test_workspace_hub_shares_session_events(tmp_path: Path) -> None:
     from svarog_harness.gateway.hub import WorkspaceHub
     from svarog_harness.gateway.roots import WorkspaceRootsRegistry

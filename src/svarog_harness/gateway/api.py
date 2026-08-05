@@ -637,6 +637,15 @@ def create_app(
         Канал без истории: начальное состояние клиент берёт из GET /sessions.
         Маршрутизация по id не нужна: в WorkspaceHub hub общий на все корни,
         в multi-tenant authenticate уже вернул сервис тенанта с его hub'ом.
+
+        Клиент по этому каналу ничего не шлёт, но сокет всё равно нужно
+        читать: без этого тихий разрыв (закрытая вкладка, обрыв сети) не
+        всплывает, пока хаб не попробует что-то отправить в мёртвый сокет —
+        до тех пор подписчик висит в хабе зарегистрированным. Поэтому
+        send-цикл и receive-цикл (только детектор дисконнекта, входящие
+        сообщения игнорируются) идут конкурентно; кто первый завершился —
+        того и код закрытия, второй отменяем, чтобы generator подписки
+        (`subscribe()`) дошёл до своего `finally` и снял подписчика.
         """
         query_token = websocket.query_params.get("token")
         authorization = websocket.headers.get("authorization")
@@ -645,9 +654,33 @@ def create_app(
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
         await websocket.accept()
-        try:
+
+        async def send_loop() -> None:
             async for event in service.session_events.subscribe():
                 await websocket.send_json(event)
+
+        async def receive_loop() -> None:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
+
+        send_task: asyncio.Task[None] = asyncio.ensure_future(send_loop())
+        receive_task: asyncio.Task[None] = asyncio.ensure_future(receive_loop())
+        try:
+            done, pending = await asyncio.wait(
+                {send_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                # Отмена доходит до `await queue.get()` внутри subscribe() —
+                # это и разбудит его finally, снимающий подписчика с хаба.
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
         except WebSocketDisconnect:
             return
 

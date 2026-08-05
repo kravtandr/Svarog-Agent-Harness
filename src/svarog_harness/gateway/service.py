@@ -885,6 +885,11 @@ class GatewayService:
             )
 
             async def write(db: AsyncSession) -> tuple[str, bool] | None:
+                # Черновик (_autotitle_draft_bg) и это уточнение пишут в свою
+                # транзакцию независимо; если их записи пересекутся по
+                # времени — last-writer-wins на уровне БД. Окно в
+                # микросекунды, а исход косметический (текст заголовка),
+                # поэтому отдельная блокировка тут избыточна.
                 session = await db.get(Session, session_id)
                 if session is None or not needs_refine(session.title, session.meta):
                     return None  # гонка: параллельный run уже уточнил

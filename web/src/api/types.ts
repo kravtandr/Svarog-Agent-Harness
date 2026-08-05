@@ -265,7 +265,7 @@ export interface RootInspect {
 
 /** Событие канала /sessions/events (спека 2026-08-05). */
 export interface SessionEvent {
-  type: string;
+  type: "session_title";
   session_id: string;
   title: string;
   phase: "draft" | "final";
