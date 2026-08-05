@@ -83,12 +83,15 @@ function Field({
   );
 }
 
-function DiffPane({
+/** Полоса сохранения: при нуле изменений её нет вовсе — постоянная колонка
+    держала 344px пустоты и выключенный оранжевый CTA рядом с «0 изменений». */
+function DiffBar({
   path,
   lines,
   changes,
   error,
   open,
+  onToggle,
   onSave,
   onReset,
 }: {
@@ -97,28 +100,37 @@ function DiffPane({
   changes: number;
   error: string | null;
   open: boolean;
+  onToggle: () => void;
   onSave: () => void;
   onReset: () => void;
 }) {
   return (
-    <aside className="diffpane" data-open={open} data-testid="diffpane">
-      <div className="diffpane__head">
-        Будет записано в <span className="diffpane__file">{path}</span>
-      </div>
-      <pre className="diffpane__body">
-        {lines.map((line, index) => {
-          // Знак и текст — одна строка: так она копируется целиком и
-          // читается как настоящий дифф.
-          const sign =
-            line.kind === "add" ? "+" : line.kind === "del" ? "-" : " ";
-          return (
-            <span key={index} className={`diffpane__line--${line.kind}`}>
-              {`${sign}${line.text}`}
-            </span>
-          );
-        })}
-      </pre>
-      <div className="diffpane__foot">
+    <aside className="diffbar" data-open={open} data-testid="diffbar">
+      {open && (
+        <pre className="diffbar__body">
+          {lines.map((line, index) => {
+            // Знак и текст — одна строка: так она копируется целиком и
+            // читается как настоящий дифф.
+            const sign =
+              line.kind === "add" ? "+" : line.kind === "del" ? "-" : " ";
+            return (
+              <span key={index} className={`diffpane__line--${line.kind}`}>
+                {`${sign}${line.text}`}
+              </span>
+            );
+          })}
+        </pre>
+      )}
+      <div className="diffbar__foot">
+        <span className="diffbar__count">
+          {error !== null
+            ? "изменения не пройдут проверку"
+            : counted(changes, "изменение", "изменения", "изменений")}
+        </span>
+        <span className="diffbar__file">{path}</span>
+        <button type="button" className="btn btn--small" onClick={onToggle}>
+          {open ? "Скрыть дифф" : "Показать дифф"}
+        </button>
         <button
           type="button"
           className="btn btn--primary"
@@ -130,11 +142,6 @@ function DiffPane({
         <button type="button" className="btn" onClick={onReset}>
           Отменить
         </button>
-        <span className="diffpane__count">
-          {error !== null
-            ? "изменения не пройдут проверку"
-            : counted(changes, "изменение", "изменения", "изменений")}
-        </span>
       </div>
     </aside>
   );
@@ -866,90 +873,82 @@ export function SettingsScreen({ api }: { api: Api }) {
       </nav>
 
       <div className="settings__body">
-        {pane.kind === "providers" ? (
-          <ProvidersPane api={api} />
-        ) : pane.kind === "executors" ? (
-          <ExecutorsPane api={api} />
-        ) : pane.kind === "secrets" ? (
-          <>
-            <h2 className="settings__title">Секреты</h2>
-            <p className="field__help">
-              Значения не показываются и не редактируются в вебе. Задать —
-              командой svarog secrets set или переменной окружения.
-            </p>
-            {(secrets ?? []).map((secret) => (
-              <div key={secret.name} className="secret">
-                <span>{secret.name}</span>
-                <span
-                  className={`secret__state${secret.present ? "" : " secret__state--missing"}`}
-                >
-                  {secret.present ? "задан" : "не задан"}
-                </span>
-              </div>
-            ))}
-          </>
-        ) : (
-          section !== undefined && (
+        <div className="settings__col">
+          {pane.kind === "providers" ? (
+            <ProvidersPane api={api} />
+          ) : pane.kind === "executors" ? (
+            <ExecutorsPane api={api} />
+          ) : pane.kind === "secrets" ? (
             <>
-              <h2 className="settings__title">{section.title}</h2>
-              <p className="settings__path">{config.path}</p>
-              {restartRequired && (
-                <p className="settings__notice">
-                  Правка сохранена, но вступит в силу только после того, как
-                  завершатся текущие запуски.
-                </p>
-              )}
-              {section.fields.map((field) => (
-                <div key={field.path}>
-                  <Field
-                    field={field}
-                    value={
-                      edits[field.path] ??
-                      (field.value as string | number | boolean)
-                    }
-                    onChange={(value) =>
-                      setEdits((current) => ({
-                        ...current,
-                        [field.path]: value,
-                      }))
-                    }
-                  />
-                  {error !== null &&
-                    error.includes(field.path.split(".")[1]) && (
-                      <p className="field__error">{error}</p>
-                    )}
+              <h2 className="settings__title">Секреты</h2>
+              <p className="field__help">
+                Значения не показываются и не редактируются в вебе. Задать —
+                командой svarog secrets set или переменной окружения.
+              </p>
+              {(secrets ?? []).map((secret) => (
+                <div key={secret.name} className="secret">
+                  <span>{secret.name}</span>
+                  <span
+                    className={`secret__state${secret.present ? "" : " secret__state--missing"}`}
+                  >
+                    {secret.present ? "задан" : "не задан"}
+                  </span>
                 </div>
               ))}
             </>
-          )
-        )}
-      </div>
+          ) : (
+            section !== undefined && (
+              <>
+                <h2 className="settings__title">{section.title}</h2>
+                <p className="settings__path">{config.path}</p>
+                {restartRequired && (
+                  <p className="settings__notice">
+                    Правка сохранена, но вступит в силу только после того, как
+                    завершатся текущие запуски.
+                  </p>
+                )}
+                {section.fields.map((field) => (
+                  <div key={field.path}>
+                    <Field
+                      field={field}
+                      value={
+                        edits[field.path] ??
+                        (field.value as string | number | boolean)
+                      }
+                      onChange={(value) =>
+                        setEdits((current) => ({
+                          ...current,
+                          [field.path]: value,
+                        }))
+                      }
+                    />
+                    {error !== null &&
+                      error.includes(field.path.split(".")[1]) && (
+                        <p className="field__error">{error}</p>
+                      )}
+                  </div>
+                ))}
+              </>
+            )
+          )}
+        </div>
 
-      {pane.kind === "section" && (
-        <>
-          <div className="settings__sheet-button">
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setSheetOpen(true)}
-            >
-              {`Показать изменения (${changes})`}
-            </button>
-          </div>
-          <DiffPane
+        {pane.kind === "section" && (changes > 0 || error !== null) && (
+          <DiffBar
             path={config.path}
             lines={diff}
             changes={changes}
             error={error}
             open={sheetOpen}
+            onToggle={() => setSheetOpen(!sheetOpen)}
             onSave={() => void save()}
             onReset={() => {
               setEdits({});
               setSheetOpen(false);
             }}
           />
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -114,7 +114,10 @@ describe("экран настроек", () => {
         "runtime.autonomy": "supervised",
       }),
     );
-    const pane = screen.getByTestId("diffpane");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Показать дифф" }),
+    );
+    const pane = screen.getByTestId("diffbar");
     await waitFor(() => expect(pane).toHaveTextContent("autonomy: supervised"));
     // Добавленная строка помечена как добавленная, а не просто выведена.
     const added = pane.querySelectorAll(".diffpane__line--add");
@@ -140,11 +143,74 @@ describe("экран настроек", () => {
     await waitFor(() =>
       expect(screen.getByText(/2 изменения/)).toBeInTheDocument(),
     );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Показать дифф" }),
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "Сохранить" }));
     expect(api.saveConfig).toHaveBeenCalledWith({
       "runtime.autonomy": "supervised",
     });
+  });
+
+  it("при нуле изменений полосы сохранения нет вовсе", async () => {
+    const api = baseApi({ config: vi.fn().mockResolvedValue(config) });
+    render(<SettingsScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Уровень автономии")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("diffbar")).not.toBeInTheDocument();
+  });
+
+  it("правка поля поднимает полосу с числом изменений", async () => {
+    const api = baseApi({
+      config: vi.fn().mockResolvedValue(config),
+      previewConfig: vi.fn().mockResolvedValue({
+        path: "/agent-home/svarog.yaml",
+        lines: [{ kind: "add", text: "  autonomy: supervised" }],
+        changes: 1,
+        restart_required: false,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Уровень автономии")).toBeInTheDocument(),
+    );
+    await userEvent.selectOptions(
+      screen.getByLabelText("Уровень автономии"),
+      "supervised",
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("diffbar")).toHaveTextContent("1 изменение"),
+    );
+  });
+
+  it("дифф раскрывается по кнопке, а не занимает место постоянно", async () => {
+    const api = baseApi({
+      config: vi.fn().mockResolvedValue(config),
+      previewConfig: vi.fn().mockResolvedValue({
+        path: "/agent-home/svarog.yaml",
+        lines: [{ kind: "add", text: "  autonomy: supervised" }],
+        changes: 1,
+        restart_required: false,
+      }),
+    });
+    render(<SettingsScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Уровень автономии")).toBeInTheDocument(),
+    );
+    await userEvent.selectOptions(
+      screen.getByLabelText("Уровень автономии"),
+      "supervised",
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("diffbar")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/autonomy: supervised/)).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Показать дифф" }),
+    );
+    expect(screen.getByText(/autonomy: supervised/)).toBeInTheDocument();
   });
 
   it("показывает отказ схемы на месте, а не общим сообщением", async () => {
