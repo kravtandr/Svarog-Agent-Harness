@@ -6,7 +6,8 @@ from svarog_harness.gateway.autotitle import (
     clean_title,
     fallback_title,
     generate_title,
-    needs_autotitle,
+    needs_draft,
+    needs_refine,
     title_for,
 )
 from svarog_harness.llm.provider import (
@@ -78,14 +79,32 @@ def test_fallback_title_short_text_kept_as_is() -> None:
     assert fallback_title("   ") is None
 
 
-def test_needs_autotitle_only_for_default_titles_without_flag() -> None:
-    assert needs_autotitle("Новый чат", None)
-    assert needs_autotitle("gateway-сессия", {})
-    assert needs_autotitle("", {})
-    assert needs_autotitle(None, {})
-    assert not needs_autotitle("Мой чат", {})
-    assert not needs_autotitle("Новый чат", {"autotitle": "done"})
-    assert not needs_autotitle("Новый чат", {"autotitle": "fallback"})
+def test_needs_draft_only_for_default_titles_without_flag() -> None:
+    assert needs_draft("Новый чат", None)
+    assert needs_draft("gateway-сессия", {})
+    assert needs_draft("", {})
+    assert needs_draft(None, {})
+    assert not needs_draft("Мой чат", {})
+    assert not needs_draft("Новый чат", {"autotitle": "draft"})
+    assert not needs_draft("Новый чат", {"autotitle": "done"})
+
+
+def test_needs_refine_after_draft() -> None:
+    meta = {"autotitle": "draft", "autotitle_draft": "Черновик"}
+    assert needs_refine("Черновик", meta)
+    # Черновик переименовали вручную (CLI) — не перетираем.
+    assert not needs_refine("Моё имя", meta)
+
+
+def test_needs_refine_without_draft_uses_default_condition() -> None:
+    assert needs_refine("Новый чат", {})
+    assert needs_refine("gateway-сессия", None)
+    assert not needs_refine("Мой чат", {})
+
+
+def test_needs_refine_final_flags_block() -> None:
+    assert not needs_refine("Название", {"autotitle": "done"})
+    assert not needs_refine("Название", {"autotitle": "fallback"})
 
 
 async def test_generate_title_happy_path() -> None:

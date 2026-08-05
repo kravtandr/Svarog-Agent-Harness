@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { SessionSummary } from "../api/types";
+import { AnimatedTitle } from "./AnimatedTitle";
 import { SvarogLogo } from "./SvarogLogo";
 import "./Nav.css";
 
@@ -201,6 +202,10 @@ export function Nav({
                       <button
                         type="button"
                         className="nav__item"
+                        // Пока AnimatedTitle печатает новое название, видимый
+                        // текст временно пуст/укорочен — без aria-label
+                        // доступное имя кнопки моргало бы вместе с анимацией.
+                        aria-label={session.title}
                         onClick={() => {
                           setMenuFor(null); // выбор чата закрывает раскрытое меню
                           onPick(session.session_id);
@@ -211,7 +216,10 @@ export function Nav({
                           data-testid={`heat-${session.session_id}`}
                           data-heat={heatLevel(session)}
                         />
-                        <span className="nav__title">{session.title}</span>
+                        <AnimatedTitle
+                          className="nav__title"
+                          text={session.title}
+                        />
                         {busy !== null && (
                           <span className="nav__busy" title={`Запуск ${busy}`}>
                             {busy}

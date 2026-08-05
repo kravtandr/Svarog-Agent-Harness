@@ -1,8 +1,9 @@
-"""Автогенерация названия чата по первому обмену (спека 2026-08-04).
+"""Автогенерация названия чата: черновик по вопросу, уточнение по ответу.
 
-Один best-effort вызов aux-модели по образцу memory/autocapture.py: любой
-сбой модели или её сборки -> None, решение о fallback принимает вызывающий
-(GatewayService._autotitle_bg). Исключения наружу не выходят.
+Спеки 2026-08-04, 2026-08-05. Один best-effort вызов aux-модели по образцу
+memory/autocapture.py: любой сбой модели или её сборки -> None, решение о
+fallback принимает вызывающий (GatewayService._autotitle_bg). Исключения
+наружу не выходят.
 """
 
 import logging
@@ -29,13 +30,25 @@ _SYSTEM = (
 )
 
 
-def needs_autotitle(title: str | None, meta: dict[str, Any] | None) -> bool:
-    """Генерировать ли название: дефолтное имя и не было прошлой попытки.
-
-    Любое значение флага autotitle окончательно (в т.ч. "fallback"):
-    следующие run'ы генерацию не перезапускают.
-    """
+def needs_draft(title: str | None, meta: dict[str, Any] | None) -> bool:
+    """Фаза черновика (спека 2026-08-05): дефолтное имя и попыток не было."""
     if (meta or {}).get("autotitle"):
+        return False
+    return (title or "").strip() in DEFAULT_TITLES
+
+
+def needs_refine(title: str | None, meta: dict[str, Any] | None) -> bool:
+    """Фаза уточнения после ответа (спека 2026-08-05).
+
+    Черновик уточняем, только если его не переименовали вручную (сверка с
+    autotitle_draft). Без черновика — старое условие (дефолтное имя без
+    флага): путь для сессий, где фаза черновика не случилась. done/fallback
+    окончательны.
+    """
+    flag = (meta or {}).get("autotitle")
+    if flag == "draft":
+        return (title or "") == (meta or {}).get("autotitle_draft")
+    if flag:
         return False
     return (title or "").strip() in DEFAULT_TITLES
 

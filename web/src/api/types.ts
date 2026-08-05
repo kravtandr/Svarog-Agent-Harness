@@ -262,3 +262,11 @@ export interface RootInspect {
   // true — без явного согласия run будет отклонён: пикер показывает диалог.
   blocking: boolean;
 }
+
+/** Событие канала /sessions/events (спека 2026-08-05). */
+export interface SessionEvent {
+  type: "session_title";
+  session_id: string;
+  title: string;
+  phase: "draft" | "final";
+}

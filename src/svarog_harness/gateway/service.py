@@ -51,7 +51,7 @@ from svarog_harness.gateway.attachments import (
     store_attachment,
     verify_attachment,
 )
-from svarog_harness.gateway.autotitle import fallback_title, needs_autotitle, title_for
+from svarog_harness.gateway.autotitle import fallback_title, needs_draft, needs_refine, title_for
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.executors import (
     ExecutorOption,
@@ -89,6 +89,7 @@ from svarog_harness.gateway.overrides import (
     prices_from_meta,
     run_meta_for,
 )
+from svarog_harness.gateway.session_events import SessionEventHub
 from svarog_harness.gateway.settings import (
     ConfigDiffView,
     ConfigView,
@@ -214,6 +215,10 @@ class GatewayService:
     cfg: SvarogConfig
     workspace: Path
     events: EventStream = field(default_factory=InProcessEventStream)
+    # Канал событий сессий для WS /sessions/events (спека 2026-08-05):
+    # WorkspaceHub передаёт общий hub всем корням, TenantHub оставляет
+    # per-tenant дефолт — жильцы не видят чужих названий.
+    session_events: SessionEventHub = field(default_factory=SessionEventHub)
     # Колбэк на создание run'а — TenantHub пишет им run_index run→tenant (ADR-0014).
     on_run_created: Callable[[str], None] | None = None
     # Колбэк на создание сессии — WorkspaceHub пишет им session→root
@@ -777,12 +782,74 @@ class GatewayService:
             },
         )
 
+    async def _autotitle_draft_bg(self, session_id: str, task_text: str) -> None:
+        """Черновик названия по одному вопросу (спека 2026-08-05): best-effort.
+
+        Сбой модели -> fallback-обрезка вопроса: что-то осмысленное появляется
+        в сайдбаре сразу, а уточнение после ответа всё равно попробует лучше.
+        """
+        try:
+            if not task_text.strip():
+                return
+
+            async def read(db: AsyncSession) -> bool:
+                session = await db.get(Session, session_id)
+                return session is not None and needs_draft(session.title, session.meta)
+
+            if not await self._read(read):
+                return
+            generated = await title_for(
+                lambda: auxiliary_provider(
+                    self.cfg.models, default_secret_store(self.cfg.secrets.path)
+                ),
+                task_text,
+                "",
+            )
+            draft = generated or fallback_title(task_text)
+            if draft is None:
+                return
+            draft_title: str = draft
+
+            async def write(db: AsyncSession) -> bool:
+                session = await db.get(Session, session_id)
+                if session is None or not needs_draft(session.title, session.meta):
+                    return False  # гонка: быстрое уточнение успело раньше
+                session.title = draft_title
+                # JSON-колонка без MutableDict: только присваивание нового dict.
+                session.meta = {
+                    **(session.meta or {}),
+                    "autotitle": "draft",
+                    "autotitle_draft": draft_title,
+                }
+                await db.commit()
+                return True
+
+            if await self._read(write):
+                self.session_events.publish(
+                    {
+                        "type": "session_title",
+                        "session_id": session_id,
+                        "title": draft_title,
+                        "phase": "draft",
+                    }
+                )
+        except Exception:
+            logger.warning("автоназвание: черновик не удался", exc_info=True)
+            return
+
     async def _autotitle_bg(self, run_id: str, answer: str) -> None:
-        """Автоназвание чата по первому обмену (спека 2026-08-04): best-effort.
+        """Уточнение названия чата после ответа (спека 2026-08-05): best-effort.
 
         Отдельная фоновая задача после run_finished: сбой модели или БД не
-        влияет на run. Флаг meta["autotitle"] делает попытку одноразовой;
-        CLI-runs (title = task) отсекаются проверкой дефолтного названия.
+        влияет на run. done/fallback окончательны; черновик, переименованный
+        вручную (CLI), не перетирается — это решает needs_refine.
+
+        had_draft и текущий title решаются ВНУТРИ write, по свежепрочитанной
+        строке, а не в read до вызова aux-модели: черновик мог появиться,
+        пока aux-вызов уточнения был в полёте (фоновая задача черновика —
+        отдельный таск), и стухший снимок из read увёл бы сбой уточнения в
+        fallback-обрезку поверх уже хорошего названия черновика (ревью
+        задачи 3, 2026-08-05).
         """
         try:
 
@@ -791,7 +858,7 @@ class GatewayService:
                 if run is None:
                     return None
                 session = await db.get(Session, run.session_id)
-                if session is None or not needs_autotitle(session.title, session.meta):
+                if session is None or not needs_refine(session.title, session.meta):
                     return None
                 first = (
                     await db.execute(
@@ -809,34 +876,54 @@ class GatewayService:
             session_id, first_task = found
             if not first_task.strip():
                 return
-            title = await title_for(
+            generated = await title_for(
                 lambda: auxiliary_provider(
                     self.cfg.models, default_secret_store(self.cfg.secrets.path)
                 ),
                 first_task,
                 answer,
             )
-            flag = "done" if title else "fallback"
-            picked = title or fallback_title(first_task)
-            if picked is None:
-                return
-            # mypy не сужает Optional для переменных, захваченных замыканием, —
-            # поэтому в write уходит уже str-копия.
-            final_title: str = picked
 
-            async def write(db: AsyncSession) -> None:
+            async def write(db: AsyncSession) -> tuple[str, bool] | None:
+                # Черновик (_autotitle_draft_bg) и это уточнение пишут в свою
+                # транзакцию независимо; если их записи пересекутся по
+                # времени — last-writer-wins на уровне БД. Окно в
+                # микросекунды, а исход косметический (текст заголовка),
+                # поэтому отдельная блокировка тут избыточна.
                 session = await db.get(Session, session_id)
-                if session is None or not needs_autotitle(session.title, session.meta):
-                    return  # гонка: параллельный run уже назвал
+                if session is None or not needs_refine(session.title, session.meta):
+                    return None  # гонка: параллельный run уже уточнил
+                had_draft = (session.meta or {}).get("autotitle") == "draft"
+                if generated is not None:
+                    final_title, flag = generated, "done"
+                elif had_draft:
+                    # Модель упала, но черновик уже стоит (свежий, не снимок
+                    # из read) — он лучше обрезки.
+                    final_title, flag = session.title or "", "done"
+                else:
+                    fb = fallback_title(first_task)
+                    if fb is None:
+                        return None
+                    final_title, flag = fb, "fallback"
+                changed = (session.title or "") != final_title
                 session.title = final_title
-                # JSON-колонка без MutableDict: изменение фиксируется только
-                # присваиванием нового dict, не мутацией на месте.
+                # JSON-колонка без MutableDict: только присваивание нового dict.
                 session.meta = {**(session.meta or {}), "autotitle": flag}
                 await db.commit()
+                return final_title, changed
 
-            # _read — обёртка with_db и годится и для записи (историческое
-            # имя); отдельного _write нет.
-            await self._read(write)
+            # _read — обёртка with_db и годится и для записи (историческое имя).
+            result = await self._read(write)
+            if result is not None and result[1]:
+                final_title, _ = result
+                self.session_events.publish(
+                    {
+                        "type": "session_title",
+                        "session_id": session_id,
+                        "title": final_title,
+                        "phase": "final",
+                    }
+                )
         except Exception:
             # Автоназвание никогда не роняет фоновую задачу (best-effort, спека).
             logger.warning("автоназвание: фоновая задача не удалась", exc_info=True)
@@ -1130,6 +1217,9 @@ class GatewayService:
                 warm=warm,
             )
         )
+        # Черновик названия по одному вопросу (спека 2026-08-05): не ждёт
+        # ни старта run'а, ни его завершения.
+        self._spawn(self._autotitle_draft_bg(session.id, text))
         return await started
 
     async def get_session(self, session_id: str) -> SessionView:
