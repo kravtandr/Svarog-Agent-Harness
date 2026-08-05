@@ -843,10 +843,17 @@ class GatewayService:
         Отдельная фоновая задача после run_finished: сбой модели или БД не
         влияет на run. done/fallback окончательны; черновик, переименованный
         вручную (CLI), не перетирается — это решает needs_refine.
+
+        had_draft и текущий title решаются ВНУТРИ write, по свежепрочитанной
+        строке, а не в read до вызова aux-модели: черновик мог появиться,
+        пока aux-вызов уточнения был в полёте (фоновая задача черновика —
+        отдельный таск), и стухший снимок из read увёл бы сбой уточнения в
+        fallback-обрезку поверх уже хорошего названия черновика (ревью
+        задачи 3, 2026-08-05).
         """
         try:
 
-            async def read(db: AsyncSession) -> tuple[str, str, str, bool] | None:
+            async def read(db: AsyncSession) -> tuple[str, str] | None:
                 run = await db.get(Run, run_id)
                 if run is None:
                     return None
@@ -861,13 +868,12 @@ class GatewayService:
                         .limit(1)
                     )
                 ).scalar_one_or_none()
-                had_draft = (session.meta or {}).get("autotitle") == "draft"
-                return session.id, first or "", session.title or "", had_draft
+                return session.id, first or ""
 
             found = await self._read(read)
             if found is None:
                 return
-            session_id, first_task, current_title, had_draft = found
+            session_id, first_task = found
             if not first_task.strip():
                 return
             generated = await title_for(
@@ -877,30 +883,34 @@ class GatewayService:
                 first_task,
                 answer,
             )
-            if generated is not None:
-                final_title, flag = generated, "done"
-            elif had_draft:
-                # Модель упала, но черновик уже стоит: он лучше обрезки.
-                final_title, flag = current_title, "done"
-            else:
-                fb = fallback_title(first_task)
-                if fb is None:
-                    return
-                final_title, flag = fb, "fallback"
 
-            async def write(db: AsyncSession) -> bool:
+            async def write(db: AsyncSession) -> tuple[str, bool] | None:
                 session = await db.get(Session, session_id)
                 if session is None or not needs_refine(session.title, session.meta):
-                    return False  # гонка: параллельный run уже уточнил
+                    return None  # гонка: параллельный run уже уточнил
+                had_draft = (session.meta or {}).get("autotitle") == "draft"
+                if generated is not None:
+                    final_title, flag = generated, "done"
+                elif had_draft:
+                    # Модель упала, но черновик уже стоит (свежий, не снимок
+                    # из read) — он лучше обрезки.
+                    final_title, flag = session.title or "", "done"
+                else:
+                    fb = fallback_title(first_task)
+                    if fb is None:
+                        return None
+                    final_title, flag = fb, "fallback"
                 changed = (session.title or "") != final_title
                 session.title = final_title
                 # JSON-колонка без MutableDict: только присваивание нового dict.
                 session.meta = {**(session.meta or {}), "autotitle": flag}
                 await db.commit()
-                return changed
+                return final_title, changed
 
             # _read — обёртка with_db и годится и для записи (историческое имя).
-            if await self._read(write):
+            result = await self._read(write)
+            if result is not None and result[1]:
+                final_title, _ = result
                 self.session_events.publish(
                     {
                         "type": "session_title",

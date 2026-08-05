@@ -1,5 +1,6 @@
 """Автоназвание чатов по содержанию (спека 2026-08-04, 2026-08-05): хук GatewayService."""
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,70 @@ async def test_aux_error_falls_back_to_truncated_question(
     title, meta = await _session_state(service, view.session_id)
     # Черновик = fallback-обрезка; уточнение тоже упало -> черновик остаётся.
     assert title == "Какая столица Франции?"
+    assert meta["autotitle"] == "done"
+    assert [e["phase"] for e in events] == ["draft"]
+
+
+class _RaceProvider(ModelProvider):
+    """Форсирует гонку черновик/уточнение (ревью задачи 3, 2026-08-05).
+
+    Вызов черновика (первый) держится на event'е, пока не отпущен: read
+    уточнения успевает пройти по сессии БЕЗ черновика. Вызов уточнения
+    (второй) сначала отпускает черновик и дожидается, что его фоновая
+    задача реально закоммитила запись (await самой задачи из _tasks), и
+    только потом падает — так «read уточнения раньше write черновика, а
+    aux уточнения падает» гарантированно, а не по случайному тайминиг
+    event loop'а.
+    """
+
+    def __init__(self, service: GatewayService, draft_title: str) -> None:
+        self._service = service
+        self._draft_title = draft_title
+        self.calls = 0
+        self._draft_release = asyncio.Event()
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> CompletionResult:
+        self.calls += 1
+        if self.calls == 1:  # фаза черновика — держим её, пока не разрешим
+            await self._draft_release.wait()
+            return CompletionResult(content=self._draft_title, usage=Usage(1, 1))
+        # Фаза уточнения: отпускаем черновик и ждём, что он реально
+        # закоммитился, прежде чем упасть.
+        self._draft_release.set()
+        current = asyncio.current_task()
+        others = [t for t in self._service._tasks if t is not current and not t.done()]
+        if others:
+            await asyncio.gather(*others, return_exceptions=True)
+        raise RuntimeError("aux недоступна на уточнении")
+
+
+async def test_refine_aux_failure_keeps_generated_draft(
+    service: GatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Черновик успевает приехать в БД между read и write уточнения.
+
+    Сбой aux-модели на уточнении не должен перетереть только что
+    закоммиченный черновик fallback-обрезкой — стухший снимок had_draft из
+    read() был источником этого бага (ревью задачи 3, 2026-08-05).
+    """
+    _patch_agent(monkeypatch, [_final("ответ")])
+    aux = _RaceProvider(service, "Хороший черновик")
+    _patch_title(monkeypatch, aux)
+    events = _spy_events(service)
+
+    view = await service.create_session(title="Новый чат")
+    await service.send_message(view.session_id, "вопрос", None)
+    await service.wait_for_background()
+
+    title, meta = await _session_state(service, view.session_id)
+    # Черновик уже сгенерирован моделью -> сбой уточнения его не портит.
+    assert title == "Хороший черновик"
     assert meta["autotitle"] == "done"
     assert [e["phase"] for e in events] == ["draft"]
 
