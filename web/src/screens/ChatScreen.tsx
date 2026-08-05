@@ -774,13 +774,9 @@ export function ChatScreen({
               )}
               <h2 className="chat__empty-title">
                 {rootBase(workspace) !== null
-                  ? `Что куём в ${rootBase(workspace)}?`
-                  : "Что куём?"}
+                  ? `Что делаем в ${rootBase(workspace)}?`
+                  : "Что делаем?"}
               </h2>
-              <p className="chat__empty-sub">
-                Задача свободным текстом — Сварог заведёт ветку и покажет каждый
-                шаг.
-              </p>
               <div className="chat__seeds">
                 {SEEDS.map((seed) => (
                   <button

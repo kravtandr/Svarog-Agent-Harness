@@ -199,7 +199,7 @@ describe("экран диалога", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText(/что куём/i)).toBeInTheDocument(),
+      expect(screen.getByText(/что делаем/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/нет данных/i)).not.toBeInTheDocument();
   });
@@ -333,7 +333,7 @@ describe("подписка на поток", () => {
       />,
     );
     await waitFor(() =>
-      expect(screen.getByText(/что куём/i)).toBeInTheDocument(),
+      expect(screen.getByText(/что делаем/i)).toBeInTheDocument(),
     );
 
     await userEvent.type(
@@ -1714,7 +1714,7 @@ describe("миниатюры вложений в ленте", () => {
     );
 
     expect(
-      await screen.findByText("Что куём в TaskTracker?"),
+      await screen.findByText("Что делаем в TaskTracker?"),
     ).toBeInTheDocument();
     expect(screen.getByText("TaskTracker")).toBeInTheDocument();
 
@@ -1731,7 +1731,7 @@ describe("миниатюры вложений в ленте", () => {
     });
     render(<ChatScreen {...base} api={client} sessionId="s1" />);
 
-    expect(await screen.findByText("Что куём?")).toBeInTheDocument();
+    expect(await screen.findByText("Что делаем?")).toBeInTheDocument();
     expect(document.querySelector(".chat__ctx")).toBeNull();
   });
 
