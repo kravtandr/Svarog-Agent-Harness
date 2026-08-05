@@ -144,10 +144,9 @@ export function McpScreen({ api }: { api: Api }) {
     }
   };
 
-  // Проверка живости — по клику, а не при открытии вкладки: автоопрос всех
-  // серверов означал бы запуск N процессов при каждом заходе.
   const [probes, setProbes] = useState<Record<string, McpTest | "идёт">>({});
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [openTools, setOpenTools] = useState<string | null>(null);
 
   // Список могли перезагрузить по причине, никак не связанной с этой
   // карточкой: сохранили другой сервер, удалили какой-то другой. Взведённое
@@ -200,6 +199,20 @@ export function McpScreen({ api }: { api: Api }) {
     }
   };
 
+  // Опрос всех серверов при заходе на вкладку. Параллельно, а не по очереди:
+  // восемь серверов на npx/uvx последовательно дали бы десятки секунд, и
+  // индикатор загорался бы по одному. Цена решения известна и принята: каждый
+  // заход поднимает по процессу на сервер, а сломанный сервер стоит полного
+  // таймаута gateway. Опрашиваем только тех, о ком ещё ничего не знаем, —
+  // иначе эффект зациклился бы на собственных записях в probes.
+  useEffect(() => {
+    for (const server of servers) {
+      if (probes[probeKey(server)] === undefined) void probe(server);
+    }
+    // probes намеренно вне зависимостей: он меняется этим же эффектом.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [servers]);
+
   const remove = async (target: string) => {
     // Двухкликовое подтверждение вместо window.confirm: тестируемо и не
     // блокирует вкладку нативным диалогом (как у провайдеров).
@@ -238,10 +251,19 @@ export function McpScreen({ api }: { api: Api }) {
               return (
                 <div key={server.name} className="mcp__card">
                   <div className="mcp__card-head">
-                    {probed !== undefined && probed !== "идёт" && (
+                    {/* Слот состояния занят всегда: лоудер → точка. Иначе имя
+                        сервера прыгало бы вбок в момент ответа. */}
+                    {probed === "идёт" || probed === undefined ? (
+                      <span
+                        className="mcp__spinner"
+                        role="status"
+                        aria-label={`проверяем ${server.name}`}
+                      />
+                    ) : (
                       <span
                         className={`mcp__dot${probed.ok ? "" : " mcp__dot--bad"}`}
-                        aria-hidden="true"
+                        role="status"
+                        aria-label={`${server.name}: ${probed.ok ? "сервер отвечает" : "не отвечает"}`}
                       />
                     )}
                     <span className="mcp__card-name">{server.name}</span>
@@ -263,19 +285,30 @@ export function McpScreen({ api }: { api: Api }) {
                       ))}
                     </div>
                   )}
-                  {probed === "идёт" && (
-                    <p className="field__help">Опрашиваем…</p>
-                  )}
                   {probed !== undefined &&
                     probed !== "идёт" &&
                     (probed.ok ? (
-                      <div className="mcp__chips">
-                        {probed.tools.map((tool) => (
-                          <span key={tool} className="mcp__chip">
-                            {tool}
-                          </span>
-                        ))}
-                      </div>
+                      <>
+                        <p className="mcp__card-count">
+                          {counted(
+                            probed.tools.length,
+                            "инструмент",
+                            "инструмента",
+                            "инструментов",
+                          )}
+                        </p>
+                        {/* Чипы свёрнуты: восемь карточек развернули бы под
+                            две сотни штук, и карточки перестали бы читаться. */}
+                        {openTools === server.name && (
+                          <div className="mcp__chips">
+                            {probed.tools.map((tool) => (
+                              <span key={tool} className="mcp__chip">
+                                {tool}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     ) : (
                       <p className="field__error">{probed.error}</p>
                     ))}
@@ -284,11 +317,17 @@ export function McpScreen({ api }: { api: Api }) {
                       type="button"
                       className="btn btn--small"
                       aria-label={`Инструменты ${server.name}`}
-                      // Каждый опрос поднимает настоящий процесс сервера —
-                      // ровно поэтому проверка сделана по клику, а не при
-                      // открытии вкладки. Повторный клик плодил бы процессы.
-                      disabled={probed === "идёт"}
-                      onClick={() => void probe(server)}
+                      aria-expanded={openTools === server.name}
+                      // Ничего не запрашивает: опрос уже прошёл при заходе на
+                      // вкладку, кнопка лишь разворачивает его результат.
+                      disabled={
+                        probed === undefined || probed === "идёт" || !probed.ok
+                      }
+                      onClick={() =>
+                        setOpenTools(
+                          openTools === server.name ? null : server.name,
+                        )
+                      }
                     >
                       Инструменты
                     </button>
@@ -335,6 +374,18 @@ export function McpScreen({ api }: { api: Api }) {
             </p>
           )}
         </div>
+
+        {/* Каталог прячется, как только в поле что-то есть, — без выхода
+            обратно это тупик: выбрал пресет и не вернулся к списку. */}
+        {paste.trim() !== "" && (
+          <button
+            type="button"
+            className="btn btn--small mcp__back"
+            onClick={() => editPaste("")}
+          >
+            К каталогу
+          </button>
+        )}
 
         {paste.trim() === "" && (
           <div className="mcp__presets">

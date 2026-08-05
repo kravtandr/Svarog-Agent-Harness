@@ -462,3 +462,106 @@ describe("вкладка MCP: подключённые серверы", () => {
     expect(screen.queryByText("create_issue")).not.toBeInTheDocument();
   });
 });
+
+describe("вкладка MCP: автоопрос при заходе", () => {
+  const server = {
+    name: "github",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    env_refs: [],
+    risk: "high",
+  };
+  const second = { ...server, name: "fetch", command: "uvx", args: ["f"] };
+
+  it("опрашивает все серверы сама и зажигает зелёный", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server, second]),
+      mcpTest: vi
+        .fn()
+        .mockResolvedValue({ ok: true, tools: ["a"], error: null }),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getAllByLabelText(/сервер отвечает/)).toHaveLength(2),
+    );
+    expect(api.mcpTest).toHaveBeenCalledTimes(2);
+  });
+
+  it("пока опрос идёт — лоудер, а не пустое место", async () => {
+    let release: (v: unknown) => void = () => {};
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      ),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("проверяем github")).toBeInTheDocument(),
+    );
+    release({ ok: true, tools: ["a"], error: null });
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("github: сервер отвечает"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("недоступный сервер горит красным с текстом ошибки", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi
+        .fn()
+        .mockResolvedValue({ ok: false, tools: [], error: "npx не найден" }),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("github: не отвечает")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("npx не найден")).toBeInTheDocument();
+  });
+
+  it("«Инструменты» разворачивает уже полученное, не опрашивая заново", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi.fn().mockResolvedValue({
+        ok: true,
+        tools: ["create_issue"],
+        error: null,
+      }),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("github: сервер отвечает"),
+      ).toBeInTheDocument(),
+    );
+    // Чипы свёрнуты: восемь карточек развернули бы под две сотни штук.
+    expect(screen.queryByText("create_issue")).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Инструменты github" }),
+    );
+    expect(screen.getByText("create_issue")).toBeInTheDocument();
+    expect(api.mcpTest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("вкладка MCP: возврат к каталогу", () => {
+  it("«К каталогу» очищает поле и возвращает пресеты", async () => {
+    render(<McpScreen api={fakeApi()} />);
+    await userEvent.click(screen.getByRole("button", { name: /github/ }));
+    expect(screen.getByLabelText("Команда или JSON")).toHaveValue(
+      "npx -y @modelcontextprotocol/server-github",
+    );
+    // Каталог скрыт, пока в поле что-то есть — отсюда ощущение тупика.
+    expect(screen.queryByRole("button", { name: /playwright/ })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "К каталогу" }));
+    expect(screen.getByLabelText("Команда или JSON")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: /playwright/ }),
+    ).toBeInTheDocument();
+  });
+});
