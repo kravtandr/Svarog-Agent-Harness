@@ -1,16 +1,6 @@
 .mcp__body {
   max-width: 1100px;
 }
-.mcp__risk {
-  color: var(--faint);
-}
-.mcp__command {
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 0.86em;
-}
-.mcp__remove {
-  margin-left: 12px;
-}
 .mcp__actions {
   display: flex;
   gap: 10px;
@@ -120,4 +110,55 @@
   color: var(--muted);
   font-family: var(--mono);
   font-size: 11.5px;
+}
+
+.mcp__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  margin: 12px 0 26px;
+}
+.mcp__card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.mcp__card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.mcp__card-name {
+  font-size: 14px;
+}
+.mcp__card-risk {
+  margin-left: auto;
+  font-size: 11.5px;
+}
+.mcp__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.mcp__dot--bad {
+  background: var(--bad);
+}
+.mcp__command {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp__card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 4px;
 }

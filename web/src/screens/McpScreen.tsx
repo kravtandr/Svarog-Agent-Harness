@@ -8,6 +8,8 @@ import { MCP_PRESETS } from "../model/mcpPresets";
 import {
   MCP_RISK_CONSEQUENCE,
   RISK_LEVELS,
+  riskClass,
+  riskLabel,
   type RiskLevel,
 } from "../model/risk";
 import "./SettingsScreen.css";
@@ -112,9 +114,47 @@ export function McpScreen({ api }: { api: Api }) {
     }
   };
 
+  // Проверка живости — по клику, а не при открытии вкладки: автоопрос всех
+  // серверов означал бы запуск N процессов при каждом заходе.
+  const [probes, setProbes] = useState<Record<string, McpTest | "идёт">>({});
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const probe = async (server: McpServer) => {
+    setProbes((current) => ({ ...current, [server.name]: "идёт" }));
+    try {
+      const result = await api.mcpTest({
+        command: server.command,
+        args: server.args,
+        env_refs: server.env_refs,
+      });
+      setProbes((current) => ({ ...current, [server.name]: result }));
+    } catch (exc: unknown) {
+      setProbes((current) => ({
+        ...current,
+        [server.name]: {
+          ok: false,
+          tools: [],
+          error: exc instanceof ApiError ? exc.message : "проверка не удалась",
+        },
+      }));
+    }
+  };
+
   const remove = async (target: string) => {
+    // Двухкликовое подтверждение вместо window.confirm: тестируемо и не
+    // блокирует вкладку нативным диалогом (как у провайдеров).
+    if (confirming !== target) {
+      setConfirming(target);
+      return;
+    }
+    setConfirming(null);
     try {
       await api.mcpRemove(target);
+      setProbes((current) => {
+        const next = { ...current };
+        delete next[target];
+        return next;
+      });
       reload();
     } catch (exc: unknown) {
       setStatus(
@@ -131,28 +171,88 @@ export function McpScreen({ api }: { api: Api }) {
           Инструменты серверов проходят Policy Engine: по умолчанию каждый вызов
           требует подтверждения.
         </p>
-        {servers.length === 0 && (
-          <p className="field__help">Пока не подключено ни одного сервера.</p>
-        )}
-        {servers.map((server) => (
-          <div key={server.name} className="secret">
-            <span>
-              {server.name}
-              <span className="mcp__risk"> · {server.risk}</span>
-            </span>
-            <span className="secret__state mcp__command">
-              {[server.command, ...server.args].join(" ")}
-            </span>
-            <button
-              type="button"
-              className="btn mcp__remove"
-              aria-label={`Удалить ${server.name}`}
-              onClick={() => void remove(server.name)}
-            >
-              Удалить
-            </button>
+        {servers.length === 0 ? (
+          <p className="field__help">
+            Пока не подключено ни одного сервера — выберите готовый ниже или
+            вставьте свою команду.
+          </p>
+        ) : (
+          <div className="mcp__grid">
+            {servers.map((server) => {
+              const probed = probes[server.name];
+              return (
+                <div key={server.name} className="mcp__card">
+                  <div className="mcp__card-head">
+                    {probed !== undefined && probed !== "идёт" && (
+                      <span
+                        className={`mcp__dot${probed.ok ? "" : " mcp__dot--bad"}`}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <span className="mcp__card-name">{server.name}</span>
+                    <span
+                      className={`mcp__card-risk ${riskClass(server.risk)}`}
+                    >
+                      {riskLabel(server.risk)}
+                    </span>
+                  </div>
+                  <div className="mcp__command">
+                    {[server.command, ...server.args].join(" ")}
+                  </div>
+                  {server.env_refs.length > 0 && (
+                    <div className="mcp__chips">
+                      {server.env_refs.map((ref) => (
+                        <span key={ref} className="mcp__chip">
+                          {ref}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {probed === "идёт" && (
+                    <p className="field__help">Опрашиваем…</p>
+                  )}
+                  {probed !== undefined &&
+                    probed !== "идёт" &&
+                    (probed.ok ? (
+                      <div className="mcp__chips">
+                        {probed.tools.map((tool) => (
+                          <span key={tool} className="mcp__chip">
+                            {tool}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="field__error">{probed.error}</p>
+                    ))}
+                  <div className="mcp__card-actions">
+                    <button
+                      type="button"
+                      className="btn btn--small"
+                      aria-label={`Инструменты ${server.name}`}
+                      onClick={() => void probe(server)}
+                    >
+                      Инструменты
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--small"
+                      aria-label={
+                        confirming === server.name
+                          ? "Точно удалить?"
+                          : `Удалить ${server.name}`
+                      }
+                      onClick={() => void remove(server.name)}
+                    >
+                      {confirming === server.name
+                        ? "Точно удалить?"
+                        : "Удалить"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        ))}
+        )}
 
         <h3 className="settings__title">Подключить сервер</h3>
         <div className="field">

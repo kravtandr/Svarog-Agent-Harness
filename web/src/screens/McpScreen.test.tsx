@@ -186,3 +186,86 @@ describe("вкладка MCP: подключение", () => {
     expect(screen.getByText(/не отключается ни правилом/)).toBeInTheDocument();
   });
 });
+
+describe("вкладка MCP: подключённые серверы", () => {
+  const server = {
+    name: "github",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    env_refs: ["GITHUB_TOKEN"],
+    risk: "high",
+  };
+
+  it("показывает карточку с командой, риском и секретами", async () => {
+    const api = fakeApi({ mcpList: vi.fn().mockResolvedValue([server]) });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    expect(
+      screen.getByText("npx -y @modelcontextprotocol/server-github"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("высокий риск")).toBeInTheDocument();
+    expect(screen.getByText("GITHUB_TOKEN")).toBeInTheDocument();
+  });
+
+  it("«Инструменты» опрашивает именно этот сервер и рисует чипы", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi.fn().mockResolvedValue({
+        ok: true,
+        tools: ["create_issue", "search_code"],
+        error: null,
+      }),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Инструменты github" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("create_issue")).toBeInTheDocument(),
+    );
+    expect(api.mcpTest).toHaveBeenCalledWith({
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      env_refs: ["GITHUB_TOKEN"],
+    });
+  });
+
+  it("мёртвый сервер показывает ошибку, а не пустой список", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi
+        .fn()
+        .mockResolvedValue({ ok: false, tools: [], error: "npx не найден" }),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Инструменты github" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("npx не найден")).toBeInTheDocument(),
+    );
+  });
+
+  it("не опрашивает серверы сама при открытии вкладки", async () => {
+    const api = fakeApi({ mcpList: vi.fn().mockResolvedValue([server]) });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    expect(api.mcpTest).not.toHaveBeenCalled();
+  });
+
+  it("удаляет сервер после повторного клика", async () => {
+    const api = fakeApi({ mcpList: vi.fn().mockResolvedValue([server]) });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Удалить github" }),
+    );
+    expect(api.mcpRemove).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    );
+    await waitFor(() => expect(api.mcpRemove).toHaveBeenCalledWith("github"));
+  });
+});
