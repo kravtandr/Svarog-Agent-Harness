@@ -61,6 +61,9 @@ export function McpScreen({ api }: { api: Api }) {
   const runTest = async () => {
     setTesting(true);
     setTest(null);
+    // Новая проверка отменяет прежнее согласие на «всё равно подключить»:
+    // оно было выдано под конкретный провал, а не под кнопку вообще.
+    setForcing(false);
     try {
       setTest(
         await api.mcpTest({
