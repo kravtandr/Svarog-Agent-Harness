@@ -630,6 +630,27 @@ def create_app(
         # Стрим завершился (run_finished в истории/живой) — закрываем соединение.
         await websocket.close()
 
+    @app.websocket("/sessions/events")
+    async def session_events(websocket: WebSocket) -> None:
+        """Пуш обновлений названий чатов (спека 2026-08-05).
+
+        Канал без истории: начальное состояние клиент берёт из GET /sessions.
+        Маршрутизация по id не нужна: в WorkspaceHub hub общий на все корни,
+        в multi-tenant authenticate уже вернул сервис тенанта с его hub'ом.
+        """
+        query_token = websocket.query_params.get("token")
+        authorization = websocket.headers.get("authorization")
+        service = resolver.authenticate(authorization, query_token=query_token)
+        if service is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        await websocket.accept()
+        try:
+            async for event in service.session_events.subscribe():
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
+
     @app.get("/skills", response_model=list[SkillCard])
     async def list_skills(service: ServiceDep) -> list[SkillCard]:
         return service.list_skills()

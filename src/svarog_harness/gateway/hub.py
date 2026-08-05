@@ -38,6 +38,7 @@ from svarog_harness.gateway.models import (
 )
 from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 from svarog_harness.gateway.service import GatewayService
+from svarog_harness.gateway.session_events import SessionEventHub
 from svarog_harness.tenant import TenantRegistry
 from svarog_harness.tenant.models import TenantContext
 from svarog_harness.tenant.quota import check_quota, effective_quota
@@ -235,6 +236,9 @@ class WorkspaceHub:
     registry: WorkspaceRootsRegistry
     bearer_token: str | None = None
     _services: dict[Path, GatewayService] = field(default_factory=dict, init=False)
+    # Один канал событий сессий на все корни (спека 2026-08-05): Nav
+    # показывает сессии всех корней — и события должны приходить все.
+    session_events: SessionEventHub = field(default_factory=SessionEventHub, init=False)
 
     def __post_init__(self) -> None:
         self.default_root = self.default_root.expanduser().resolve()
@@ -246,6 +250,7 @@ class WorkspaceHub:
         return GatewayService(
             cfg,
             root,
+            session_events=self.session_events,
             on_run_created=lambda run_id: self.registry.record_run(run_id, root),
             on_session_created=lambda session_id: self.registry.record_session(session_id, root),
         )
