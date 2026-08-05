@@ -415,14 +415,19 @@ describe("экран настроек", () => {
       await screen.findByRole("button", { name: "Провайдеры" }),
     );
 
-    const buttons = await screen.findAllByRole("button", { name: "Проверить" });
-    await userEvent.click(buttons[0]);
+    // «Ещё» — общий на все карточки: раскрыт только один провайдер за раз,
+    // так что проверяем по очереди, а не два «Проверить» разом.
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Ещё local" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Проверить" }));
     expect(
       await screen.findByText(/доступен · 317 моделей/),
     ).toBeInTheDocument();
     expect(api.providerCheck).toHaveBeenCalledWith("local");
 
-    await userEvent.click(buttons[1]);
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    await userEvent.click(screen.getByRole("button", { name: "Проверить" }));
     expect(
       await screen.findByText(/провайдер ответил 401/),
     ).toBeInTheDocument();
@@ -435,6 +440,9 @@ describe("экран настроек", () => {
       await screen.findByRole("button", { name: "Провайдеры" }),
     );
 
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Ещё local" }),
+    );
     const renames = await screen.findAllByRole("button", {
       name: "Переименовать",
     });
@@ -458,6 +466,9 @@ describe("экран настроек", () => {
       await screen.findByRole("button", { name: "Провайдеры" }),
     );
 
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Ещё local" }),
+    );
     const renames = await screen.findAllByRole("button", {
       name: "Переименовать",
     });
@@ -478,6 +489,9 @@ describe("экран настроек", () => {
       await screen.findByRole("button", { name: "Провайдеры" }),
     );
 
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Ещё groq" }),
+    );
     // «Удалить» есть только у не-дефолтного.
     const remove = await screen.findByRole("button", { name: "Удалить" });
     await userEvent.click(remove);
@@ -490,22 +504,73 @@ describe("экран настроек", () => {
     );
   });
 
-  it("«Изменить» заполняет форму значениями провайдера", async () => {
-    const api = fakeApi({ providers: twoProviders() });
+  it("«Изменить» правит провайдера в его же карточке, не трогая форму добавления", async () => {
+    const api = baseApi({
+      config: vi.fn().mockResolvedValue(config),
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "groq",
+          base_url: "https://api.groq.com/openai/v1",
+          model: "llama-3.3-70b",
+          is_default: false,
+        },
+      ]),
+    });
     render(<SettingsScreen api={api} />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Провайдеры" }),
     );
+    await waitFor(() => expect(screen.getByText("groq")).toBeInTheDocument());
 
-    const edits = await screen.findAllByRole("button", { name: "Изменить" });
-    await userEvent.click(edits[1]);
-    expect(screen.getByLabelText("Имя")).toHaveValue("groq");
-    expect(screen.getByLabelText("Base URL (с /v1)")).toHaveValue(
-      "https://api.groq.com/openai/v1",
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    await userEvent.click(screen.getByRole("button", { name: "Изменить" }));
+
+    // Форма добавления осталась пустой — контекст не уехал вниз экрана.
+    expect(screen.getByLabelText("Имя")).toHaveValue("");
+    expect(screen.getByLabelText("Модель groq")).toHaveValue("llama-3.3-70b");
+
+    await userEvent.clear(screen.getByLabelText("Модель groq"));
+    await userEvent.type(screen.getByLabelText("Модель groq"), "llama-3.1-8b");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить groq" }),
     );
-    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue("ll");
-    // Ключ не подставляется: пустое поле = не менять.
-    expect(screen.getByLabelText("API-ключ (опционально)")).toHaveValue("");
+    await waitFor(() =>
+      expect(api.addProvider).toHaveBeenCalledWith({
+        name: "groq",
+        base_url: "https://api.groq.com/openai/v1",
+        model: "llama-3.1-8b",
+      }),
+    );
+  });
+
+  it("редкие действия провайдера спрятаны за «Ещё»", async () => {
+    const api = baseApi({
+      config: vi.fn().mockResolvedValue(config),
+      providers: vi.fn().mockResolvedValue([
+        {
+          name: "groq",
+          base_url: "https://api.groq.com/openai/v1",
+          model: "llama-3.3-70b",
+          is_default: false,
+        },
+      ]),
+    });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+    await waitFor(() => expect(screen.getByText("groq")).toBeInTheDocument());
+
+    expect(
+      screen.queryByRole("button", { name: "Переименовать" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    expect(
+      screen.getByRole("button", { name: "Переименовать" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Проверить" }),
+    ).toBeInTheDocument();
   });
 
   it("сообщает про restart_required при сохранении провайдера", async () => {

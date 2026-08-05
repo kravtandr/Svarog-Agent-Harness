@@ -265,14 +265,38 @@ function ProvidersPane({ api }: { api: Api }) {
     }
   };
 
-  const startEdit = (card: ProviderCard) => {
-    setName(card.name);
-    setBaseUrl(card.base_url);
-    setModel(card.model);
-    setApiKey("");
-    setStatus(
-      `Правьте форму ниже — «Сохранить провайдера» обновит «${card.name}». Пустой ключ не меняется.`,
-    );
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{
+    name: string;
+    baseUrl: string;
+    model: string;
+    apiKey: string;
+  } | null>(null);
+
+  // Правка существующего идёт тем же addProvider, что и добавление: бэкенд
+  // различает их по имени, отдельного эндпоинта нет.
+  const submitEdit = async () => {
+    if (editing === null) return;
+    setStatus(null);
+    try {
+      const diff = await api.addProvider({
+        name: editing.name,
+        base_url: editing.baseUrl.trim(),
+        model: editing.model.trim(),
+        ...(editing.apiKey.trim() ? { api_key: editing.apiKey.trim() } : {}),
+      });
+      applied(diff, `Провайдер «${editing.name}» обновлён.`);
+      setEditing(null);
+      setOpenCatalog(null);
+      setCatalogs({});
+      reload();
+    } catch (exc: unknown) {
+      setStatus(
+        exc instanceof ApiError
+          ? exc.message
+          : "Не удалось сохранить провайдера.",
+      );
+    }
   };
 
   const submitRename = async () => {
@@ -472,6 +496,28 @@ function ProvidersPane({ api }: { api: Api }) {
                 <button
                   type="button"
                   className="btn btn--small"
+                  onClick={() => toggleCatalog(card.name)}
+                >
+                  {openCatalog === card.name ? "Скрыть модели" : "Модели"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--small"
+                  aria-label={`Ещё ${card.name}`}
+                  aria-expanded={expanded === card.name}
+                  onClick={() =>
+                    setExpanded(expanded === card.name ? null : card.name)
+                  }
+                >
+                  ⋯
+                </button>
+              </span>
+            </div>
+            {expanded === card.name && (
+              <div className="provider__more">
+                <button
+                  type="button"
+                  className="btn btn--small"
                   onClick={() => void runCheck(card.name)}
                 >
                   Проверить
@@ -479,7 +525,14 @@ function ProvidersPane({ api }: { api: Api }) {
                 <button
                   type="button"
                   className="btn btn--small"
-                  onClick={() => startEdit(card)}
+                  onClick={() =>
+                    setEditing({
+                      name: card.name,
+                      baseUrl: card.base_url,
+                      model: card.model,
+                      apiKey: "",
+                    })
+                  }
                 >
                   Изменить
                 </button>
@@ -501,15 +554,79 @@ function ProvidersPane({ api }: { api: Api }) {
                     {confirming === card.name ? "Точно удалить?" : "Удалить"}
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="btn btn--small"
-                  onClick={() => toggleCatalog(card.name)}
-                >
-                  {openCatalog === card.name ? "Скрыть модели" : "Модели"}
-                </button>
-              </span>
-            </div>
+              </div>
+            )}
+            {editing !== null && editing.name === card.name && (
+              <div className="provider__edit">
+                <div className="field">
+                  <label
+                    className="field__label"
+                    htmlFor={`edit-url-${card.name}`}
+                  >
+                    Base URL {card.name}
+                  </label>
+                  <input
+                    id={`edit-url-${card.name}`}
+                    className="field__control"
+                    value={editing.baseUrl}
+                    onChange={(e) =>
+                      setEditing({ ...editing, baseUrl: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label
+                    className="field__label"
+                    htmlFor={`edit-model-${card.name}`}
+                  >
+                    Модель {card.name}
+                  </label>
+                  <input
+                    id={`edit-model-${card.name}`}
+                    className="field__control"
+                    value={editing.model}
+                    onChange={(e) =>
+                      setEditing({ ...editing, model: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label
+                    className="field__label"
+                    htmlFor={`edit-key-${card.name}`}
+                  >
+                    API-ключ {card.name}
+                  </label>
+                  <p className="field__help">Пустой ключ не меняется.</p>
+                  <input
+                    id={`edit-key-${card.name}`}
+                    className="field__control"
+                    type="password"
+                    value={editing.apiKey}
+                    onChange={(e) =>
+                      setEditing({ ...editing, apiKey: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="provider__more">
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    aria-label={`Сохранить ${card.name}`}
+                    onClick={() => void submitEdit()}
+                  >
+                    Сохранить
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    onClick={() => setEditing(null)}
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            )}
             {checks[card.name] !== undefined && (
               <p className="field__help">{checks[card.name]}</p>
             )}
@@ -538,7 +655,7 @@ function ProvidersPane({ api }: { api: Api }) {
           </div>
         );
       })}
-      <h3 className="settings__title">Добавить / обновить</h3>
+      <h3 className="settings__title">Добавить провайдера</h3>
       <div className="field">
         <label className="field__label" htmlFor="prov-name">
           Имя

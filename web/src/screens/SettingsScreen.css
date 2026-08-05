@@ -238,6 +238,25 @@
   white-space: nowrap;
 }
 
+/* Раскрывающийся блок, не поповер: поповер требует управления фокусом,
+   Escape и клика вне — цена, которую незачем платить ради четырёх кнопок. */
+.provider__more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 0;
+}
+.provider__edit {
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.provider__edit .field {
+  margin-bottom: 14px;
+}
+
 .catalog {
   max-width: 620px;
   margin: 8px 0 14px;
