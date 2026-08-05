@@ -196,6 +196,7 @@ export function App({ api = defaultApi }: { api?: Api } = {}) {
           // активной сессии, как и настройки: конфиг корня serve может не
           // знать провайдера, добавленного для этого проекта.
           configApi={scopedApi}
+          workspace={active?.workspace ?? null}
           sessionId={activeId}
           ensureSession={ensureSession}
           loading={loading}

@@ -199,7 +199,7 @@ describe("экран диалога", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
+      expect(screen.getByText(/что куём/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/нет данных/i)).not.toBeInTheDocument();
   });
@@ -333,7 +333,7 @@ describe("подписка на поток", () => {
       />,
     );
     await waitFor(() =>
-      expect(screen.getByText(/поставьте задачу/i)).toBeInTheDocument(),
+      expect(screen.getByText(/что куём/i)).toBeInTheDocument(),
     );
 
     await userEvent.type(
@@ -1697,6 +1697,42 @@ describe("миниатюры вложений в ленте", () => {
     expect(saved.provider).toBe("LMStudio");
     expect(saved.model).toBe("q");
     window.localStorage.clear();
+  });
+
+  it("пустой чат: чип папки, заголовок с её именем и затравка в композер", async () => {
+    const client = api({
+      sessionThread: () =>
+        Promise.resolve({ session_id: "s1", title: "Новый чат", items: [] }),
+    });
+    render(
+      <ChatScreen
+        {...base}
+        api={client}
+        sessionId="s1"
+        workspace="/home/u/proj/TaskTracker"
+      />,
+    );
+
+    expect(
+      await screen.findByText("Что куём в TaskTracker?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("TaskTracker")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Осмотрись/ }));
+    expect(screen.getByRole("combobox", { name: /написать/i })).toHaveValue(
+      "Осмотрись и расскажи, как устроен этот проект",
+    );
+  });
+
+  it("пустой чат без папки — общий заголовок, чипа нет", async () => {
+    const client = api({
+      sessionThread: () =>
+        Promise.resolve({ session_id: "s1", title: "Новый чат", items: [] }),
+    });
+    render(<ChatScreen {...base} api={client} sessionId="s1" />);
+
+    expect(await screen.findByText("Что куём?")).toBeInTheDocument();
+    expect(document.querySelector(".chat__ctx")).toBeNull();
   });
 
   it("провайдеры и исполнители читаются через configApi воркспейса сессии, а не корня serve", async () => {

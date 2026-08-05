@@ -14,9 +14,10 @@ import type {
   SandboxOption,
   SlashCommand,
 } from "../api/types";
-import { Composer } from "../components/Composer";
+import { Composer, type ComposerHandle } from "../components/Composer";
 import { Gate } from "../components/Gate";
 import { Markdown } from "../components/Markdown";
+import { rootBase } from "../components/Nav";
 import { ToolCalls } from "../components/ToolCalls";
 import { parseCommand, type ParsedCommand } from "../model/completion";
 import { loadPrefs, savePref } from "../model/composerPrefs";
@@ -120,11 +121,32 @@ function groupItems(items: ThreadItem[]): Entry[] {
   return grouped;
 }
 
+/** Затравки пустого чата (вариант C, 05.08.2026): клик подставляет текст
+    в композер — человек правит и отправляет сам, ничего не уходит молча. */
+const SEEDS: { label: string; hint: string; prompt: string }[] = [
+  {
+    label: "Осмотрись",
+    hint: "расскажи, как устроен проект",
+    prompt: "Осмотрись и расскажи, как устроен этот проект",
+  },
+  {
+    label: "Почини тест",
+    hint: "прогони сьют и разберись с падающим",
+    prompt: "Прогони тесты и почини падающий",
+  },
+  {
+    label: "Добавь фичу",
+    hint: "опиши словами — получишь дифф",
+    prompt: "Добавь фичу: ",
+  },
+];
+
 export function ChatScreen({
   api,
   configApi = api,
   sessionId,
   ensureSession,
+  workspace = null,
   loading = false,
   error = null,
   baseUrl = "",
@@ -141,6 +163,8 @@ export function ChatScreen({
       сервисе корня. */
   configApi?: Api;
   sessionId: string | null;
+  /** Папка активной сессии — для чипа и заголовка пустого чата. */
+  workspace?: string | null;
   /** Создаёт сессию, если её ещё нет, и возвращает её id. */
   ensureSession: () => Promise<string>;
   loading?: boolean;
@@ -226,6 +250,7 @@ export function ChatScreen({
   // сверяет эпоху и не кладёт путь из workspace прошлой сессии в
   // attachments уже новой.
   const sessionEpoch = useRef(0);
+  const composer = useRef<ComposerHandle>(null);
 
   useEffect(() => {
     configApi
@@ -708,11 +733,59 @@ export function ChatScreen({
           {shown === null && loading && (
             <p className="chat__hint">Загружаем сессии…</p>
           )}
-          {/* Пустой экран — приглашение к действию, а не «нет данных». */}
+          {/* Пустой экран — приглашение к действию, а не «нет данных»:
+              чип папки (Сварог знает, где работает), заголовок и затравки,
+              подставляющие текст в композер (вариант C, 05.08.2026). */}
           {shown === null && !loading && items.length === 0 && (
-            <p className="chat__hint">
-              Поставьте задачу — Сварог заведёт ветку и покажет каждый свой шаг.
-            </p>
+            <div className="chat__empty">
+              <svg
+                className="chat__spark"
+                width="30"
+                height="30"
+                viewBox="0 0 28 28"
+                aria-hidden="true"
+              >
+                <path
+                  d="M14 3l2.2 5.6L22 11l-5.8 2.4L14 19l-2.2-5.6L6 11l5.8-2.4L14 3z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M22.5 18.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1z"
+                  fill="currentColor"
+                  opacity="0.7"
+                />
+              </svg>
+              {rootBase(workspace) !== null && (
+                <div className="chat__ctx" title={workspace ?? undefined}>
+                  {rootBase(workspace)}
+                </div>
+              )}
+              <h2 className="chat__empty-title">
+                {rootBase(workspace) !== null
+                  ? `Что куём в ${rootBase(workspace)}?`
+                  : "Что куём?"}
+              </h2>
+              <p className="chat__empty-sub">
+                Задача свободным текстом — Сварог заведёт ветку и покажет каждый
+                шаг.
+              </p>
+              <div className="chat__seeds">
+                {SEEDS.map((seed) => (
+                  <button
+                    key={seed.label}
+                    type="button"
+                    className="chat__seed"
+                    onClick={() => composer.current?.insert(seed.prompt)}
+                  >
+                    <b>{seed.label}</b>
+                    {seed.hint}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
           {groupItems(items).map((entry) => {
             if (entry.kind === "calls")
@@ -806,6 +879,7 @@ export function ChatScreen({
         </p>
       )}
       <Composer
+        insertRef={composer}
         onSend={(text, atts) => void send(text, atts)}
         uploading={pendingUploads > 0}
         busy={running}

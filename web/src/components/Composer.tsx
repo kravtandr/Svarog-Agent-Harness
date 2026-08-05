@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState } from "react";
 
 import type {
   Attachment,
@@ -90,7 +90,14 @@ function UpIcon() {
   );
 }
 
+/** Императивная ручка композера: затравки пустого чата подставляют текст
+    в поле, не поднимая владение текстом наверх (оно остаётся у Composer). */
+export interface ComposerHandle {
+  insert: (text: string) => void;
+}
+
 export function Composer({
+  insertRef,
   onSend,
   uploading = false,
   busy = false,
@@ -113,6 +120,9 @@ export function Composer({
   onAttach,
   onRemoveAttachment,
 }: {
+  /** Ручка для затравок пустого чата (ChatScreen): insert() подставляет
+      текст в поле и ставит курсор в конец. */
+  insertRef?: React.Ref<ComposerHandle>;
   onSend: (text: string, attachments: string[]) => void;
   /** Пока хоть одна загрузка вложения не ответила — сервер ещё не отдал
       путь для неё, и отправка сообщения без него ушла бы молча без файла
@@ -171,6 +181,14 @@ export function Composer({
   // применит новое value — раньше вызов просто не найдёт нужной позиции).
   const pendingCaret = useRef<number | null>(null);
   const fileRequest = useRef(0);
+
+  useImperativeHandle(insertRef, () => ({
+    insert: (value: string) => {
+      setText(value);
+      pendingCaret.current = value.length;
+      field.current?.focus();
+    },
+  }));
 
   useEffect(() => {
     if (!picking) return;
