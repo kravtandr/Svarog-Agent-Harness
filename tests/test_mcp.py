@@ -312,16 +312,20 @@ async def test_failed_connect_leaves_no_orphaned_transport() -> None:
     """
     import gc
 
-    from mcp.shared.exceptions import McpError
+    from mcp.shared import exceptions as sdk_exceptions
 
     from svarog_harness.config.schema import MCPServerConfig
     from svarog_harness.mcp.integration import StdioMCPBackend
 
+    # Тип исключения задаёт SDK: connect() пробрасывает его как есть. В mcp 2.0
+    # `McpError` переименован в `MCPError`, поэтому имя ищем, а не фиксируем —
+    # иначе тест сломается на апгрейде SDK, ничего не сказав о поведении.
+    sdk_error = getattr(sdk_exceptions, "McpError", None) or sdk_exceptions.MCPError
+
     # `true` спавнится успешно и сразу выходит: транспорт открыт, initialize
     # падает. Несуществующий бинарь эту ветку не проверяет — он падает раньше.
-    # Тип исключения задаёт SDK: connect() пробрасывает его как есть.
     backend = StdioMCPBackend("probe", MCPServerConfig(command="true", args=[]))
-    with pytest.raises(McpError):
+    with pytest.raises(sdk_error):
         await backend.connect()
 
     assert backend._stack is None, "стек транспорта остался открытым после отказа"
