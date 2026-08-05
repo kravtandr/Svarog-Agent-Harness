@@ -249,12 +249,16 @@ describe("вкладка MCP: подключение", () => {
 });
 
 describe("вкладка MCP: раскладка", () => {
-  it("тело вкладки не делит класс раскладки с Настройками", () => {
+  it("тело вкладки не делит класс раскладки с Настройками", async () => {
     // .settings__body — flex-колонка ради полосы диффа под контентом. На
     // этой вкладке нет ни .settings__col, ни диффа, и общий класс делал
     // каждый прямой потомок flex-элементом во всю ширину — так кнопка
     // «Уточнить» оказалась растянутой на весь экран.
-    const { container } = render(<McpScreen api={fakeApi()} />);
+    const api = fakeApi();
+    const { container } = render(<McpScreen api={api} />);
+    // Дожидаемся загрузки списка: без этого setServers прилетает уже после
+    // конца теста и React ругается на обновление вне act().
+    await waitFor(() => expect(api.mcpList).toHaveBeenCalled());
     expect(container.querySelector(".mcp__body")).not.toBeNull();
     expect(container.querySelector(".settings__body")).toBeNull();
   });
