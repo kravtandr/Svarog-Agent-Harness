@@ -728,7 +728,16 @@ export function ChatScreen({
             el.scrollHeight - el.scrollTop - el.clientHeight < 40;
         }}
       >
-        <div className="chat__col">
+        <div
+          // Пустой чат центрируется по вертикали (margin: auto), лента —
+          // прижата к низу как раньше: приглашение не должно жаться к полю
+          // ввода.
+          className={`chat__col${
+            shown === null && !loading && items.length === 0
+              ? " chat__col--centered"
+              : ""
+          }`}
+        >
           {shown !== null && <p className="chat__error">{shown}</p>}
           {shown === null && loading && (
             <p className="chat__hint">Загружаем сессии…</p>
