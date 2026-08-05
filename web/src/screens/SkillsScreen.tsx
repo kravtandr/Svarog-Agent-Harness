@@ -3,13 +3,8 @@ import { useEffect, useState } from "react";
 import type { Api } from "../api/client";
 import type { SkillCard } from "../api/types";
 import { counted } from "../model/plural";
+import { riskClass, riskLabel } from "../model/risk";
 import "./SkillsScreen.css";
-
-const RISK_LABELS: Record<string, string> = {
-  low: "низкий риск",
-  medium: "средний риск",
-  high: "высокий риск",
-};
 
 /**
  * Скиллы: карточки так, как их видит агент при подборе.
@@ -48,8 +43,8 @@ export function SkillsScreen({ api }: { api: Api }) {
           <header className="skill__head">
             <h3 className="skill__name">{skill.name}</h3>
             <span className="skill__version">{skill.version}</span>
-            <span className={`skill__risk skill__risk--${skill.risk}`}>
-              {RISK_LABELS[skill.risk] ?? skill.risk}
+            <span className={`skill__risk ${riskClass(skill.risk)}`}>
+              {riskLabel(skill.risk)}
             </span>
           </header>
           <p className="skill__description">{skill.description}</p>

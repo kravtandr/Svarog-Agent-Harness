@@ -36,17 +36,9 @@
   color: var(--faint);
 }
 
-/* Риск — семантика, а не акцент: цвет говорит, чем скилл может обойтись. */
 .skill__risk {
   margin-left: auto;
   font-size: 12px;
-  color: var(--ok);
-}
-.skill__risk--medium {
-  color: #d89a79;
-}
-.skill__risk--high {
-  color: var(--bad);
 }
 
 .skill__description {

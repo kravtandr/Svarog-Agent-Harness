@@ -33,3 +33,22 @@ body {
     transition: none !important;
   }
 }
+
+/* Риск — семантика, а не акцент: цвет говорит, чем действие может обойтись.
+   Одна шкала на скиллы и MCP, поэтому классы живут здесь, а не в экране. */
+.risk--low {
+  color: var(--ok);
+}
+.risk--medium {
+  color: #d89a79;
+}
+.risk--high {
+  color: var(--bad);
+}
+.risk--critical {
+  color: #e08b84;
+  font-weight: 600;
+}
+.risk--unknown {
+  color: var(--faint);
+}
