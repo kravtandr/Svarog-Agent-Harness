@@ -333,7 +333,7 @@ describe("экран настроек", () => {
     ).toBeInTheDocument();
   });
 
-  it("разворачивает каталог сохранённого провайдера и подставляет модель в форму", async () => {
+  it("разворачивает каталог сохранённого провайдера и подставляет модель в правку его карточки", async () => {
     const api = fakeApi({
       providers: vi.fn().mockResolvedValue([
         {
@@ -364,20 +364,26 @@ describe("экран настроек", () => {
     await userEvent.click(await screen.findByText("Qwen3 32B"));
 
     expect(api.providerModels).toHaveBeenCalledWith("local");
-    expect(screen.getByLabelText("Имя")).toHaveValue("local");
-    expect(screen.getByLabelText("Base URL (с /v1)")).toHaveValue(
-      "https://x/v1",
-    );
-    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue(
-      "qwen3-32b",
-    );
+    // Модель подставлена туда, где она и будет сохранена — в правку этой же
+    // карточки. Форма внизу озаглавлена «Добавить провайдера» и осталась
+    // пустой: заполнить её чужими значениями значило бы взвести перезапись.
+    expect(screen.getByLabelText("Модель local")).toHaveValue("qwen3-32b");
+    expect(screen.getByLabelText("Base URL local")).toHaveValue("https://x/v1");
+    expect(screen.getByLabelText("Имя")).toHaveValue("");
+    expect(screen.getByLabelText("Модель по умолчанию")).toHaveValue("");
 
     // Сохранение сбрасывает кэш каталогов — секция обязана свернуться,
     // иначе она застряла бы на «Загружаем…» без повторного запроса.
     await userEvent.click(
-      screen.getByRole("button", { name: "Сохранить провайдера" }),
+      screen.getByRole("button", { name: "Сохранить local" }),
     );
-    await waitFor(() => expect(api.addProvider).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.addProvider).toHaveBeenCalledWith({
+        name: "local",
+        base_url: "https://x/v1",
+        model: "qwen3-32b",
+      }),
+    );
     expect(screen.queryByText(/Загружаем каталог/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Модели" })).toBeInTheDocument();
   });
@@ -541,6 +547,46 @@ describe("экран настроек", () => {
         model: "llama-3.1-8b",
       }),
     );
+  });
+
+  it("свёрнутое «Ещё» снимает взведённое удаление и незакрытое переименование", async () => {
+    // «Удалить» переехало внутрь «Ещё», а взведённое «Точно удалить?» —
+    // согласие на один конкретный клик. Пережив сворачивание, оно стало бы
+    // невидимым: следующее раскрытие показывало бы кнопку уже взведённой,
+    // и один клик снёс бы провайдера без подтверждающего шага.
+    const api = fakeApi({ providers: twoProviders() });
+    render(<SettingsScreen api={api} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Провайдеры" }),
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Ещё groq" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    expect(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+
+    expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    expect(api.providerRemove).not.toHaveBeenCalled();
+
+    // Поле переименования живёт в шапке карточки, а открывается из «Ещё»:
+    // свернув меню, человек закрыл и его.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Переименовать" }),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Новое имя groq" }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Ещё groq" }));
+    expect(
+      screen.queryByRole("textbox", { name: "Новое имя groq" }),
+    ).not.toBeInTheDocument();
   });
 
   it("редкие действия провайдера спрятаны за «Ещё»", async () => {

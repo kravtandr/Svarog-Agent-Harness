@@ -536,9 +536,16 @@ function ProvidersPane({ api }: { api: Api }) {
                   className="btn btn--small"
                   aria-label={`Ещё ${card.name}`}
                   aria-expanded={expanded === card.name}
-                  onClick={() =>
-                    setExpanded(expanded === card.name ? null : card.name)
-                  }
+                  onClick={() => {
+                    // Взведённое «Точно удалить?» и открытое переименование
+                    // живут внутри этого блока (поле переименования — в
+                    // шапке, но открывается отсюда). Пережив сворачивание,
+                    // согласие стало бы невидимым, и следующий одиночный
+                    // клик снёс бы провайдера без подтверждающего шага.
+                    setConfirming(null);
+                    setRenaming(null);
+                    setExpanded(expanded === card.name ? null : card.name);
+                  }}
                 >
                   ⋯
                 </button>
@@ -669,15 +676,26 @@ function ProvidersPane({ api }: { api: Api }) {
               ) : (
                 <>
                   <p className="field__help">
-                    Клик по модели подставит её в форму ниже — «Сохранить
-                    провайдера» сделает её моделью «{card.name}».
+                    Клик по модели откроет правку «{card.name}» с ней —
+                    «Сохранить» в карточке применит.
                   </p>
                   <CatalogList
                     cards={catalog}
+                    // Модель подставляется туда, где она и будет сохранена —
+                    // в правку этой же карточки. Форма внизу теперь только
+                    // добавляет нового провайдера: подставлять в неё чужие
+                    // значения значило бы взводить перезапись существующего.
                     onPick={(id) => {
-                      setName(card.name);
-                      setBaseUrl(card.base_url);
-                      setModel(id);
+                      setEditing((current) =>
+                        current !== null && current.name === card.name
+                          ? { ...current, model: id }
+                          : {
+                              name: card.name,
+                              baseUrl: card.base_url,
+                              model: id,
+                              apiKey: "",
+                            },
+                      );
                       setStatus(null);
                     }}
                   />
