@@ -1317,13 +1317,22 @@ class GatewayService:
             # включать его частичный трейс в items значило бы задвоить её
             # (параллельные чаты, 31.07.2026). Живость — как у lease:
             # RUNNING со свежим heartbeat, протухший не в счёт.
-            live = await recorder.live_run_on_workspace(runs[-1].workspace) if runs else None
+            # Run без workspace (легаси-строки, заведённые до колонки лизы) не
+            # держит per-workspace лизу — спрашивать по нему занятость нечего.
+            # Голый None сюда пускать нельзя: условие выродилось бы в
+            # `workspace IS NULL` и поймало бы чужой run без workspace.
+            last = runs[-1] if runs else None
+            live = (
+                await recorder.live_run_on_workspace(last.workspace)
+                if last is not None and last.workspace is not None
+                else None
+            )
             live_run = (
-                runs[-1]
-                if runs
+                last
+                if last is not None
                 and live is not None
-                and live.id == runs[-1].id
-                and runs[-1].state == RunState.RUNNING
+                and live.id == last.id
+                and last.state == RunState.RUNNING
                 else None
             )
             items: list[ThreadItemView] = []
