@@ -352,7 +352,9 @@ def test_session_events_ws_disconnect_unregisters(service: GatewayService) -> No
     assert len(hub._subscribers) == 0
 
 
-def test_workspace_hub_shares_session_events(tmp_path: Path) -> None:
+def test_workspace_hub_shares_session_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from svarog_harness.gateway.hub import WorkspaceHub
     from svarog_harness.gateway.roots import WorkspaceRootsRegistry
 
@@ -360,7 +362,13 @@ def test_workspace_hub_shares_session_events(tmp_path: Path) -> None:
     root_b = tmp_path / "b"
     root_a.mkdir()
     root_b.mkdir()
+    # Конфиг нужен ОБОИМ корням: service_for(root_b) читает svarog.yaml именно
+    # из root_b. Без него тест дотягивался до ~/.svarog/svarog.yaml разработчика
+    # и зеленел только на машине, где Сварог реально настроен, — HOME здесь
+    # подменяется по той же причине, что и в фикстуре service.
     _write_config(root_a, tmp_path)
+    _write_config(root_b, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     hub = WorkspaceHub(
         base_cfg=load_config(project_dir=root_a),
         default_root=root_a,
