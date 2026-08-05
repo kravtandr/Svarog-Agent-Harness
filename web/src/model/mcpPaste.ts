@@ -6,8 +6,10 @@ export interface ParsedServer {
 }
 
 /** Токенизация shell-строки с уважением к кавычкам: пути с пробелами в
-    аргументах MCP-серверов обычны, а split(/\s+/) их молча ломает. */
-function tokenize(line: string): string[] {
+    аргументах MCP-серверов обычны, а split(/\s+/) их молча ломает.
+    Экспортируется ради поля «Аргументы» на экране: разбирать его иначе, чем
+    вставку, значило бы ломать при первой же правке то, что вставка сохранила. */
+export function shellSplit(line: string): string[] {
   const out: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
@@ -34,6 +36,30 @@ function tokenize(line: string): string[] {
   }
   if (started) out.push(current);
   return out;
+}
+
+/** Обратная к shellSplit сборка для показа в поле ввода: аргумент с пробелом
+    или кавычкой возвращается закавыченным, иначе следующий разбор того же
+    поля расщепил бы путь вроде «/Users/a b/proj» на два аргумента.
+    Экранирования обратным слэшем нет намеренно — его нет и в shellSplit,
+    иначе вставленный windows-путь C:\Users\x потерял бы разделители; вместо
+    него выбирается та кавычка, которой внутри аргумента нет. */
+export function shellJoin(args: string[]): string {
+  return args.map(quoteArg).join(" ");
+}
+
+function quoteArg(arg: string): string {
+  if (arg === "") return '""';
+  if (!/[\s"']/.test(arg)) return arg;
+  if (!arg.includes('"')) return `"${arg}"`;
+  if (!arg.includes("'")) return `'${arg}'`;
+  // Внутри есть обе кавычки: аргумент собирается из соседних закавыченных
+  // кусков — shellSplit склеивает их обратно, потому что закрытая кавычка
+  // токен не заканчивает, это делает только пробел.
+  return arg
+    .split('"')
+    .map((chunk) => `"${chunk}"`)
+    .join("'\"'");
 }
 
 /** Имя сервера из аргументов: `@modelcontextprotocol/server-github` → github,
@@ -87,7 +113,7 @@ export function parsePaste(text: string): ParsedServer | null {
     return fromObject(parsed, "");
   }
 
-  const tokens = tokenize(trimmed);
+  const tokens = shellSplit(trimmed);
   const [command, ...args] = tokens;
   if (command === undefined || command === "") return null;
   return { name: guessName(command, args), command, args, envRefs: [] };

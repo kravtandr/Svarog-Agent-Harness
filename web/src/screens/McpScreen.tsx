@@ -3,7 +3,12 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, type Api } from "../api/client";
 import type { McpServer, McpTest } from "../api/types";
 import { counted } from "../model/plural";
-import { parsePaste, type ParsedServer } from "../model/mcpPaste";
+import {
+  parsePaste,
+  shellJoin,
+  shellSplit,
+  type ParsedServer,
+} from "../model/mcpPaste";
 import { MCP_PRESETS } from "../model/mcpPresets";
 import {
   MCP_RISK_CONSEQUENCE,
@@ -35,6 +40,11 @@ export function McpScreen({ api }: { api: Api }) {
   const [paste, setPaste] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [override, setOverride] = useState<Partial<ParsedServer> | null>(null);
+  // Текст поля аргументов хранится отдельно от разобранного списка: показывать
+  // в нём shellJoin(draft.args) на каждый ввод значит стирать только что
+  // набранный пробел (он ещё не начал новый токен) и переставлять кавычки под
+  // курсором. null — «поле следует за разбором вставки».
+  const [argsText, setArgsText] = useState<string | null>(null);
   const [risk, setRisk] = useState<RiskLevel>("high");
   const [test, setTest] = useState<McpTest | null>(null);
   const [testing, setTesting] = useState(false);
@@ -62,6 +72,7 @@ export function McpScreen({ api }: { api: Api }) {
   const editPaste = (value: string) => {
     setPaste(value);
     setOverride(null);
+    setArgsText(null);
     setTest(null);
     setForcing(false);
   };
@@ -116,6 +127,7 @@ export function McpScreen({ api }: { api: Api }) {
       setStatus(`Сервер «${draft.name}» сохранён в svarog.yaml.`);
       setPaste("");
       setOverride(null);
+      setArgsText(null);
       setTest(null);
       setForcing(false);
       reload();
@@ -266,6 +278,10 @@ export function McpScreen({ api }: { api: Api }) {
                       type="button"
                       className="btn btn--small"
                       aria-label={`Инструменты ${server.name}`}
+                      // Каждый опрос поднимает настоящий процесс сервера —
+                      // ровно поэтому проверка сделана по клику, а не при
+                      // открытии вкладки. Повторный клик плодил бы процессы.
+                      disabled={probed === "идёт"}
                       onClick={() => void probe(server)}
                     >
                       Инструменты
@@ -364,12 +380,14 @@ export function McpScreen({ api }: { api: Api }) {
               <input
                 id="mcp-args"
                 className="field__control"
-                value={draft.args.join(" ")}
-                onChange={(e) =>
-                  editField({
-                    args: e.target.value.split(/\s+/).filter(Boolean),
-                  })
-                }
+                // Тот же токенизатор, что и у вставки: разбирать это поле
+                // через split(/\s+/) значило бы ломать при первой правке
+                // ровно те пути с пробелами, которые вставка сохранила.
+                value={argsText ?? shellJoin(draft.args)}
+                onChange={(e) => {
+                  setArgsText(e.target.value);
+                  editField({ args: shellSplit(e.target.value) });
+                }}
               />
             </div>
             <div className="field">

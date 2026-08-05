@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parsePaste } from "./mcpPaste";
+import { parsePaste, shellJoin, shellSplit } from "./mcpPaste";
 
 describe("разбор вставленного MCP-конфига", () => {
   it("режет shell-строку на команду и аргументы", () => {
@@ -69,5 +69,33 @@ describe("разбор вставленного MCP-конфига", () => {
 
   it("если имя вывести не из чего — берёт команду", () => {
     expect(parsePaste("my-server")?.name).toBe("my-server");
+  });
+});
+
+describe("shellJoin: сборка аргументов для показа в поле", () => {
+  it("аргумент с пробелом переживает круг сборка → разбор", () => {
+    const args = ["-y", "server-filesystem", "/Users/a b/proj"];
+    expect(shellSplit(shellJoin(args))).toEqual(args);
+  });
+
+  it("не трогает аргументы, которым кавычки не нужны", () => {
+    expect(shellJoin(["-y", "@scope/pkg"])).toBe("-y @scope/pkg");
+  });
+
+  it("аргумент с кавычкой внутри закавычивается другой кавычкой", () => {
+    // Экранирования обратным слэшем нет ни здесь, ни в shellSplit — круг
+    // должен сойтись без него.
+    expect(shellSplit(shellJoin(['it\'s "тут"']))).toEqual(['it\'s "тут"']);
+    expect(shellSplit(shellJoin(["путь/с 'кавычкой'"]))).toEqual([
+      "путь/с 'кавычкой'",
+    ]);
+  });
+
+  it("пустой аргумент не исчезает при круге", () => {
+    expect(shellSplit(shellJoin(["--flag", "", "x"]))).toEqual([
+      "--flag",
+      "",
+      "x",
+    ]);
   });
 });

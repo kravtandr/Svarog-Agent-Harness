@@ -180,6 +180,38 @@ describe("вкладка MCP: подключение", () => {
     );
   });
 
+  it("правка поля аргументов не ломает путь с пробелом", async () => {
+    const api = fakeApi();
+    render(<McpScreen api={api} />);
+    await userEvent.click(screen.getByLabelText("Команда или JSON"));
+    await userEvent.paste(
+      'npx -y @modelcontextprotocol/server-filesystem "/Users/a b/proj"',
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Уточнить" }));
+
+    // Поле показывает путь закавыченным — иначе собственный разбор поля
+    // расщепил бы его на «/Users/a» и «b/proj» при первой же правке.
+    const args = screen.getByLabelText("Аргументы");
+    expect(args).toHaveValue(
+      '-y @modelcontextprotocol/server-filesystem "/Users/a b/proj"',
+    );
+
+    await userEvent.type(args, " --readonly");
+    await userEvent.click(screen.getByRole("button", { name: "Подключить" }));
+    await waitFor(() =>
+      expect(api.mcpAdd).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: [
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/Users/a b/proj",
+            "--readonly",
+          ],
+        }),
+      ),
+    );
+  });
+
   it("выбранный риск объясняет последствие", async () => {
     render(<McpScreen api={fakeApi()} />);
     await userEvent.click(screen.getByRole("radio", { name: "critical" }));
@@ -229,6 +261,22 @@ describe("вкладка MCP: подключённые серверы", () => {
       args: ["-y", "@modelcontextprotocol/server-github"],
       env_refs: ["GITHUB_TOKEN"],
     });
+  });
+
+  it("«Инструменты» не опрашивает второй раз, пока идёт первый опрос", async () => {
+    // Каждый опрос поднимает настоящий процесс сервера — ради этого проверка
+    // и сделана по клику. Повторные клики не должны плодить процессы.
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([server]),
+      mcpTest: vi.fn().mockReturnValue(new Promise(() => {})),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    const button = screen.getByRole("button", { name: "Инструменты github" });
+    await userEvent.click(button);
+    await waitFor(() => expect(button).toBeDisabled());
+    await userEvent.click(button);
+    expect(api.mcpTest).toHaveBeenCalledTimes(1);
   });
 
   it("мёртвый сервер показывает ошибку, а не пустой список", async () => {
