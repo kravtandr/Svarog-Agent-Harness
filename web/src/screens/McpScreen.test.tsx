@@ -18,6 +18,35 @@ describe("вкладка MCP: подключение", () => {
     expect(screen.getByLabelText("Аргументы")).toHaveValue("mcp-server-fetch");
   });
 
+  it("неразбираемая вставка объясняется и сама раскрывает поля", async () => {
+    render(<McpScreen api={fakeApi()} />);
+    await userEvent.click(screen.getByLabelText("Команда или JSON"));
+    // Блок Claude Desktop для удалённого сервера: command в нём нет, а
+    // каталог пресетов уже скрыт — без объяснения экран был бы тупиком.
+    await userEvent.paste(
+      '{"mcpServers":{"x":{"url":"https://x","type":"sse"}}}',
+    );
+
+    expect(screen.getByText(/Не удалось разобрать/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Команда")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Уточнить" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("раскрытые из-за провала разбора поля можно свернуть руками", async () => {
+    render(<McpScreen api={fakeApi()} />);
+    await userEvent.click(screen.getByLabelText("Команда или JSON"));
+    await userEvent.paste("{ поломанный json");
+    expect(screen.getByLabelText("Команда")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Уточнить" }));
+    expect(screen.queryByLabelText("Команда")).not.toBeInTheDocument();
+    // Объяснение остаётся: свёрнут блок, а не сообщение о провале.
+    expect(screen.getByText(/Не удалось разобрать/)).toBeInTheDocument();
+  });
+
   it("клик по пресету заполняет поле вставки", async () => {
     render(<McpScreen api={fakeApi()} />);
     await userEvent.click(screen.getByRole("button", { name: /github/ }));

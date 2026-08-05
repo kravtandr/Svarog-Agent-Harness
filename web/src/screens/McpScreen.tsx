@@ -38,7 +38,11 @@ function probeKey(server: McpServer): string {
 export function McpScreen({ api }: { api: Api }) {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [paste, setPaste] = useState("");
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // null — «блок следует за разбором»: провалившийся разбор раскрывает его
+  // сам, иначе вставка, из которой ничего не вышло, оставляла бы человека
+  // перед пустым экраном без каталога пресетов и с мёртвыми кнопками.
+  // Явное нажатие «Уточнить» перебивает это и дальше держится.
+  const [detailsOpen, setDetailsOpen] = useState<boolean | null>(null);
   const [override, setOverride] = useState<Partial<ParsedServer> | null>(null);
   // Текст поля аргументов хранится отдельно от разобранного списка: показывать
   // в нём shellJoin(draft.args) на каждый ввод значит стирать только что
@@ -62,6 +66,8 @@ export function McpScreen({ api }: { api: Api }) {
   // Ручная правка перекрывает разбор, но не отменяет его: человек мог
   // поправить одно поле из четырёх, и остальные должны остаться живыми.
   const parsed = parsePaste(paste);
+  const parseFailed = paste.trim() !== "" && parsed === null;
+  const detailsShown = detailsOpen ?? parseFailed;
   const draft: ParsedServer = {
     name: override?.name ?? parsed?.name ?? "",
     command: override?.command ?? parsed?.command ?? "",
@@ -312,13 +318,22 @@ export function McpScreen({ api }: { api: Api }) {
           <label className="field__label" htmlFor="mcp-paste">
             Команда или JSON
           </label>
-          <input
+          {/* textarea, не input: вставляют сюда чаще всего блок JSON из
+              README, и в одну строку он нечитаем — а читать его приходится
+              как раз тогда, когда разбор не удался. */}
+          <textarea
             id="mcp-paste"
-            className="field__control"
+            className="field__control mcp__paste"
+            rows={3}
             value={paste}
             placeholder="uvx mcp-server-fetch"
             onChange={(e) => editPaste(e.target.value)}
           />
+          {parseFailed && (
+            <p className="field__error">
+              Не удалось разобрать — заполните поля ниже.
+            </p>
+          )}
         </div>
 
         {paste.trim() === "" && (
@@ -343,13 +358,13 @@ export function McpScreen({ api }: { api: Api }) {
         <button
           type="button"
           className="btn btn--small mcp__details-toggle"
-          aria-expanded={detailsOpen}
-          onClick={() => setDetailsOpen(!detailsOpen)}
+          aria-expanded={detailsShown}
+          onClick={() => setDetailsOpen(!detailsShown)}
         >
           Уточнить
         </button>
 
-        {detailsOpen && (
+        {detailsShown && (
           <div className="mcp__details">
             <div className="field">
               <label className="field__label" htmlFor="mcp-name">

@@ -44,6 +44,13 @@
   color: var(--faint);
 }
 
+/* Вставка — многострочная: JSON из README иначе виден одной длинной строкой
+   ровно в тот момент, когда его надо прочитать глазами. */
+.mcp__paste {
+  resize: vertical;
+  line-height: 1.55;
+}
+
 .mcp__details-toggle {
   margin-bottom: 18px;
 }
