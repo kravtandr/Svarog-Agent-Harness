@@ -8,7 +8,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from svarog_harness.config.loader import load_config
+from svarog_harness.config.loader import USER_CONFIG_PATH, load_config
 from svarog_harness.gateway import GatewayService
 from svarog_harness.gateway.api import create_app
 
@@ -582,3 +582,100 @@ def test_provider_rename_user_config_only_rejects(
 
 async def _noop() -> AsyncIterator[None]:  # pragma: no cover — заглушка типов
     yield
+
+
+@pytest.fixture
+def global_service(service: GatewayService) -> GatewayService:
+    """Сервис так, как его строят WorkspaceHub и локальный serve.
+
+    user_config_path — разрешение писать MCP в ~/.svarog/svarog.yaml, то есть
+    глобально для всех рабочих папок. TenantHub его не ставит: этот файл
+    принадлежит оператору хоста.
+    """
+    service.user_config_path = USER_CONFIG_PATH.expanduser()
+    return service
+
+
+@pytest.fixture
+def global_client(global_service: GatewayService) -> TestClient:
+    return TestClient(create_app(global_service))
+
+
+def test_mcp_add_writes_globally_not_into_project(
+    global_client: TestClient, global_service: GatewayService, tmp_path: Path
+) -> None:
+    """Новый сервер уходит в пользовательский слой — он один на все папки."""
+    resp = global_client.post(
+        "/mcp",
+        json={"name": "memory", "command": "npx", "args": ["-y", "srv"], "risk": "low"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    user_raw = yaml.safe_load((tmp_path / ".svarog" / "svarog.yaml").read_text())
+    assert user_raw["mcp"]["servers"]["memory"]["command"] == "npx"
+
+    project_raw = yaml.safe_load(global_service.config_path.read_text())
+    assert "mcp" not in (project_raw or {}), "проектный файл трогать не должны"
+
+
+def test_mcp_add_stays_in_project_without_global_scope(
+    client: TestClient, service: GatewayService, tmp_path: Path
+) -> None:
+    """Без user_config_path (режим тенанта) запись идёт в конфиг тенанта.
+
+    ~/.svarog/svarog.yaml в multi-tenant принадлежит оператору хоста: запись
+    туда подняла бы серверы одного жильца всем остальным.
+    """
+    resp = client.post(
+        "/mcp",
+        json={"name": "memory", "command": "npx", "args": [], "risk": "low"},
+    )
+    assert resp.status_code == 200, resp.text
+    project_raw = yaml.safe_load(service.config_path.read_text())
+    assert project_raw["mcp"]["servers"]["memory"]["command"] == "npx"
+    assert not (tmp_path / ".svarog" / "svarog.yaml").exists()
+
+
+def test_mcp_list_tells_where_each_server_lives(
+    global_client: TestClient, global_service: GatewayService, tmp_path: Path
+) -> None:
+    """Список показывает действующий набор и происхождение каждой записи.
+
+    Показывать только глобальные значило бы врать: проектные тоже попадают в
+    запуск через merge, и человек не понимал бы, откуда у агента инструменты.
+    """
+    user_dir = tmp_path / ".svarog"
+    user_dir.mkdir(exist_ok=True)
+    (user_dir / "svarog.yaml").write_text(
+        "mcp:\n  servers:\n    глобальный:\n      command: npx\n      risk: low\n",
+        encoding="utf-8",
+    )
+    project = yaml.safe_load(global_service.config_path.read_text())
+    project["mcp"] = {"servers": {"проектный": {"command": "uvx", "risk": "high"}}}
+    global_service.config_path.write_text(yaml.safe_dump(project), encoding="utf-8")
+    global_service.cfg = load_config(project_dir=global_service.workspace)
+
+    body = global_client.get("/mcp").json()
+    scopes = {item["name"]: item["scope"] for item in body}
+    assert scopes == {"глобальный": "user", "проектный": "project"}
+
+
+def test_mcp_remove_targets_the_file_that_holds_it(
+    global_client: TestClient, global_service: GatewayService, tmp_path: Path
+) -> None:
+    """Удаление правит тот файл, где запись лежит, а не всегда проектный."""
+    user_dir = tmp_path / ".svarog"
+    user_dir.mkdir(exist_ok=True)
+    user_file = user_dir / "svarog.yaml"
+    user_file.write_text(
+        "mcp:\n  servers:\n    глобальный:\n      command: npx\n      risk: low\n",
+        encoding="utf-8",
+    )
+    global_service.cfg = load_config(project_dir=global_service.workspace)
+
+    assert global_client.delete("/mcp/глобальный").status_code == 200
+    # Последний сервер уносит с собой и обёртку mcp: пустая `servers:` парсится
+    # в None и валит валидацию. Проверяем суть — записи в файле больше нет.
+    user_raw = yaml.safe_load(user_file.read_text()) or {}
+    assert "глобальный" not in (user_raw.get("mcp") or {}).get("servers", {})
+    assert global_client.get("/mcp").json() == []

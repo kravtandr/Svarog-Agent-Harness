@@ -276,3 +276,41 @@ def test_accept_overlap_rejected_without_hub(tmp_path: Path) -> None:
     plain = TestClient(create_app(service))
     resp = plain.post("/sessions", json={"title": "x", "accept_overlap": True})
     assert resp.status_code == 422
+
+
+def test_global_mcp_reaches_every_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP подключается к самому Сварогу: добавленный в одном корне виден во всех.
+
+    Хаб кеширует сервис на корень, и каждый держит свой снимок конфига. Правка
+    общего пользовательского слоя обязана дойти до всех — иначе «глобально»
+    работает только там, где нажали кнопку, а в соседнем корне сервера нет до
+    перезапуска (найдено живой проверкой 2026-08-06).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default_root = tmp_path / "default"
+    _write_root(default_root, tmp_path / "default.db")
+    other = tmp_path / "other"
+    _write_root(other, tmp_path / "other.db")
+
+    hub = WorkspaceHub(
+        load_config(project_dir=default_root),
+        default_root,
+        registry=WorkspaceRootsRegistry(tmp_path / "roots.json"),
+    )
+    client = TestClient(create_app(resolver=hub))
+
+    # Сервис соседнего корня создаётся ДО правки — как это и происходит в
+    # жизни: сайдбар опрашивает все корни при загрузке страницы.
+    assert client.get("/mcp", headers={"X-Svarog-Root": str(other)}).json() == []
+
+    added = client.post(
+        "/mcp",
+        json={"name": "memory", "command": "npx", "args": [], "risk": "low"},
+        headers={"X-Svarog-Root": str(default_root)},
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["path"] == str(tmp_path / ".svarog" / "svarog.yaml")
+
+    seen = client.get("/mcp", headers={"X-Svarog-Root": str(other)}).json()
+    assert [s["name"] for s in seen] == ["memory"]
+    assert seen[0]["scope"] == "user"

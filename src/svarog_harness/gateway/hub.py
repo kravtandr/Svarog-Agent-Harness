@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from svarog_harness.config.loader import ConfigError, load_config
+from svarog_harness.config.loader import USER_CONFIG_PATH, ConfigError, load_config
 from svarog_harness.config.paths import (
     resolve_tenant_config,
     tenant_home,
@@ -253,7 +253,22 @@ class WorkspaceHub:
             session_events=self.session_events,
             on_run_created=lambda run_id: self.registry.record_run(run_id, root),
             on_session_created=lambda session_id: self.registry.record_session(session_id, root),
+            # Один пользователь, много корней: MCP подключается к самому
+            # Сварогу и должен работать во всех, а не в том, где его завели.
+            user_config_path=USER_CONFIG_PATH.expanduser(),
+            on_user_config_written=self._reload_all_roots,
         )
+
+    async def _reload_all_roots(self) -> None:
+        """Перечитать конфиг во всех корнях после правки общего слоя.
+
+        Сервисы кешируются на корень и держат свой снимок; без этого сервер,
+        добавленный в одном корне, не появился бы в соседнем до перезапуска.
+        Корни с живыми runs остаются на своём снимке — reload_config сам это
+        решает и молча возвращает False.
+        """
+        for service in list(self._services.values()):
+            await service.reload_config()
 
     def service_for(self, path: str | Path) -> GatewayService:
         """Сервис произвольного корня; несуществующий/не-каталог — RootPathError."""

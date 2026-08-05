@@ -231,6 +231,15 @@ class GatewayService:
     quota_guard: Callable[[], Awaitable[None]] | None = None
     # Идентичность для /whoami (ADR-0017 §2); TenantHub проставляет tenant_id.
     tenant_id: str = "local"
+    # Куда вкладка MCP пишет новые серверы (спека 2026-08-06). WorkspaceHub и
+    # локальный serve ставят сюда ~/.svarog/svarog.yaml: MCP подключается к
+    # самому Сварогу, а не к рабочей папке, и виден во всех корнях сразу.
+    # TenantHub оставляет None — этот файл принадлежит оператору хоста, и
+    # запись туда подняла бы серверы одного жильца всем остальным.
+    user_config_path: Path | None = None
+    # Правку общего пользовательского слоя надо донести до сервисов остальных
+    # корней: WorkspaceHub вешает сюда перечитывание всех своих сервисов.
+    on_user_config_written: Callable[[], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
@@ -1546,6 +1555,25 @@ class GatewayService:
                 base = loaded
         SvarogConfig.model_validate(deep_merge(base, project_raw))
 
+    def _validate_effective_user(self, user_raw: dict[str, Any]) -> None:
+        """Проверить правку пользовательского слоя: проектное ложится поверх неё.
+
+        Зеркало `_validate_effective`: там правится верхний слой, здесь нижний,
+        и порядок merge обратный. Проверять правку в одиночку так же нельзя —
+        частичный пользовательский файл валиден только вместе с проектным.
+        """
+        project: dict[str, Any] = {}
+        if self.config_path.is_file():
+            try:
+                loaded = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                raise ValueError(
+                    f"не могу проверить правку: {self.config_path} не читается: {exc}"
+                ) from exc
+            if isinstance(loaded, dict):
+                project = loaded
+        SvarogConfig.model_validate(deep_merge(user_raw, project))
+
     def _updated_config_text(self, values: dict[str, Any]) -> tuple[str, str]:
         """Текст файла до и после правки; заодно проверяет результат схемой."""
         raw, before = self._config_yaml()
@@ -1607,40 +1635,66 @@ class GatewayService:
         return view
 
     async def _write_deep(
-        self, values: dict[str, Any], removes: Sequence[str] = ()
+        self,
+        values: dict[str, Any],
+        removes: Sequence[str] = (),
+        target: Path | None = None,
     ) -> ConfigDiffView:
         """Записать вложенные правки svarog.yaml (провайдеры/MCP/executor-дефолты).
 
         Тот же контракт, что write_config: результат валидируется полной
         схемой ДО записи (кривая правка — ValueError → 422, файл не тронут),
         конфиг перечитывается только без живых runs.
+
+        `target` — файл правки; None означает проектный. MCP пишутся в
+        пользовательский слой, и проверять их надо в обратном порядке слияния:
+        не «правка поверх пользовательского», а «проектное поверх правки».
         """
-        before = self.config_path.read_text(encoding="utf-8") if self.config_path.exists() else ""
+        path = target or self.config_path
+        before = path.read_text(encoding="utf-8") if path.exists() else ""
         after = set_deep_values(before, values)
-        for path in removes:
-            after = remove_deep_key(after, path)
+        for remove_path in removes:
+            after = remove_deep_key(after, remove_path)
         parsed = yaml.safe_load(after) or {}
         try:
-            self._validate_effective(parsed)
+            if path == self.config_path:
+                self._validate_effective(parsed)
+            else:
+                self._validate_effective_user(parsed)
         except ValidationError as exc:
             first = exc.errors()[0].get("msg", str(exc)) if exc.errors() else str(exc)
             raise ValueError(f"правка делает конфиг невалидным: {first}") from exc
         lines = diff_lines(before, after)
         view = ConfigDiffView(
-            path=str(self.config_path),
+            path=str(path),
             lines=lines,
             changes=sum(1 for line in lines if line.kind != "same"),
         )
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(after, encoding="utf-8")
-        if await self._any_run_live():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(after, encoding="utf-8")
+        # Пользовательский слой общий для всех корней: соседние сервисы держат
+        # свои снимки конфига и без уведомления не увидели бы правку до
+        # перезапуска — «глобально» работало бы только там, где нажали кнопку.
+        if path != self.config_path and self.on_user_config_written is not None:
+            await self.on_user_config_written()
+        if not await self.reload_config():
             return view.model_copy(update={"restart_required": True})
+        return view
+
+    async def reload_config(self) -> bool:
+        """Перечитать конфиг с диска. False — есть живые runs, снимок оставлен.
+
+        Живой run продолжает работать на своём снимке (ADR-0015): подменять
+        конфиг под ним значило бы поменять правила посреди запуска.
+        """
+        if await self._any_run_live():
+            return False
         self.cfg = load_config(project_dir=self.workspace)
         self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
         await self.close_warm_sessions()
         self._catalog.clear()
         self._catalog_failures.clear()
-        return view
+        return True
 
     async def _any_run_live(self) -> bool:
         async def action(db: AsyncSession) -> bool:
@@ -1810,8 +1864,24 @@ class GatewayService:
             raise ValueError("нечего менять: укажите provider и/или model")
         return await self._write_deep(values)
 
+    def _project_mcp_names(self) -> set[str]:
+        """Имена серверов, объявленных именно в проектном файле.
+
+        Действующий набор берём из `self.cfg` — там валидация и умолчания, — а
+        происхождение приходится смотреть в сыром файле: после merge слои уже
+        неразличимы.
+        """
+        raw, _ = self._config_yaml()
+        servers = (raw.get("mcp") or {}).get("servers")
+        return set(servers) if isinstance(servers, dict) else set()
+
     def list_mcp(self) -> list[McpServerView]:
-        """Подключённые MCP-серверы из конфига (вкладка MCP)."""
+        """Действующие MCP-серверы с указанием, где лежит каждый (вкладка MCP).
+
+        Показываем и глобальные, и проектные: в запуск попадают оба слоя, и
+        список только из глобальных врал бы про то, что видит агент.
+        """
+        project_names = self._project_mcp_names()
         return [
             McpServerView(
                 name=name,
@@ -1819,6 +1889,7 @@ class GatewayService:
                 args=list(server.args),
                 env_refs=list(server.env_refs),
                 risk=server.risk,
+                scope="project" if name in project_names else "user",
             )
             for name, server in self.cfg.mcp.servers.items()
         ]
@@ -1861,25 +1932,30 @@ class GatewayService:
         }
         if env_refs:
             values[f"mcp.servers.{name}.env_refs"] = list(env_refs)
-        return await self._write_deep(values)
+        # MCP подключается к самому Сварогу: новые серверы уходят в
+        # пользовательский слой и работают во всех корнях. В режиме тенанта
+        # user_config_path не задан — там запись остаётся в конфиге тенанта.
+        return await self._write_deep(values, target=self.user_config_path)
 
     async def remove_mcp(self, name: str) -> ConfigDiffView:
         if name not in self.cfg.mcp.servers:
             raise ValueError(f"MCP-сервер '{name}' не найден в конфиге")
+        # Правим тот файл, где запись лежит: удалять проектный сервер из
+        # пользовательского файла (и наоборот) значило бы молча ничего не
+        # сделать — merge продолжил бы отдавать его агенту.
+        file = self.config_path if name in self._project_mcp_names() else self.user_config_path
+        if file is None:
+            file = self.config_path
         # Пустая обёртка (`servers:` без ключей) парсится в None и валит
         # валидацию — удаляя последний сервер, снимаем и обёртку.
-        raw = (
-            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
-            if self.config_path.exists()
-            else {}
-        )
+        raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {} if file.exists() else {}
         mcp_raw = raw.get("mcp") or {}
         servers = mcp_raw.get("servers") or {}
         if len(servers) <= 1:
-            target = "mcp" if set(mcp_raw.keys()) <= {"servers"} else "mcp.servers"
+            key = "mcp" if set(mcp_raw.keys()) <= {"servers"} else "mcp.servers"
         else:
-            target = f"mcp.servers.{name}"
-        return await self._write_deep({}, removes=[target])
+            key = f"mcp.servers.{name}"
+        return await self._write_deep({}, removes=[key], target=file)
 
     def list_secrets(self) -> list[SecretView]:
         """Имена секретов и найдено ли значение. Значения не возвращаются никогда."""

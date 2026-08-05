@@ -167,6 +167,10 @@ export interface McpServer {
   args: string[];
   env_refs: string[];
   risk: string;
+  /** Где объявлен: "user" — ~/.svarog/svarog.yaml, общий для всех рабочих
+      папок; "project" — svarog.yaml рядом с папкой. В запуск попадают оба
+      слоя, поэтому вкладка показывает и те и другие. */
+  scope: "user" | "project";
 }
 
 /** Результат пробного подключения к MCP-серверу. */

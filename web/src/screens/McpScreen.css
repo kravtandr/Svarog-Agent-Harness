@@ -181,3 +181,8 @@
   margin-top: auto;
   padding-top: 4px;
 }
+
+.mcp__scope {
+  font-size: 11px;
+  color: var(--faint);
+}

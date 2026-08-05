@@ -236,8 +236,9 @@ export function McpScreen({ api }: { api: Api }) {
       <div className="mcp__body">
         <h2 className="settings__title">MCP-серверы</h2>
         <p className="field__help">
-          Инструменты серверов проходят Policy Engine: по умолчанию каждый вызов
-          требует подтверждения.
+          Серверы подключаются к самому Сварогу и работают во всех рабочих
+          папках. Их инструменты проходят Policy Engine: по умолчанию каждый
+          вызов требует подтверждения.
         </p>
         {servers.length === 0 ? (
           <p className="field__help">
@@ -275,6 +276,12 @@ export function McpScreen({ api }: { api: Api }) {
                   </div>
                   <div className="mcp__command">
                     {[server.command, ...server.args].join(" ")}
+                  </div>
+                  {/* Оба слоя попадают в запуск, поэтому показываем и те и
+                      другие — но человек должен видеть, какой переживёт смену
+                      рабочей папки, а какой останется в этой. */}
+                  <div className="mcp__scope">
+                    {server.scope === "project" ? "этот проект" : "глобально"}
                   </div>
                   {server.env_refs.length > 0 && (
                     <div className="mcp__chips">

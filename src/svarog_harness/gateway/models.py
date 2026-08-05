@@ -331,6 +331,10 @@ class McpServerView(BaseModel):
     args: list[str] = []
     env_refs: list[str] = []
     risk: str = "high"
+    # Где объявлен сервер: "user" — ~/.svarog/svarog.yaml, общий для всех
+    # рабочих папок; "project" — svarog.yaml рядом с папкой. В запуск попадают
+    # оба слоя, поэтому вкладка показывает и те и другие, но с пометкой.
+    scope: str = "user"
 
 
 class AddMcpRequest(BaseModel):

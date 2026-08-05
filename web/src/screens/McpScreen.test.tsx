@@ -271,6 +271,7 @@ describe("вкладка MCP: подключённые серверы", () => {
     args: ["-y", "@modelcontextprotocol/server-github"],
     env_refs: ["GITHUB_TOKEN"],
     risk: "high",
+    scope: "user" as const,
   };
 
   it("показывает карточку с командой, риском и секретами", async () => {
@@ -470,6 +471,7 @@ describe("вкладка MCP: автоопрос при заходе", () => {
     args: ["-y", "@modelcontextprotocol/server-github"],
     env_refs: [],
     risk: "high",
+    scope: "user" as const,
   };
   const second = { ...server, name: "fetch", command: "uvx", args: ["f"] };
 
@@ -563,5 +565,36 @@ describe("вкладка MCP: возврат к каталогу", () => {
     expect(
       screen.getByRole("button", { name: /playwright/ }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("вкладка MCP: область подключения", () => {
+  it("глобальный и проектный сервер помечены по-разному", async () => {
+    const api = fakeApi({
+      mcpList: vi.fn().mockResolvedValue([
+        {
+          name: "общий",
+          command: "npx",
+          args: [],
+          env_refs: [],
+          risk: "low",
+          scope: "user",
+        },
+        {
+          name: "местный",
+          command: "uvx",
+          args: [],
+          env_refs: [],
+          risk: "low",
+          scope: "project",
+        },
+      ]),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("общий")).toBeInTheDocument());
+    // Оба слоя попадают в запуск, поэтому показываем оба — но человек должен
+    // видеть, какой из них переживёт смену рабочей папки.
+    expect(screen.getByText("глобально")).toBeInTheDocument();
+    expect(screen.getByText("этот проект")).toBeInTheDocument();
   });
 });
