@@ -15,6 +15,18 @@ import {
 import "./SettingsScreen.css";
 import "./McpScreen.css";
 
+/** Ключ опроса — не просто имя сервера: сервер с тем же именем, но другими
+    полями (удалили и пересоздали под тем же именем, пока запрос ещё летел)
+    обязан требовать новой проверки, а не получить результат чужого процесса. */
+function probeKey(server: McpServer): string {
+  return JSON.stringify([
+    server.name,
+    server.command,
+    server.args,
+    server.env_refs,
+  ]);
+}
+
 /** Вкладка MCP: подключённые серверы из svarog.yaml + добавление новых с
     реальной проверкой подключения (сервер запускается, делается discovery,
     показывается список инструментов). */
@@ -119,19 +131,49 @@ export function McpScreen({ api }: { api: Api }) {
   const [probes, setProbes] = useState<Record<string, McpTest | "идёт">>({});
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Список могли перезагрузить по причине, никак не связанной с этой
+  // карточкой: сохранили другой сервер, удалили какой-то другой. Взведённое
+  // «Точно удалить?» — согласие на один конкретный клик, оно не должно
+  // пережить список: иначе следующий одиночный клик по давно нажатой
+  // карточке снёс бы сервер без нового подтверждения, а при повторном
+  // использовании того же имени согласие могло бы уехать на другой сервер.
+  // Опросы, чей ключ не совпадает ни с одним нынешним сервером (сервер
+  // удалён или пересоздан с другими полями), выкидываются тем же эффектом —
+  // их больше некому показывать, а оставлять — значит копить утечку.
+  useEffect(() => {
+    setConfirming(null);
+    const validKeys = new Set(servers.map(probeKey));
+    setProbes((current) => {
+      const next: Record<string, McpTest | "идёт"> = {};
+      let changed = false;
+      for (const [key, value] of Object.entries(current)) {
+        if (validKeys.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [servers]);
+
   const probe = async (server: McpServer) => {
-    setProbes((current) => ({ ...current, [server.name]: "идёт" }));
+    const key = probeKey(server);
+    setProbes((current) => ({ ...current, [key]: "идёт" }));
     try {
       const result = await api.mcpTest({
         command: server.command,
         args: server.args,
         env_refs: server.env_refs,
       });
-      setProbes((current) => ({ ...current, [server.name]: result }));
+      // Пока запрос летел, сервер могли удалить и пересоздать под тем же
+      // именем с другими полями — тогда ключ уже не совпадает ни с одной
+      // карточкой, и результат просто оседает в состоянии, ничего не ломая.
+      setProbes((current) => ({ ...current, [key]: result }));
     } catch (exc: unknown) {
       setProbes((current) => ({
         ...current,
-        [server.name]: {
+        [key]: {
           ok: false,
           tools: [],
           error: exc instanceof ApiError ? exc.message : "проверка не удалась",
@@ -150,11 +192,6 @@ export function McpScreen({ api }: { api: Api }) {
     setConfirming(null);
     try {
       await api.mcpRemove(target);
-      setProbes((current) => {
-        const next = { ...current };
-        delete next[target];
-        return next;
-      });
       reload();
     } catch (exc: unknown) {
       setStatus(
@@ -179,7 +216,7 @@ export function McpScreen({ api }: { api: Api }) {
         ) : (
           <div className="mcp__grid">
             {servers.map((server) => {
-              const probed = probes[server.name];
+              const probed = probes[probeKey(server)];
               return (
                 <div key={server.name} className="mcp__card">
                   <div className="mcp__card-head">

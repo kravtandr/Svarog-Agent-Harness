@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -267,5 +267,105 @@ describe("вкладка MCP: подключённые серверы", () => {
       screen.getByRole("button", { name: "Точно удалить?" }),
     );
     await waitFor(() => expect(api.mcpRemove).toHaveBeenCalledWith("github"));
+  });
+
+  it("взведённое согласие на удаление не переживает перезагрузку списка по другой причине", async () => {
+    // Список возвращается дважды: mockResolvedValueOnce каждый раз создаёт
+    // новый массив (как настоящий api.mcpList после реального запроса) —
+    // если бы обе перезагрузки отдавали один и тот же массив, React счёл бы
+    // состояние неизменным и не перезапустил бы эффект, который проверяем.
+    const api = fakeApi({
+      mcpList: vi
+        .fn()
+        .mockResolvedValueOnce([server])
+        .mockResolvedValueOnce([server]),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Удалить github" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    ).toBeInTheDocument();
+
+    // Несвязанное действие — подключение совсем другого сервера — тоже
+    // перезагружает список и должно снять согласие, взятое под github.
+    await userEvent.type(
+      screen.getByLabelText("Команда или JSON"),
+      "uvx mcp-server-fetch",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Подключить" }));
+    await waitFor(() => expect(api.mcpAdd).toHaveBeenCalled());
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Удалить github" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Точно удалить?" }),
+    ).not.toBeInTheDocument();
+    expect(api.mcpRemove).not.toHaveBeenCalled();
+  });
+
+  it("гонка опроса: ответ для удалённой конфигурации не приземляется на пересозданную карточку", async () => {
+    // В отличие от соседнего теста «Инструменты» опрашивает именно этот
+    // сервер — здесь запрос не отвечает сразу: сервер под тем же именем
+    // удаляют и пересоздают с другим составом args, пока проверка ещё летит.
+    let resolveTest: (value: {
+      ok: boolean;
+      tools: string[];
+      error: string | null;
+    }) => void = () => {};
+    const pending = new Promise<{
+      ok: boolean;
+      tools: string[];
+      error: string | null;
+    }>((resolve) => {
+      resolveTest = resolve;
+    });
+    const recreated = {
+      ...server,
+      args: ["-y", "@modelcontextprotocol/server-github", "--readonly"],
+    };
+    const api = fakeApi({
+      mcpList: vi
+        .fn()
+        .mockResolvedValueOnce([server])
+        .mockResolvedValueOnce([recreated]),
+      mcpTest: vi.fn().mockReturnValue(pending),
+    });
+    render(<McpScreen api={api} />);
+    await waitFor(() => expect(screen.getByText("github")).toBeInTheDocument());
+
+    // Запрос на проверку улетел для старой конфигурации сервера...
+    await userEvent.click(
+      screen.getByRole("button", { name: "Инструменты github" }),
+    );
+
+    // ...а пока он в полёте, сервер удаляют и пересоздают под тем же именем
+    // с другим набором аргументов.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Удалить github" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Точно удалить?" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "npx -y @modelcontextprotocol/server-github --readonly",
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    // Старый запрос наконец отвечает — результат принадлежит уже не
+    // существующей конфигурации и не должен появиться на новой карточке.
+    await act(async () => {
+      resolveTest({ ok: true, tools: ["create_issue"], error: null });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(screen.queryByText("create_issue")).not.toBeInTheDocument();
   });
 });
