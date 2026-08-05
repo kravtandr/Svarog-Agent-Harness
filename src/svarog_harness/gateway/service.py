@@ -51,7 +51,7 @@ from svarog_harness.gateway.attachments import (
     store_attachment,
     verify_attachment,
 )
-from svarog_harness.gateway.autotitle import fallback_title, needs_autotitle, title_for
+from svarog_harness.gateway.autotitle import fallback_title, needs_refine, title_for
 from svarog_harness.gateway.catalog import CatalogError, ModelCard, fetch_models
 from svarog_harness.gateway.executors import (
     ExecutorOption,
@@ -791,7 +791,7 @@ class GatewayService:
                 if run is None:
                     return None
                 session = await db.get(Session, run.session_id)
-                if session is None or not needs_autotitle(session.title, session.meta):
+                if session is None or not needs_refine(session.title, session.meta):
                     return None
                 first = (
                     await db.execute(
@@ -826,7 +826,7 @@ class GatewayService:
 
             async def write(db: AsyncSession) -> None:
                 session = await db.get(Session, session_id)
-                if session is None or not needs_autotitle(session.title, session.meta):
+                if session is None or not needs_refine(session.title, session.meta):
                     return  # гонка: параллельный run уже назвал
                 session.title = final_title
                 # JSON-колонка без MutableDict: изменение фиксируется только
