@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Гейт перед коммитом: те же две проверки ruff, что в CI стоят раньше всех.
+#
+# Зачем: с 31.07 по 05.08.2026 CI был красным ~40 прогонов подряд, и оба раза
+# из-за форматирования (overrides.py, потом test_gateway_providers_mcp.py) —
+# файл форматировали ruff'ом, не нашедшим pyproject проекта, поэтому он лёг по
+# дефолтному line-length 88 вместо заявленных 100. Проверка формата — ранний
+# шаг единственной job'ы, так что красный `ruff format --check` прятал за собой
+# mypy, pytest, evals, web и сборку колеса: они не выполнялись ни разу.
+#
+# Проверяем весь репозиторий, а не только staged-файлы: ровно так же это делает
+# CI, и только так ловится файл, отформатированный мимо конфига проекта.
+#
+# Обойти разово: git commit --no-verify
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! command -v uv >/dev/null 2>&1; then
+	echo "pre-commit: uv не найден — пропускаю проверки ruff" >&2
+	exit 0
+fi
+
+fail=0
+uv run ruff format --check || fail=1
+uv run ruff check || fail=1
+
+if [ "$fail" -ne 0 ]; then
+	cat >&2 <<'MSG'
+
+pre-commit: ruff недоволен — это уронит CI. Почини и повтори:
+    uv run ruff format && uv run ruff check --fix
+MSG
+	exit 1
+fi
