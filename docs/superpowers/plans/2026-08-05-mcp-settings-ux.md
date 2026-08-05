@@ -721,6 +721,32 @@ describe("вкладка MCP: подключение", () => {
     );
   });
 
+  it("новая проверка отменяет выданное согласие", async () => {
+    const api = fakeApi({
+      mcpTest: vi
+        .fn()
+        .mockResolvedValue({ ok: false, tools: [], error: "нет бинаря" }),
+    });
+    render(<McpScreen api={api} />);
+    await userEvent.type(screen.getByLabelText("Команда или JSON"), "нет-такой");
+    await userEvent.click(screen.getByRole("button", { name: "Проверить" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("нет бинаря"),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Подключить" }));
+    expect(
+      screen.getByRole("button", { name: "Всё равно подключить?" }),
+    ).toBeInTheDocument();
+
+    // Повторная проверка — согласие сброшено, второй отказ спрашивает заново.
+    await userEvent.click(screen.getByRole("button", { name: "Проверить" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Подключить" })).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Подключить" }));
+    expect(api.mcpAdd).not.toHaveBeenCalled();
+  });
+
   it("выбранный риск объясняет последствие", async () => {
     render(<McpScreen api={fakeApi()} />);
     await userEvent.click(screen.getByRole("radio", { name: "critical" }));
@@ -786,6 +812,9 @@ const editField = (part: Partial<ParsedServer>) => {
 const runTest = async () => {
   setTesting(true);
   setTest(null);
+  // Согласие «всё равно подключить» выдано под конкретный провал: новая
+  // проверка его отменяет, иначе второй отказ прошёл бы без переспроса.
+  setForcing(false);
   try {
     setTest(
       await api.mcpTest({
