@@ -47,10 +47,16 @@ beforeEach(() => {
 
 // App держит постоянный WS /sessions/events; в jsdom WebSocket нет.
 // No-op стаб — тесты, которым нужен живой сокет, ставят свой через
-// vi.stubGlobal (паттерн ChatScreen.test.tsx).
+// vi.stubGlobal (паттерн ChatScreen.test.tsx). Переустанавливаем в
+// beforeEach, а не один раз на файл: тест, который сам вызвал
+// vi.stubGlobal("WebSocket", ...) для проверки живого сокета, не обязан
+// вручную откатывать его в конце — следующий тест всё равно получит этот
+// no-op стаб, а не «голый» WebSocket из jsdom (там его нет вовсе).
 class StubWebSocket {
   onmessage: ((ev: MessageEvent<string>) => void) | null = null;
   onclose: (() => void) | null = null;
   close(): void {}
 }
-vi.stubGlobal("WebSocket", StubWebSocket);
+beforeEach(() => {
+  vi.stubGlobal("WebSocket", StubWebSocket);
+});

@@ -261,9 +261,13 @@ describe("оболочка приложения", () => {
         }),
       });
     });
+    // Точное имя, а не /Новое имя чата/: с фиксом aria-label (F2 ревью)
+    // регэксп-подстрока совпала бы ещё и с кнопкой меню «Меню чата
+    // «Новое имя чата»» — findByRole упал бы на неоднозначности.
     expect(
-      await screen.findByRole("button", { name: /Новое имя чата/ }),
+      await screen.findByRole("button", { name: "Новое имя чата" }),
     ).toBeInTheDocument();
-    vi.unstubAllGlobals();
+    // Стаб не откатываем вручную: setupTests переустанавливает no-op
+    // WebSocket в beforeEach перед каждым тестом, включая следующий.
   });
 });

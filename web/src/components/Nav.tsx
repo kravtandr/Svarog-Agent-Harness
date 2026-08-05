@@ -199,6 +199,10 @@ export function Nav({
                       <button
                         type="button"
                         className="nav__item"
+                        // Пока AnimatedTitle печатает новое название, видимый
+                        // текст временно пуст/укорочен — без aria-label
+                        // доступное имя кнопки моргало бы вместе с анимацией.
+                        aria-label={session.title}
                         onClick={() => {
                           setMenuFor(null); // выбор чата закрывает раскрытое меню
                           onPick(session.session_id);
