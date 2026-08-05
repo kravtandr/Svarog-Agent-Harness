@@ -1896,6 +1896,18 @@ const [editing, setEditing] = useState<{
   apiKey: string;
 } | null>(null);
 
+// Состояние, привязанное к имени, не должно переживать список: удалили
+// провайдера при открытой форме правки — и она всплывёт на новом провайдере
+// с тем же именем, молча перезаписав его старыми значениями.
+useEffect(() => {
+  const alive = new Set(providers.map((card) => card.name));
+  setExpanded((current) => (current !== null && alive.has(current) ? current : null));
+  setEditing((current) => (current !== null && alive.has(current.name) ? current : null));
+  setChecks((current) =>
+    Object.fromEntries(Object.entries(current).filter(([name]) => alive.has(name))),
+  );
+}, [providers]);
+
 // Правка существующего идёт тем же addProvider, что и добавление: бэкенд
 // различает их по имени, отдельного эндпоинта нет.
 const submitEdit = async () => {
@@ -1910,6 +1922,7 @@ const submitEdit = async () => {
     });
     applied(diff, `Провайдер «${editing.name}» обновлён.`);
     setEditing(null);
+    setExpanded(null);
     setOpenCatalog(null);
     setCatalogs({});
     reload();
