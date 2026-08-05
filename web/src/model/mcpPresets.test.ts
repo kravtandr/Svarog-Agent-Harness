@@ -30,4 +30,14 @@ describe("каталог MCP-пресетов", () => {
       expect(preset.paste, preset.id).not.toMatch(/[A-Z_]{4,}=\S/);
     }
   });
+
+  it("имя, выведенное из пресета, принимает бэкенд", () => {
+    // add_mcp требует [A-Za-z][\w-]{0,63}. Пресет, из которого выводится
+    // негодное имя, ведёт человека прямо в ошибку сохранения — так едва не
+    // уехал пин `--with mcp<2`, дававший имя `mcp<2`.
+    for (const preset of MCP_PRESETS) {
+      const name = parsePaste(preset.paste)?.name ?? "";
+      expect(name, preset.id).toMatch(/^[A-Za-z][\w-]{0,63}$/);
+    }
+  });
 });

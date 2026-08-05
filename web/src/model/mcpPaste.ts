@@ -62,14 +62,22 @@ function quoteArg(arg: string): string {
     .join("'\"'");
 }
 
+/** Правило имени сервера на бэкенде (`add_mcp`): латиница/цифры/дефис/
+    подчёркивание, начинается с буквы. Кандидат, который ему не отвечает,
+    предлагать бессмысленно — сохранение отвергнет его с ошибкой. */
+const NAME_OK = /^[A-Za-z][\w-]{0,63}$/;
+
 /** Имя сервера из аргументов: `@modelcontextprotocol/server-github` → github,
-    `mcp-server-fetch` → fetch. Флаги (-y, --port) именем быть не могут. */
+    `mcp-server-fetch` → fetch. Флаги (-y, --port) именем быть не могут — как и
+    их значения: в `uvx --with mcp<2 mcp-server-fetch` кандидат `mcp<2` внешне
+    похож на пакет, но именем быть не может, и раньше форма подставляла именно
+    его. Перебираем дальше, пока не найдём годное. */
 function guessName(command: string, args: string[]): string {
   for (const arg of args) {
     if (arg.startsWith("-")) continue;
     const tail = arg.split("/").pop() ?? arg;
     const stripped = tail.replace(/^(mcp-server-|server-|mcp-)/, "");
-    if (stripped !== "") return stripped;
+    if (NAME_OK.test(stripped)) return stripped;
   }
   return command;
 }

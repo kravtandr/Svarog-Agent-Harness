@@ -16,7 +16,10 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "fetch",
     title: "fetch",
-    paste: "uvx mcp-server-fetch",
+    // `mcp<2` — не наша прихоть: mcp-server-fetch объявляет `mcp>=1.1.3` без
+    // верхней границы, а mcp 2.0 переименовал McpError, и пакет ломается о
+    // собственную зависимость. Без пина команда не поднимается ни у кого.
+    paste: "uvx --with mcp<2 mcp-server-fetch",
     risk: "medium",
     hint: "Загружает страницы по URL",
   },
@@ -37,9 +40,13 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "postgres",
     title: "postgres",
-    paste: "npx -y @modelcontextprotocol/server-postgres",
+    // URL идёт аргументом, а не через env: без него сервер печатает
+    // «Please provide a database URL» и закрывается. В строке — образец,
+    // который человек правит под свою базу.
+    paste:
+      "npx -y @modelcontextprotocol/server-postgres postgresql://localhost/mydb",
     risk: "high",
-    hint: "Запросы к базе; нужен DATABASE_URL",
+    hint: "Запросы к базе; впишите свой URL в команду",
   },
   {
     id: "playwright",
@@ -51,9 +58,11 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "sqlite",
     title: "sqlite",
-    paste: "uvx mcp-server-sqlite",
+    // Пин по той же причине, что у fetch: в mcp 2.0 у Server не осталось
+    // list_resources. Путь к базе обязателен — сервер без него не стартует.
+    paste: "uvx --with mcp<2 mcp-server-sqlite --db-path ~/db.sqlite",
     risk: "medium",
-    hint: "Запросы к локальному файлу базы",
+    hint: "Запросы к локальному файлу базы; укажите свой путь",
   },
   {
     id: "memory",
@@ -65,7 +74,8 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "time",
     title: "time",
-    paste: "uvx mcp-server-time",
+    // Пин по той же причине, что у fetch.
+    paste: "uvx --with mcp<2 mcp-server-time",
     risk: "low",
     hint: "Текущее время и часовые пояса",
   },

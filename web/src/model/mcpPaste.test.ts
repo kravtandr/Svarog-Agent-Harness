@@ -67,6 +67,16 @@ describe("разбор вставленного MCP-конфига", () => {
     expect(parsePaste('{"args": ["без-команды"]}')).toBeNull();
   });
 
+  it("значение флага не становится именем, даже если похоже на пакет", () => {
+    // uvx --with mcp<2 mcp-server-fetch: кандидат `mcp<2` внешне выглядит как
+    // пакет, но бэкенд такое имя отвергает — перебор должен идти дальше.
+    expect(parsePaste("uvx --with mcp<2 mcp-server-fetch")?.name).toBe("fetch");
+    expect(
+      parsePaste("uvx --with mcp<2 mcp-server-sqlite --db-path ~/db.sqlite")
+        ?.name,
+    ).toBe("sqlite");
+  });
+
   it("если имя вывести не из чего — берёт команду", () => {
     expect(parsePaste("my-server")?.name).toBe("my-server");
   });
