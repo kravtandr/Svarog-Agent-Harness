@@ -260,6 +260,24 @@ def test_mcp_test_reports_failure_honestly(client: TestClient) -> None:
     assert body["error"]
 
 
+def test_mcp_test_survives_server_that_starts_but_does_not_speak_mcp(
+    client: TestClient,
+) -> None:
+    """Отказ после открытия транспорта — данные ответа, а не сорванный запрос.
+
+    Несуществующий бинарь падает до того, как транспорт открылся, поэтому эту
+    ветку он не проверяет. `true` стартует успешно и сразу выходит: раньше
+    открытый stdio-транспорт оставался незакрытым, а сборщик мусора разбирал
+    его в чужой задаче — «Attempted to exit cancel scope in a different task».
+    """
+    resp = client.post("/mcp/test", json={"command": "true", "args": []})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"]
+    assert body["tools"] == []
+
+
 def test_provider_check_reports_state_honestly(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

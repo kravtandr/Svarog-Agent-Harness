@@ -1,5 +1,6 @@
 """Тесты MCP-интеграции (#29): discovery, MCPTool, default require_approval (§9)."""
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from svarog_harness.llm.provider import (
     Usage,
 )
 from svarog_harness.mcp import MCPBackend, MCPError, MCPTool, MCPToolSpec, build_mcp_tools
+from svarog_harness.mcp.integration import StdioMCPBackend as StdioMCPBackendOriginal
 from svarog_harness.policy.engine import PolicyAction, PolicyEngine
 from svarog_harness.runtime import orchestrator, run_assembly
 from svarog_harness.runtime.orchestrator import RunHooks, TaskRunner
@@ -297,3 +299,97 @@ async def test_mcp_explicit_false_overrides_auto_gate(
     names = [d.name for d in provider.seen_defs[0]]
     assert "load_tool" not in names
     assert sum(1 for name in names if name.startswith("mcp__")) == 12
+
+
+async def test_failed_connect_leaves_no_orphaned_transport() -> None:
+    """Отказ после открытия транспорта не должен оставлять живой AsyncExitStack.
+
+    `stdio_client` внутри держит anyio task group. Если connect() падает уже
+    после входа в него (сервер стартовал, но не говорит на протоколе), а стек
+    никто не закрывает, его разбирает сборщик мусора — в чужой задаче. Это даёт
+    «Attempted to exit cancel scope in a different task» и, что хуже, отменяет
+    задачу вызывающего: случайный GC способен убить чужой живой HTTP-запрос.
+    """
+    import gc
+
+    from mcp.shared.exceptions import McpError
+
+    from svarog_harness.config.schema import MCPServerConfig
+    from svarog_harness.mcp.integration import StdioMCPBackend
+
+    # `true` спавнится успешно и сразу выходит: транспорт открыт, initialize
+    # падает. Несуществующий бинарь эту ветку не проверяет — он падает раньше.
+    # Тип исключения задаёт SDK: connect() пробрасывает его как есть.
+    backend = StdioMCPBackend("probe", MCPServerConfig(command="true", args=[]))
+    with pytest.raises(McpError):
+        await backend.connect()
+
+    assert backend._stack is None, "стек транспорта остался открытым после отказа"
+
+    # Сборка мусора не должна ни ругаться, ни отменять текущую задачу.
+    gc.collect()
+    await asyncio.sleep(0.05)
+
+
+async def test_batch_connect_closes_already_connected_on_failure() -> None:
+    """Отказ одного сервера закрывает те, что уже поднялись.
+
+    `connect_mcp_servers` возвращает список целиком или не возвращает ничего:
+    вызывающие (gateway и orchestrator.py:557) присваивают результат одной
+    операцией, поэтому при исключении у них на руках не остаётся ничего, что
+    можно было бы закрыть.
+    """
+    from svarog_harness.config.schema import MCPConfig, MCPServerConfig
+    from svarog_harness.mcp import integration
+
+    closed: list[str] = []
+
+    class Recording:
+        def __init__(self, server_name: str, cfg: MCPServerConfig, store: object = None) -> None:
+            self.server_name = server_name
+
+        async def connect(self) -> None:
+            if self.server_name == "второй":
+                raise MCPError("не поднялся")
+
+        async def close(self) -> None:
+            closed.append(self.server_name)
+
+    integration.StdioMCPBackend = Recording  # type: ignore[misc]
+    try:
+        cfg = MCPConfig(
+            servers={
+                "первый": MCPServerConfig(command="a", args=[]),
+                "второй": MCPServerConfig(command="b", args=[]),
+            }
+        )
+        with pytest.raises(MCPError):
+            await integration.connect_mcp_servers(cfg, None)
+    finally:
+        integration.StdioMCPBackend = StdioMCPBackendOriginal  # type: ignore[misc]
+
+    assert closed == ["первый"], "уже поднятый сервер остался висеть процессом"
+
+
+async def test_connect_cancelled_by_timeout_still_cleans_up() -> None:
+    """Уборка работает и внутри уже отменённой области.
+
+    Самый вероятный отказ на практике — сервер долго стартует (uvx тянет пакет)
+    и упирается в таймаут gateway. Уборка тогда идёт внутри отменённой области,
+    где очередной await сам может быть отменён; проверяем, что стек всё равно
+    закрыт, а не осиротел повторно.
+    """
+    import gc
+
+    from svarog_harness.config.schema import MCPServerConfig
+    from svarog_harness.mcp.integration import StdioMCPBackend
+
+    # Стартует и молчит: initialize не дождётся ответа — сработает таймаут.
+    backend = StdioMCPBackend("probe", MCPServerConfig(command="sh", args=["-c", "sleep 5"]))
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.3):
+            await backend.connect()
+
+    assert backend._stack is None, "после отмены стек остался открытым"
+    gc.collect()
+    await asyncio.sleep(0.05)

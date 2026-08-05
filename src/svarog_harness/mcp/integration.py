@@ -6,6 +6,7 @@ SDK `mcp` импортируется лениво (опциональная за
 импортируется, а попытка реально подключиться даёт понятную ошибку.
 """
 
+from contextlib import suppress
 from typing import Any
 
 from svarog_harness.config.schema import MCPConfig, MCPServerConfig
@@ -51,19 +52,33 @@ class StdioMCPBackend(MCPBackend):
         params = StdioServerParameters(
             command=self._cfg.command, args=list(self._cfg.args), env=env or None
         )
+        # Всё после создания стека — под защитой: сервер мог стартовать, но не
+        # ответить на initialize. Тогда транспорт уже открыт, а стек не закрыт
+        # никем: его разберёт сборщик мусора — в чужой задаче, — и anyio даст
+        # «Attempted to exit cancel scope in a different task». Хуже того,
+        # осиротевшая task group отменяет задачу вызывающего: случайный GC
+        # способен убить чужой живой HTTP-запрос. Подключение либо целиком
+        # удалось, либо не оставило следов.
         self._stack = AsyncExitStack()
-        read, write = await self._stack.enter_async_context(stdio_client(params))
-        self._session = await self._stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
-        listed = await self._session.list_tools()
-        self._specs = [
-            MCPToolSpec(
-                name=tool.name,
-                description=tool.description or "",
-                input_schema=dict(tool.inputSchema or {"type": "object"}),
-            )
-            for tool in listed.tools
-        ]
+        try:
+            read, write = await self._stack.enter_async_context(stdio_client(params))
+            self._session = await self._stack.enter_async_context(ClientSession(read, write))
+            await self._session.initialize()
+            listed = await self._session.list_tools()
+            self._specs = [
+                MCPToolSpec(
+                    name=tool.name,
+                    description=tool.description or "",
+                    input_schema=dict(tool.inputSchema or {"type": "object"}),
+                )
+                for tool in listed.tools
+            ]
+        except BaseException:
+            # BaseException, а не Exception: отмена по таймауту — штатный путь
+            # этой ветки (gateway даёт connect 20 секунд), и убрать за собой
+            # надо именно в ней.
+            await self.close()
+            raise
 
     def specs(self) -> list[MCPToolSpec]:
         return self._specs
@@ -99,7 +114,17 @@ async def connect_mcp_servers(cfg: MCPConfig, store: SecretStore | None = None) 
     backends: list[MCPBackend] = []
     for name, server in cfg.servers.items():
         backend = StdioMCPBackend(name, server, store)
-        await backend.connect()
+        try:
+            await backend.connect()
+        except BaseException:
+            # Вызывающие присваивают результат одной операцией (gateway и
+            # orchestrator.py:557), поэтому при исключении у них на руках нет
+            # ничего, что можно закрыть, — уже поднятые серверы остались бы
+            # висеть процессами. Список отдаётся целиком или не отдаётся.
+            for started in backends:
+                with suppress(Exception):
+                    await started.close()
+            raise
         backends.append(backend)
     return backends
 
