@@ -342,22 +342,16 @@ def test_provider_rename_rejects_bad_targets(client: TestClient) -> None:
     )
     # Занятое имя, кривое имя, неизвестный источник.
     assert (
-        client.post("/models/providers/local/rename", json={"new_name": "groq"}).status_code
-        == 422
+        client.post("/models/providers/local/rename", json={"new_name": "groq"}).status_code == 422
     )
     assert (
         client.post("/models/providers/local/rename", json={"new_name": "плохое"}).status_code
         == 422
     )
-    assert (
-        client.post("/models/providers/нет/rename", json={"new_name": "ok"}).status_code
-        == 404
-    )
+    assert client.post("/models/providers/нет/rename", json={"new_name": "ok"}).status_code == 404
 
 
-def test_provider_rename_updates_auxiliary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provider_rename_updates_auxiliary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Rename обновляет models.auxiliary, если он указывал на переименовываемый провайдер."""
     monkeypatch.setenv("HOME", str(tmp_path))
     ws = tmp_path / "ws"
@@ -394,9 +388,7 @@ def test_provider_rename_updates_auxiliary(
     assert "local" not in data["models"]["providers"]
 
 
-def test_provider_remove_guards_default(
-    client: TestClient, service: GatewayService
-) -> None:
+def test_provider_remove_guards_default(client: TestClient, service: GatewayService) -> None:
     """Remove отказывает, если удаляемый провайдер — default."""
     client.post(
         "/models/providers",
@@ -411,9 +403,7 @@ def test_provider_remove_guards_default(
     assert client.delete("/models/providers/local").status_code == 404
 
 
-def test_provider_remove_guards_auxiliary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provider_remove_guards_auxiliary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove отказывает, если удаляемый провайдер — auxiliary (не default)."""
     monkeypatch.setenv("HOME", str(tmp_path))
     ws = tmp_path / "ws"
@@ -450,9 +440,7 @@ def test_provider_remove_guards_auxiliary(
     assert "auxiliary" in resp.json()["detail"]
 
 
-def test_provider_remove_collapses_wrapper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provider_remove_collapses_wrapper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove удаляет последнего провайдера и сворачивает пустую обёртку models."""
     monkeypatch.setenv("HOME", str(tmp_path))
     # User config с дефолтным провайдером.
@@ -569,9 +557,7 @@ def test_provider_rename_user_config_only_rejects(
     app_client = TestClient(create_app(svc))
 
     # POST rename провайдера, который только в user config — должна быть ошибка.
-    resp = app_client.post(
-        "/models/providers/user-only/rename", json={"new_name": "user-renamed"}
-    )
+    resp = app_client.post("/models/providers/user-only/rename", json={"new_name": "user-renamed"})
     assert resp.status_code == 422
     assert "~/.svarog" in resp.json()["detail"]
 
