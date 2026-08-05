@@ -27,8 +27,15 @@
   color: var(--text);
 }
 
+/* Раскладка: две колонки, не три. Дифф приходит снизу и только когда есть
+   что сохранять, поэтому тело — flex-колонка: .settings__col и полоса под
+   ним. Класс принадлежит только этому экрану — общий с MCP он молча менял
+   бы там режим раскладки. */
 .settings__body {
+  position: relative;
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   padding: 26px 32px;
   overflow-y: auto;
@@ -97,13 +104,6 @@
   color: var(--bad);
 }
 
-/* Раскладка: две колонки, не три. Дифф приходит снизу и только когда есть
-   что сохранять. */
-.settings__body {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-}
 .settings__col {
   width: 100%;
   max-width: 720px;

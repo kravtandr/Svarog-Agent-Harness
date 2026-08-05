@@ -248,6 +248,18 @@ describe("вкладка MCP: подключение", () => {
   });
 });
 
+describe("вкладка MCP: раскладка", () => {
+  it("тело вкладки не делит класс раскладки с Настройками", () => {
+    // .settings__body — flex-колонка ради полосы диффа под контентом. На
+    // этой вкладке нет ни .settings__col, ни диффа, и общий класс делал
+    // каждый прямой потомок flex-элементом во всю ширину — так кнопка
+    // «Уточнить» оказалась растянутой на весь экран.
+    const { container } = render(<McpScreen api={fakeApi()} />);
+    expect(container.querySelector(".mcp__body")).not.toBeNull();
+    expect(container.querySelector(".settings__body")).toBeNull();
+  });
+});
+
 describe("вкладка MCP: подключённые серверы", () => {
   const server = {
     name: "github",

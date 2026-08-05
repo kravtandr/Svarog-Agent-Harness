@@ -220,7 +220,7 @@ export function McpScreen({ api }: { api: Api }) {
 
   return (
     <div className="settings">
-      <div className="settings__body mcp__body">
+      <div className="mcp__body">
         <h2 className="settings__title">MCP-серверы</h2>
         <p className="field__help">
           Инструменты серверов проходят Policy Engine: по умолчанию каждый вызов

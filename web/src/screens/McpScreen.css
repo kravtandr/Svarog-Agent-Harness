@@ -1,5 +1,17 @@
+/* Своя прокручиваемая область, а не .settings__body: тот — flex-колонка ради
+   полосы диффа под контентом, и здесь, где ни .settings__col, ни диффа нет,
+   он делал каждый прямой потомок вкладки flex-элементом во всю ширину. */
 .mcp__body {
+  flex: 1;
+  min-width: 0;
   max-width: 1100px;
+  padding: 26px 32px;
+  overflow-y: auto;
+}
+@media (max-width: 899px) {
+  .mcp__body {
+    padding: 18px 14px 0;
+  }
 }
 .mcp__actions {
   display: flex;
