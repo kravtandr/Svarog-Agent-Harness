@@ -410,6 +410,7 @@ class RunAssembly:
             on_tool_call=hooks.on_tool_call,
             on_tool_result=hooks.on_tool_result,
             on_run_started=on_run_started,
+            on_phase=hooks.on_phase,
             on_progress=hooks.on_progress,
             parent_run_id=parent_run_id,
             bridge=infra.bridge if infra is not None else None,

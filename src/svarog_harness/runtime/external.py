@@ -117,6 +117,7 @@ class ExternalAgentExecutor:
         on_tool_call: "Callable[[str, dict[str, object]], None] | None" = None,
         on_tool_result: "Callable[[str, str, str], None] | None" = None,
         on_run_started: "Callable[[Run], None] | None" = None,
+        on_phase: "Callable[[str], None] | None" = None,
         on_progress: "Callable[[int, int, float, float, int], None] | None" = None,
         parent_run_id: str | None = None,
         bridge: RunBridge | None = None,
@@ -138,6 +139,7 @@ class ExternalAgentExecutor:
         self._on_tool_call = on_tool_call
         self._on_tool_result = on_tool_result
         self._on_run_started = on_run_started
+        self._on_phase = on_phase
         self._on_progress = on_progress
         # Делегация (ADR-0016 фаза 3.5): внешний run как ребёнок нативного.
         self._parent_run_id = parent_run_id
@@ -184,6 +186,11 @@ class ExternalAgentExecutor:
         )
         if self._on_run_started is not None:
             self._on_run_started(run)
+        # Только теперь запись run'а существует и подписчик её видит: событие,
+        # отправленное раньше, ушло бы в никуда (emit молчит без run_id).
+        # Первый ход агента — самая длинная тишина в прогоне.
+        if self._on_phase is not None:
+            self._on_phase("агент думает")
         await self._recorder.add_message(run, "user", {"content": self._redact(task)})
         return await self._execute(run, task, agent_session)
 

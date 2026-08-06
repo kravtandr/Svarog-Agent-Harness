@@ -649,8 +649,6 @@ class TaskRunner:
             infra = self.build_agent_infra()
         try:
             if resources is None:
-                if hooks.on_phase is not None:
-                    hooks.on_phase("поднимаем окружение")
                 if infra is not None:
                     # Bridge (LLM-прокси + control) и internal-сеть — до контейнера;
                     # внутри try, чтобы сбой prepare_launch не осиротил уже поднятые
@@ -694,10 +692,6 @@ class TaskRunner:
                         if session_id is not None
                         else None
                     )
-                    # Первый ход внешнего агента — самая длинная тишина в
-                    # прогоне: контейнер уже поднят, а событий ещё нет.
-                    if hooks.on_phase is not None:
-                        hooks.on_phase("агент думает")
                     outcome = await executor.run(
                         task, autonomy, session_id=session_id, agent_session=agent_session
                     )
