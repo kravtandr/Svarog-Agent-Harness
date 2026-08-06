@@ -688,7 +688,9 @@ class TaskRunner:
                     # Chat-непрерывность (ADR-0016 фаза 3, как в CLI-chat):
                     # новый run продолжает сессию агента предыдущего run'а Session.
                     agent_session = (
-                        await recorder.last_agent_session(session_id)
+                        await recorder.last_agent_session(
+                            session_id, adapter=self._cfg.executor.external.adapter
+                        )
                         if session_id is not None
                         else None
                     )

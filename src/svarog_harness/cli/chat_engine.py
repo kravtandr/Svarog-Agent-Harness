@@ -269,7 +269,9 @@ class ChatEngine:
                     resources.infra, self._autonomy, proposal_sink, self._hooks
                 )
                 agent_session = (
-                    await recorder.last_agent_session(self._session_id)
+                    await recorder.last_agent_session(
+                        self._session_id, adapter=runner.cfg.executor.external.adapter
+                    )
                     if self._session_id is not None
                     else None
                 )

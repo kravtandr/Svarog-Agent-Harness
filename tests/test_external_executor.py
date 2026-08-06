@@ -935,3 +935,44 @@ async def test_same_text_after_a_tool_call_is_recorded_again(
     messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
     assistant = [m.content["content"] for m in messages if m.role == "assistant"]
     assert assistant.count("Смотрю дальше.") == 2
+
+
+async def test_agent_session_is_not_reused_across_executors(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Сессия агента продолжается только тем же исполнителем.
+
+    Идентификаторы сессий у агентов свои: opencode отдаёт `ses_…`, claude-code
+    ждёт UUID. Переключение исполнителя в существующем чате отдавало новому
+    агенту чужой идентификатор, и run падал сырой ошибкой
+    «--resume requires a valid session ID» (найдено 06.08.2026).
+    """
+    from svarog_harness.runtime.external import ADAPTER_META_KEY, AGENT_SESSION_META_KEY
+    from svarog_harness.trace.recorder import TraceRecorder
+
+    recorder = TraceRecorder(db)
+    chat = await recorder.create_session(title="чат")
+    run = await recorder.start_run(
+        task="прошлый ход",
+        autonomy="yolo",
+        model="external:opencode",
+        session_id=chat.id,
+    )
+    await recorder.merge_run_meta(
+        run, {ADAPTER_META_KEY: "opencode", AGENT_SESSION_META_KEY: "ses_opencode_1"}
+    )
+
+    # Тот же исполнитель — продолжаем сессию.
+    assert await recorder.last_agent_session(chat.id, adapter="opencode") == "ses_opencode_1"
+    # Другой — начинаем с чистого листа, а не падаем на чужом формате.
+    assert await recorder.last_agent_session(chat.id, adapter="claude-code") is None
+
+    # Run старше ключа adapter: судить не о чем, непрерывность важнее строгости.
+    old = await recorder.start_run(
+        task="совсем старый ход",
+        autonomy="yolo",
+        model="external:opencode",
+        session_id=chat.id,
+    )
+    await recorder.merge_run_meta(old, {AGENT_SESSION_META_KEY: "ses_без_адаптера"})
+    assert await recorder.last_agent_session(chat.id, adapter="claude-code") == "ses_без_адаптера"

@@ -235,16 +235,34 @@ class TraceRecorder:
         )
         return result.scalars().first()
 
-    async def last_agent_session(self, session_id: str) -> str | None:
+    async def last_agent_session(
+        self, session_id: str, *, adapter: str | None = None
+    ) -> str | None:
         """agent_session_id последнего run'а Session — chat-непрерывность
-        внешнего агента (ADR-0016 фаза 3)."""
+        внешнего агента (ADR-0016 фаза 3).
+
+        `adapter` обязателен по смыслу: идентификаторы сессий у агентов свои
+        (opencode отдаёт `ses_…`, claude-code ждёт UUID), и продолжать чужую
+        сессию нельзя. Переключение исполнителя в существующем чате отдавало
+        новому агенту чужой идентификатор, и run падал сырой ошибкой
+        «--resume requires a valid session ID» (найдено 06.08.2026).
+        """
         result = await self._db.execute(
             select(Run).where(Run.session_id == session_id).order_by(Run.created_at.desc())
         )
         for run in result.scalars():
-            value = (run.meta or {}).get("agent_session_id")
-            if isinstance(value, str) and value:
-                return value
+            meta = run.meta or {}
+            value = meta.get("agent_session_id")
+            if not (isinstance(value, str) and value):
+                continue
+            recorded = meta.get("adapter")
+            if adapter is not None and recorded is not None and recorded != adapter:
+                # Ход тем же чатом, но другим агентом: начинаем его сессию с
+                # чистого листа, а не подсовываем ему чужой идентификатор.
+                return None
+            # Адаптер не записан (run старше этого ключа) — судить не о чем,
+            # оставляем прежнее поведение: непрерывность важнее строгости.
+            return value
         return None
 
     async def expire_approval(self, approval: Approval) -> None:
