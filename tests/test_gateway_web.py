@@ -67,6 +67,37 @@ async def test_list_sessions_endpoint(service: GatewayService) -> None:
     assert body[0]["runs_count"] == 0
 
 
+def test_sandbox_label_replaces_container_path() -> None:
+    """Путь внутри контейнера человеку ничего не говорит.
+
+    Агент в docker видит рабочую папку как /workspace — и в аргументе, и в
+    выводе инструмента. В ленте это выглядело так, будто он работает не там
+    (запрос 06.08.2026). Показываем метку песочницы и имя настоящей папки.
+    """
+    ws = Path("/Users/kto/proj/test")
+    assert short_arg({"path": "/workspace"}, workspace=ws) == "<sandbox>/test"
+    assert (
+        short_arg({"path": "/workspace/src/main.py"}, workspace=ws) == "<sandbox>/test/src/main.py"
+    )
+    # `read` по каталогу возвращает путь в выводе — правая часть строки.
+    assert (
+        short_result(
+            ok=True,
+            output="<path>/workspace</path>\n<type>directory</type>",
+            workspace=ws,
+        )
+        == "<path><sandbox>/test</path>"
+    )
+
+
+def test_sandbox_label_leaves_other_paths_alone() -> None:
+    """Похожие по началу пути не трогаем: /workspaces — другая папка."""
+    ws = Path("/Users/kto/proj/test")
+    assert short_arg({"path": "/workspaces/чужое"}, workspace=ws) == "/workspaces/чужое"
+    # Без workspace (не sandbox-прогон) значение остаётся как есть.
+    assert short_arg({"path": "/workspace/a"}) == "/workspace/a"
+
+
 def test_short_arg_prefers_meaningful_key() -> None:
     assert short_arg({"path": "memory/index.py", "content": "x" * 500}) == "memory/index.py"
     assert short_arg({"command": "uv run pytest -q"}) == "uv run pytest -q"

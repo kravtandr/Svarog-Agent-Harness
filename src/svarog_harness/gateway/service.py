@@ -738,7 +738,11 @@ class GatewayService:
             on_run_started=on_started,
             on_text_delta=lambda delta: emit({"type": "text", "delta": delta}),
             on_tool_call=lambda name, args: emit(
-                {"type": "tool_call", "tool": name, "arg": short_arg(args)}
+                {
+                    "type": "tool_call",
+                    "tool": name,
+                    "arg": short_arg(args, workspace=self.workspace),
+                }
             ),
             on_tool_result=lambda name, status, summary: emit(
                 {"type": "tool_result", "tool": name, "status": status, "result": summary}
@@ -1368,11 +1372,12 @@ class GatewayService:
                             kind="call",
                             server=server or None,
                             name=bare,
-                            arg=short_arg(call.arguments or {}),
+                            arg=short_arg(call.arguments or {}, workspace=self.workspace),
                             result=short_result(
                                 ok=call.status is ToolCallStatus.SUCCEEDED,
                                 output=str((call.result or {}).get("output", "")),
                                 error=call.error,
+                                workspace=self.workspace,
                             ),
                             status=call.status.value,
                         )

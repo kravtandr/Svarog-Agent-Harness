@@ -444,6 +444,7 @@ class ExternalAgentExecutor:
                                     ok=event.ok,
                                     output=output,
                                     error=None if event.ok else output,
+                                    workspace=self._workspace,
                                 )
                             ),
                         )

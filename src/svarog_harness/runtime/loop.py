@@ -647,7 +647,12 @@ class AgentLoop:
                     prepared.call.name,
                     record.status.value,
                     self._redact_text(
-                        short_result(ok=result.ok, output=result.output, error=result.error)
+                        short_result(
+                            ok=result.ok,
+                            output=result.output,
+                            error=result.error,
+                            workspace=self._workspace,
+                        )
                     ),
                 )
             rendered = self._render_tool_result(run, prepared.call, result)
@@ -1232,7 +1237,12 @@ class AgentLoop:
                 call.name,
                 record.status.value,
                 self._redact_text(
-                    short_result(ok=result.ok, output=result.output, error=result.error)
+                    short_result(
+                        ok=result.ok,
+                        output=result.output,
+                        error=result.error,
+                        workspace=self._workspace,
+                    )
                 ),
             )
         return result
