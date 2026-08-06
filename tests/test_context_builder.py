@@ -55,3 +55,18 @@ def test_system_prompt_includes_competency_honesty_rule() -> None:
     system = build_initial_messages("t", Path("/ws"), memory="")[0].content
     assert "пробелы в компетенциях" in system.lower()
     assert "React ≠ mobile" in system
+
+
+def test_memory_guide_separates_memory_from_current_folder() -> None:
+    """Промпт говорит, что память общая для всех папок и не описывает текущую.
+
+    Индекс памяти подаётся в контекст целиком. В пустой рабочей папке агент
+    находил в нём единственный знакомый проект и выдавал его за текущий
+    (трейс 06.08.2026: пустой `test` → рассказ про TaskTracker). Про содержимое
+    папки судят по самой папке.
+    """
+    from svarog_harness.runtime.context_builder import _MEMORY_GUIDE
+
+    guide = _MEMORY_GUIDE.lower()
+    assert "не описывает" in guide or "не описывают" in guide
+    assert "рабоч" in guide and "папк" in guide

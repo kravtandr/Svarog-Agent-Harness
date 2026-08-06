@@ -183,3 +183,32 @@ def test_index_overflowed_true_when_many(tmp_path: Path) -> None:
             encoding="utf-8",
         )
     assert index_overflowed(tmp_path, max_lines=20) is True
+
+
+def test_index_shows_which_folder_a_project_lives_in(tmp_path: Path) -> None:
+    """Страница проекта может назвать свою рабочую папку — индекс её показывает.
+
+    Индекс памяти общий для всех рабочих папок и подаётся в контекст целиком.
+    Без указания папки агент в пустом каталоге принимает единственный знакомый
+    ему проект за текущий (найдено в трейсе 06.08.2026: пустой `test` →
+    рассказ про TaskTracker).
+    """
+    _create_project(tmp_path, "tasktracker", today=date(2026, 7, 10))
+    page = tmp_path / "projects/tasktracker/overview.md"
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            "slug: tasktracker", "slug: tasktracker\nworkspace: /Users/kto/proj/TaskTracker"
+        ),
+        encoding="utf-8",
+    )
+
+    index = render_index(tmp_path)
+    assert "/Users/kto/proj/TaskTracker" in index
+
+
+def test_index_without_workspace_stays_as_before(tmp_path: Path) -> None:
+    """Поле необязательно: страницы без него выглядят как раньше."""
+    _create_project(tmp_path, "animateyou", today=date(2026, 7, 10))
+    index = render_index(tmp_path)
+    assert "[AnimateYou](projects/animateyou/overview.md)" in index
+    assert "папка:" not in index

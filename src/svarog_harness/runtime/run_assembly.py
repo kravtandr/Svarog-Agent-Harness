@@ -104,6 +104,11 @@ class RunHooks:
     on_tool_result: Callable[[str, str, str], None] | None = None
     on_notify: Callable[[str, str], None] | None = None
     on_progress: Callable[[int, int, float, float, int], None] | None = None
+    # Что происходит прямо сейчас, человеческим текстом. Строка статуса и так
+    # тикает секундомером, но «работает» одинаково выглядит и на холодном
+    # старте окружения, и когда модель думает минуту — отличить зависание от
+    # работы нельзя (трейс 06.08.2026).
+    on_phase: Callable[[str], None] | None = None
     on_check: Callable[[CheckOutcome], None] | None = None
     on_verify_failed: Callable[[int], None] | None = None
     on_commit: Callable[[str, str, bool], None] | None = None

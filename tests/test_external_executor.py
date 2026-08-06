@@ -892,3 +892,46 @@ async def test_run_rules_preamble_in_launch_not_in_trace(db: AsyncSession, tmp_p
     messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
     user_msgs = [m for m in messages if m.role == "user"]
     assert all("[Правила run'а Svarog]" not in str(m.content) for m in user_msgs)
+
+
+async def test_repeated_identical_text_event_is_not_recorded_twice(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Один и тот же финальный текст, присланный дважды, пишется один раз.
+
+    Найдено в трейсе 06.08.2026: opencode прислал финальный ответ двумя
+    text-событиями подряд, и оба легли в историю байт в байт. Дубль не виден в
+    ленте, но уезжает в контекст следующего хода и стоит токенов.
+    """
+    text = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Ответ целиком."}]},
+    }
+    executor = _executor(db, tmp_path, [_INIT, text, text, _RESULT])
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    assistant = [m.content["content"] for m in messages if m.role == "assistant"]
+    assert assistant.count("Ответ целиком.") == 1
+
+
+async def test_same_text_after_a_tool_call_is_recorded_again(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Повтор через шаг — не дубль: агент мог осмысленно повторить реплику.
+
+    Схлопывать надо только подряд идущие одинаковые события, иначе потеряется
+    настоящая реплика, разделённая работой инструмента.
+    """
+    text = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Смотрю дальше."}]},
+    }
+    executor = _executor(db, tmp_path, [_INIT, text, _TOOL_RESULT, text, _RESULT])
+    outcome = await executor.run("задача", AutonomyMode.YOLO)
+
+    assert outcome.state is RunState.COMPLETED
+    messages = (await db.execute(select(Message).order_by(Message.index_in_run))).scalars().all()
+    assistant = [m.content["content"] for m in messages if m.role == "assistant"]
+    assert assistant.count("Смотрю дальше.") == 2

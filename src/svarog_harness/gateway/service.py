@@ -753,6 +753,7 @@ class GatewayService:
                     "cost_usd": cost,
                 }
             ),
+            on_phase=lambda text: emit({"type": "phase", "text": text}),
             on_notify=lambda name, reason: emit({"type": "notify", "tool": name, "reason": reason}),
             on_check=on_check,
             on_commit=lambda sha, branch, push: emit(

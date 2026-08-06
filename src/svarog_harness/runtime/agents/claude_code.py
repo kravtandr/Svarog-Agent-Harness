@@ -26,6 +26,7 @@ from svarog_harness.runtime.executor import (
     AgentLaunch,
     ask_user_guide,
     competency_honesty_guide,
+    memory_scope_guide,
     memory_sources_guide,
 )
 from svarog_harness.runtime.self_docs import self_docs_hint
@@ -129,6 +130,7 @@ class ClaudeCodeAdapter:
             + memory_sources_guide("mcp__svarog__remember")
             + (f"\n\nТекущая память Svarog:\n\n{memory}" if memory else "")
         )
+        sections.append(memory_scope_guide())
         sections.append(ask_user_guide("mcp__svarog__ask_user"))
         sections.append(competency_honesty_guide())
         if skill_cards:

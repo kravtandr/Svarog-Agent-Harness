@@ -35,6 +35,7 @@ export type StreamEvent =
       payload: Record<string, unknown>;
     }
   | { type: "progress"; iterations: number; tokens: number; cost_usd: number }
+  | { type: "phase"; text: string }
   | { type: string; [key: string]: unknown };
 
 let counter = 0;

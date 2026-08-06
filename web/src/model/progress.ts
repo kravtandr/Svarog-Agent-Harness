@@ -39,6 +39,12 @@ export function progressDetail(
 export function progressLabel(
   elapsedSec: number,
   progress: RunProgress | null,
+  phase?: string | null,
 ): string {
-  return `Сварог работает… ${progressDetail(elapsedSec, progress)}`;
+  // Фаза заменяет общее «работает»: по нему нельзя отличить холодный старт
+  // окружения от думающей минуту модели (трейс 06.08.2026).
+  const head = phase
+    ? phase.charAt(0).toUpperCase() + phase.slice(1)
+    : "Сварог работает";
+  return `${head}… ${progressDetail(elapsedSec, progress)}`;
 }

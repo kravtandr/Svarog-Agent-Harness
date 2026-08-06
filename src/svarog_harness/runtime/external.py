@@ -87,6 +87,9 @@ class _StreamState:
     # Последний фолбэк: gpt-oss/harmony у части провайдеров кладёт ответ
     # только в reasoning-канал, text-событий нет вовсе.
     last_reasoning: str = ""
+    # Текст последнего подряд идущего text-события: любое другое событие его
+    # сбрасывает, поэтому схлопываются только настоящие дубли.
+    repeated_text: str | None = None
     result_ok: bool = False
     saw_result: bool = False
     tokens_used: int = 0
@@ -364,9 +367,20 @@ class ExternalAgentExecutor:
         if event.session_id is not None and state.agent_session is None:
             state.agent_session = event.session_id
             await self._recorder.merge_run_meta(run, {AGENT_SESSION_META_KEY: event.session_id})
+        if event.kind != "text":
+            # Любое другое событие разрывает серию: тот же текст после работы
+            # инструмента — осмысленный повтор, а не дубль.
+            state.repeated_text = None
         match event.kind:
             case "text":
                 text = self._redact(event.text)
+                # Агент присылает финальный текст двумя одинаковыми событиями
+                # подряд (opencode, найдено в трейсе 06.08.2026). В ленте дубль
+                # незаметен, но уезжает в контекст следующего хода и стоит
+                # токенов.
+                if text == state.repeated_text:
+                    return
+                state.repeated_text = text
                 state.last_text = text
                 await self._recorder.add_message(run, "assistant", {"content": text})
                 if self._on_text_delta is not None:

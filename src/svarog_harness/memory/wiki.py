@@ -53,6 +53,11 @@ def _project_pages(memory_dir: Path) -> list[dict[str, str]]:
                 "status": str(frontmatter.get("status", "")).strip().lower(),
                 "updated": str(frontmatter.get("updated", "")).strip(),
                 "path": f"projects/{slug}/overview.md",
+                # Необязательное: рабочая папка проекта. Индекс общий для всех
+                # папок и подаётся в контекст целиком — без этой пометки агент
+                # в пустом каталоге принимает единственный знакомый проект за
+                # текущий (трейс 06.08.2026).
+                "workspace": str(frontmatter.get("workspace", "")).strip(),
             }
         )
     return pages
@@ -87,7 +92,8 @@ def _source_files(memory_dir: Path) -> list[str]:
 
 
 def _project_line(page: dict[str, str]) -> str:
-    meta = " · ".join(x for x in (page["status"], page["updated"]) if x)
+    folder = f"папка: {page['workspace']}" if page["workspace"] else ""
+    meta = " · ".join(x for x in (page["status"], page["updated"], folder) if x)
     tail = f" — {page['summary']}" if page["summary"] else ""
     suffix = f" _({meta})_" if meta else ""
     return f"- [{page['name']}]({page['path']}){tail}{suffix}"

@@ -218,6 +218,9 @@ export function ChatScreen({
   // презентационное состояние, WS-события для него — шум), токены/стоимость
   // приходят событиями progress с bridge-прокси.
   const [progress, setProgress] = useState<RunProgress | null>(null);
+  // Что делает прогон прямо сейчас: холодный старт окружения и думающая
+  // минуту модель выглядели одинаково (трейс 06.08.2026).
+  const [phase, setPhase] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   // Живой run этой сессии (от отправки/переподключения до run_finished):
@@ -350,6 +353,10 @@ export function ChatScreen({
     (runId: string) => {
       unsubscribe.current?.();
       unsubscribe.current = subscribeRun(baseUrl, runId, token, (event) => {
+        if (event.type === "phase") {
+          setPhase((event as { text: string }).text);
+          return;
+        }
         if (event.type === "progress") {
           // Прогресс — отдельное состояние строки статуса, в ленту не идёт.
           const { tokens, cost_usd } = event as {
@@ -376,6 +383,7 @@ export function ChatScreen({
     setThreadError(null);
     setSendError(null);
     setProgress(null);
+    setPhase(null);
     setStartedAt(null);
     stickToBottom.current = true; // новая сессия открывается свежим низом
     // Эта сессия теперь известна родителю — общему резолверу больше не за
@@ -417,6 +425,7 @@ export function ChatScreen({
             },
           ]);
           setProgress(null);
+          setPhase(null);
           setStartedAt(Date.now());
           setRunning(true);
           watch(thread.live_run_id);
@@ -553,6 +562,7 @@ export function ChatScreen({
       ]);
       setSendError(null);
       setProgress(null);
+      setPhase(null);
       setStartedAt(Date.now());
       setRunning(true);
       try {
@@ -861,7 +871,11 @@ export function ChatScreen({
           })}
           {running && (
             <p className="chat__hint chat__thinking">
-              <span role="status">Сварог работает…</span>
+              <span role="status">
+                {phase
+                  ? `${phase.charAt(0).toUpperCase()}${phase.slice(1)}…`
+                  : "Сварог работает…"}
+              </span>
               <span aria-hidden="true">
                 {" "}
                 {progressDetail(elapsed, progress)}
