@@ -1502,14 +1502,44 @@ class GatewayService:
 
     # --- конфигурация и секреты (план 2026-07-27) --------------------------
 
+    @staticmethod
+    def _flat_keys(raw: dict[str, Any], prefix: str = "") -> set[str]:
+        """Пути листьев mapping'а в форме `runtime.autonomy` — что он задаёт."""
+        keys: set[str] = set()
+        for key, value in raw.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict):
+                keys |= GatewayService._flat_keys(value, f"{path}.")
+            else:
+                keys.add(path)
+        return keys
+
     @property
     def config_path(self) -> Path:
-        """Файл, который правит интерфейс: project-уровень рядом с workspace."""
+        """Проектный конфиг рядом с рабочей папкой."""
         return self.workspace / PROJECT_CONFIG_NAME
+
+    @property
+    def settings_path(self) -> Path:
+        """Файл, который правит интерфейс (спека 2026-08-06).
+
+        Настройки, провайдеры и MCP — про пользователя и его машину, а не про
+        папку, поэтому пишутся в ~/.svarog/svarog.yaml и действуют во всех
+        корнях. В режиме тенанта user_config_path не задан: там правки
+        остаются в конфиге тенанта.
+        """
+        return self.user_config_path or self.config_path
+
+    def _project_raw(self) -> dict[str, Any]:
+        """Сырой проектный конфиг — чтобы знать, что он перекрывает."""
+        if not self.config_path.is_file():
+            return {}
+        loaded = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
 
     def _config_yaml(self) -> tuple[dict[str, Any], str]:
         """Сырой mapping файла и его текст (для диффа). Нет файла — пусто."""
-        path = self.config_path
+        path = self.settings_path
         if not path.is_file():
             return {}, ""
         text = path.read_text(encoding="utf-8")
@@ -1530,7 +1560,15 @@ class GatewayService:
         except ConfigError:
             # Файл поломан снаружи — показываем снимок, с которым идут run'ы.
             current = self.cfg
-        return describe_config(current, str(self.config_path))
+        # Правим глобальный слой, а действует проектный поверх него: поля,
+        # которые проект перекрывает, помечаем — иначе правка глобального
+        # значения проходит успешно и не даёт никакого эффекта.
+        overridden = (
+            self._flat_keys(self._project_raw())
+            if self.settings_path != self.config_path
+            else set()
+        )
+        return describe_config(current, str(self.settings_path), overridden=overridden)
 
     def _validate_effective(self, project_raw: dict[str, Any]) -> None:
         """Проверить правку так, как её увидит load_config: merge поверх user-уровня.
@@ -1580,7 +1618,10 @@ class GatewayService:
         # apply_values проверяет, что путь вообще разрешён форме.
         merged = apply_values(raw, values)
         try:
-            self._validate_effective(merged)
+            if self.settings_path == self.config_path:
+                self._validate_effective(merged)
+            else:
+                self._validate_effective_user(merged)
         except ValidationError as exc:
             raise ConfigError(str(exc)) from exc
         # Правим текст построчно, а не пересобираем: иначе из файла пропадут
@@ -1592,10 +1633,10 @@ class GatewayService:
         try:
             written = yaml.safe_load(after) or {}
         except yaml.YAMLError as exc:
-            raise ConfigError(f"правка сломала бы {self.config_path}: {exc}") from exc
+            raise ConfigError(f"правка сломала бы {self.settings_path}: {exc}") from exc
         if written != merged:
             raise ConfigError(
-                f"не удалось безопасно отредактировать {self.config_path}: "
+                f"не удалось безопасно отредактировать {self.settings_path}: "
                 "файл написан в форме, которую построчная правка не поддерживает. "
                 "Отредактируйте его вручную."
             )
@@ -1606,7 +1647,7 @@ class GatewayService:
         before, after = self._updated_config_text(values)
         lines = diff_lines(before, after)
         return ConfigDiffView(
-            path=str(self.config_path),
+            path=str(self.settings_path),
             lines=lines,
             changes=sum(1 for line in lines if line.kind != "same"),
         )
@@ -1620,18 +1661,13 @@ class GatewayService:
         """
         view = self.preview_config(values)
         _, after = self._updated_config_text(values)
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(after, encoding="utf-8")
-
-        if await self._any_run_live():
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path.write_text(after, encoding="utf-8")
+        # Глобальный слой общий: соседние корни держат свои снимки конфига.
+        if self.settings_path != self.config_path and self.on_user_config_written is not None:
+            await self.on_user_config_written()
+        if not await self.reload_config():
             return view.model_copy(update={"restart_required": True})
-
-        self.cfg = load_config(project_dir=self.workspace)
-        self._runner = TaskRunner(self.cfg, self.workspace, role=self.role)
-        # Тёплые слоты держат env/MCP, поднятые под прежним конфигом.
-        await self.close_warm_sessions()
-        self._catalog.clear()
-        self._catalog_failures.clear()
         return view
 
     async def _write_deep(
@@ -1650,7 +1686,7 @@ class GatewayService:
         пользовательский слой, и проверять их надо в обратном порядке слияния:
         не «правка поверх пользовательского», а «проектное поверх правки».
         """
-        path = target or self.config_path
+        path = target or self.settings_path
         before = path.read_text(encoding="utf-8") if path.exists() else ""
         after = set_deep_values(before, values)
         for remove_path in removes:
@@ -1871,8 +1907,7 @@ class GatewayService:
         происхождение приходится смотреть в сыром файле: после merge слои уже
         неразличимы.
         """
-        raw, _ = self._config_yaml()
-        servers = (raw.get("mcp") or {}).get("servers")
+        servers = (self._project_raw().get("mcp") or {}).get("servers")
         return set(servers) if isinstance(servers, dict) else set()
 
     def list_mcp(self) -> list[McpServerView]:
@@ -1935,7 +1970,7 @@ class GatewayService:
         # MCP подключается к самому Сварогу: новые серверы уходят в
         # пользовательский слой и работают во всех корнях. В режиме тенанта
         # user_config_path не задан — там запись остаётся в конфиге тенанта.
-        return await self._write_deep(values, target=self.user_config_path)
+        return await self._write_deep(values)
 
     async def remove_mcp(self, name: str) -> ConfigDiffView:
         if name not in self.cfg.mcp.servers:

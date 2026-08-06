@@ -679,3 +679,44 @@ def test_mcp_remove_targets_the_file_that_holds_it(
     user_raw = yaml.safe_load(user_file.read_text()) or {}
     assert "глобальный" not in (user_raw.get("mcp") or {}).get("servers", {})
     assert global_client.get("/mcp").json() == []
+
+
+def test_settings_and_providers_write_globally(
+    global_client: TestClient, global_service: GatewayService, tmp_path: Path
+) -> None:
+    """Настройки и провайдеры уходят в ~/.svarog: они про пользователя, не про папку."""
+    saved = global_client.post("/config", json={"values": {"runtime.max_iterations": 42}})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["path"] == str(tmp_path / ".svarog" / "svarog.yaml")
+
+    added = global_client.post(
+        "/models/providers",
+        json={"name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "llama"},
+    )
+    assert added.status_code == 200, added.text
+
+    user_raw = yaml.safe_load((tmp_path / ".svarog" / "svarog.yaml").read_text())
+    assert user_raw["runtime"]["max_iterations"] == 42
+    assert user_raw["models"]["providers"]["groq"]["model"] == "llama"
+
+    project_raw = yaml.safe_load(global_service.config_path.read_text())
+    assert "groq" not in project_raw["models"]["providers"]
+    assert (project_raw.get("runtime") or {}).get("max_iterations") is None
+
+
+def test_form_marks_fields_the_project_overrides(
+    global_client: TestClient, global_service: GatewayService
+) -> None:
+    """Поле, перекрытое проектным файлом, помечено.
+
+    Иначе человек правит глобальное значение, видит успешную запись и не
+    понимает, почему ничего не изменилось: merge отдаёт проектное.
+    """
+    project = yaml.safe_load(global_service.config_path.read_text())
+    project.setdefault("runtime", {})["autonomy"] = "supervised"
+    global_service.config_path.write_text(yaml.safe_dump(project), encoding="utf-8")
+
+    view = global_client.get("/config").json()
+    fields = {f["path"]: f for section in view["sections"] for f in section["fields"]}
+    assert fields["runtime.autonomy"]["overridden"] is True
+    assert fields["runtime.max_iterations"]["overridden"] is False

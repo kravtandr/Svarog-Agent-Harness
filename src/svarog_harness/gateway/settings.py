@@ -34,6 +34,9 @@ class ConfigFieldView(BaseModel):
     choices: list[str] = []
     minimum: float | None = None
     maximum: float | None = None
+    # Проектный svarog.yaml перекрывает это поле: правка глобального значения
+    # запишется, но в силу не вступит — merge отдаст проектное.
+    overridden: bool = False
 
 
 class ConfigSectionView(BaseModel):
@@ -192,8 +195,16 @@ def _current(cfg: SvarogConfig, path: str) -> Any:
     return value.value if hasattr(value, "value") else value
 
 
-def describe_config(cfg: SvarogConfig, config_path: str) -> ConfigView:
-    """Текущее состояние формы: значения из конфига, ограничения из схемы."""
+def describe_config(
+    cfg: SvarogConfig, config_path: str, overridden: set[str] | None = None
+) -> ConfigView:
+    """Текущее состояние формы: значения из конфига, ограничения из схемы.
+
+    `overridden` — пути, которые перекрывает проектный слой: форма правит
+    глобальный файл, и без пометки такая правка выглядела бы успешной, ничего
+    при этом не меняя.
+    """
+    marked = overridden or set()
     sections: list[ConfigSectionView] = []
     for key, title, entries in _LAYOUT:
         fields: list[ConfigFieldView] = []
@@ -211,6 +222,7 @@ def describe_config(cfg: SvarogConfig, config_path: str) -> ConfigView:
                     choices=choices,
                     minimum=minimum,
                     maximum=maximum,
+                    overridden=path in marked,
                 )
             )
         sections.append(ConfigSectionView(key=key, title=title, fields=fields))

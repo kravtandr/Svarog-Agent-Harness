@@ -23,6 +23,7 @@ const config: ConfigView = {
           choices: ["supervised", "auto", "yolo"],
           minimum: null,
           maximum: null,
+          overridden: false,
         },
         {
           path: "runtime.max_iterations",
@@ -33,6 +34,7 @@ const config: ConfigView = {
           choices: [],
           minimum: 0,
           maximum: null,
+          overridden: false,
         },
         {
           path: "git.require_approval_for_push",
@@ -43,6 +45,7 @@ const config: ConfigView = {
           choices: [],
           minimum: null,
           maximum: null,
+          overridden: false,
         },
       ],
     },
@@ -880,5 +883,23 @@ describe("экран настроек", () => {
     expect(
       await screen.findByText(/вступит в силу.*текущ.*запуск/i),
     ).toBeInTheDocument();
+  });
+  it("поле, перекрытое проектным конфигом, помечено", async () => {
+    const overridden: ConfigView = {
+      ...config,
+      sections: [
+        {
+          ...config.sections[0],
+          fields: [{ ...config.sections[0].fields[0], overridden: true }],
+        },
+      ],
+    };
+    const api = baseApi({ config: vi.fn().mockResolvedValue(overridden) });
+    render(<SettingsScreen api={api} />);
+    // Без пометки правка глобального значения выглядит успешной и не даёт
+    // никакого эффекта: merge отдаёт проектное.
+    await waitFor(() =>
+      expect(screen.getByText(/Перекрыто/)).toBeInTheDocument(),
+    );
   });
 });

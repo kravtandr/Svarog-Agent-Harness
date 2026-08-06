@@ -49,6 +49,9 @@ export interface ConfigField {
   choices: string[];
   minimum: number | null;
   maximum: number | null;
+  /** Проектный svarog.yaml перекрывает это поле: правка глобального значения
+      запишется, но в силу не вступит — merge отдаст проектное. */
+  overridden: boolean;
 }
 
 export interface ConfigSection {
