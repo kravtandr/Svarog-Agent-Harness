@@ -1530,6 +1530,31 @@ class GatewayService:
         """
         return self.user_config_path or self.config_path
 
+    def _not_in_editable_file(self, name: str) -> str:
+        """Провайдера нет ни в одном файле, который правит интерфейс."""
+        if self.settings_path == self.config_path:
+            # Глобальный слой не наш (режим тенанта): правка возможна только
+            # в проектном файле, а провайдер пришёл из ~/.svarog.
+            return (
+                f"провайдер '{name}' описан не в проектном svarog.yaml "
+                "(вероятно, в ~/.svarog/svarog.yaml) — правьте его там"
+            )
+        return (
+            f"провайдер '{name}' не описан ни в {self.settings_path}, "
+            f"ни в {self.config_path} — правьте файл, где он объявлен"
+        )
+
+    def _provider_file(self, name: str) -> Path:
+        """Файл, где объявлен провайдер: правки должны идти именно в него.
+
+        Форма пишет в глобальный слой, но провайдер мог быть объявлен в
+        проектном. Удаление «не из того» файла прошло бы с нулём изменений, а
+        merge продолжил бы отдавать провайдера — молчаливый холостой ход.
+        """
+        if name in (self._project_raw().get("models") or {}).get("providers", {}):
+            return self.config_path
+        return self.settings_path
+
     def _project_raw(self) -> dict[str, Any]:
         """Сырой проектный конфиг — чтобы знать, что он перекрывает."""
         if not self.config_path.is_file():
@@ -1791,22 +1816,14 @@ class GatewayService:
             raise ValueError("новое имя совпадает со старым")
         if new_name in self.cfg.models.providers:
             raise ValueError(f"провайдер '{new_name}' уже существует")
-        raw = (
-            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
-            if self.config_path.exists()
-            else {}
-        )
+        file = self._provider_file(name)
+        raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {} if file.exists() else {}
         models_raw = raw.get("models") or {}
         providers = models_raw.get("providers") or {}
-        # Провайдер может быть описан только в user-уровне конфиге,
-        # тогда запись под новым именем в проектный файл создаст дубликат
-        # (старая запись останется — она не в проектном файле, откуда её
-        # можно было бы удалить).
+        # Переименование = запись под новым именем плюс удаление старого; оба
+        # действия обязаны идти в один файл, иначе останется дубликат.
         if name not in providers:
-            raise ValueError(
-                f"провайдер '{name}' описан не в проектном svarog.yaml "
-                "(вероятно, в ~/.svarog/svarog.yaml) — переименуйте его там"
-            )
+            raise ValueError(self._not_in_editable_file(name))
         dump = provider.model_dump(exclude_defaults=True)
         values: dict[str, Any] = {
             f"models.providers.{new_name}.{key}": value for key, value in dump.items()
@@ -1815,7 +1832,7 @@ class GatewayService:
             values["models.default"] = new_name
         if self.cfg.models.auxiliary == name:
             values["models.auxiliary"] = new_name
-        return await self._write_deep(values, removes=[f"models.providers.{name}"])
+        return await self._write_deep(values, removes=[f"models.providers.{name}"], target=file)
 
     async def remove_provider(self, name: str) -> ConfigDiffView:
         """Удалить запись models.providers; дефолтного и вспомогательного — отказ.
@@ -1834,27 +1851,19 @@ class GatewayService:
                 "нельзя удалить провайдера, назначенного вспомогательным "
                 "(models.auxiliary) — сначала переназначьте его"
             )
-        raw = (
-            yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
-            if self.config_path.exists()
-            else {}
-        )
+        file = self._provider_file(name)
+        raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {} if file.exists() else {}
         models_raw = raw.get("models") or {}
         providers = models_raw.get("providers") or {}
-        # Провайдер может быть описан только в user-уровне конфиге,
-        # тогда удаление из проектного файла будет no-op.
         if name not in providers:
-            raise ValueError(
-                f"провайдер '{name}' описан не в проектном svarog.yaml "
-                "(вероятно, в ~/.svarog/svarog.yaml) — удалите его там"
-            )
+            raise ValueError(self._not_in_editable_file(name))
         # Пустая обёртка (`providers:` без ключей) парсится в None и валит
         # валидацию — удаляя последний ключ проектного файла, снимаем и её.
         if len(providers) <= 1:
             target = "models" if set(models_raw.keys()) <= {"providers"} else "models.providers"
         else:
             target = f"models.providers.{name}"
-        return await self._write_deep({}, removes=[target])
+        return await self._write_deep({}, removes=[target], target=file)
 
     async def set_executor_defaults(
         self, executor: str, provider: str | None = None, model: str | None = None

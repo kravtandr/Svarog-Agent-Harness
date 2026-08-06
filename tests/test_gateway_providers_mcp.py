@@ -720,3 +720,30 @@ def test_form_marks_fields_the_project_overrides(
     fields = {f["path"]: f for section in view["sections"] for f in section["fields"]}
     assert fields["runtime.autonomy"]["overridden"] is True
     assert fields["runtime.max_iterations"]["overridden"] is False
+
+
+def test_removing_project_provider_edits_the_project_file(
+    global_client: TestClient, global_service: GatewayService, tmp_path: Path
+) -> None:
+    """Удаление правит тот файл, где провайдер лежит.
+
+    Форма пишет в глобальный слой, но провайдер мог быть объявлен в проектном.
+    Удаление из глобального файла прошло бы «успешно» с нулём изменений, а
+    merge продолжил бы отдавать провайдера — молчаливый холостой ход.
+    """
+    project = yaml.safe_load(global_service.config_path.read_text())
+    project["models"]["providers"]["lmlocal"] = {
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "qwen",
+    }
+    global_service.config_path.write_text(yaml.safe_dump(project), encoding="utf-8")
+    global_service.cfg = load_config(project_dir=global_service.workspace)
+    assert "lmlocal" in {p["name"] for p in global_client.get("/models").json()}
+
+    resp = global_client.delete("/models/providers/lmlocal")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == str(global_service.config_path)
+
+    left = yaml.safe_load(global_service.config_path.read_text())
+    assert "lmlocal" not in left["models"]["providers"]
+    assert "lmlocal" not in {p["name"] for p in global_client.get("/models").json()}
